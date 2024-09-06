@@ -38,6 +38,8 @@
 
 | Step Description | Image |
 |------------------|-------|
+| The cameras should be mounted to the brackets prior to installing on the main frame | <img src="https://github.com/user-attachments/assets/ddc783cf-b517-4d6e-922e-5c6f892deb92" alt="photo_2024-09-06_10-32-12" style="max-width:600px;"> |
+| The Farka connectors can be seen here, which should be first fastened to the carrier board mounted to the ORIN, and then fed to each camera carefully, note the orientation of the cameras | <img src="https://github.com/user-attachments/assets/057f44cc-a358-4a38-a09b-cb2ac8c96663" alt="photo_2024-09-06_10-33-18" style="max-width:600px;"> |
 | The buck converter is mounted via double sided tape to the opposing side of the battery’s output cables, such that they wrap around and route through a toggle button and then onto the buck | <img src="https://github.com/user-attachments/assets/fc3f7f3f-ce47-4417-b3e9-8ab4e7ab61d1" alt="egg-pink" style="max-width:600px;"> |
 | The audio amplifier is also fastened to the black PCIE Shroud on the AGX ORIN using the same double sided tape | <img src="https://github.com/user-attachments/assets/f5f6ce48-3c79-40b7-8e9d-bad0c5e0fe2f" alt="power_and_amp" style="max-width:600px;"> |
 | The fan mounts can be seen as reversed for two of the 6 camera mounts | <img src="https://github.com/user-attachments/assets/2983d273-11b9-4e04-8711-87b94cdc8786" alt="fan-mount-closeup" style="max-width:600px;"> |

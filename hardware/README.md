@@ -24,12 +24,21 @@
 
 ## Construction Procedure
 
-1. 3D print or Mill the child step files in [egg-parts.stp](https://github.com/robit-man/EGG/blob/main/hardware/egg-parts.stp)
-   
-2. Install Battery using the visual guide, Be sure to assemble the two components below sandwitched on the base mount plate prior to setting battery
-   
-3. Install the plate that mates to the top of the battery, compress onto the battery gently and then position camera mounting blocks around the 6 mount points
+Assemble the following initial structure with 4x 20mm or 25mm m4 bolts, leave the center hole open for the battery corner protector later on
+![step-1](https://github.com/user-attachments/assets/f7a44754-64d0-4c89-b323-158b3dad556b)
 
-4. Seat the Orin on top of the secondary large bracket
+Drop in the battery, and fit the battery hat on top and between the battery bracket
+![step-2](https://github.com/user-attachments/assets/7c6771ae-3190-4195-ac3c-1cdb65b2d383)
 
+Fasten the camera mounts to the battery hat using 14mm m4 bolts, and the battery corner protectors to the bottom bracket via the single screw hole in the center, using 35mm m4 bolts on either side
+![step-3](https://github.com/user-attachments/assets/1f64c5d5-6aaa-404a-81bb-95e0ea1ef430)
+
+Fasten the AGX ORIN seat to the top of the camera mounts
+![step-4](https://github.com/user-attachments/assets/fc89bd90-c9d1-4c74-ac3c-6071cf0f9263)
+
+Place the AGX ORIN atop the seat, and then bolt the agx top straps to the battery straps using 20mm m4 bolts
+![step-5](https://github.com/user-attachments/assets/94aa6438-6361-471f-b4a8-3fa30ac54003)
+
+Install the camera protector faces to the camera mounts using 20mm m4 bolts
+![step-6](https://github.com/user-attachments/assets/1f425bec-9d82-4500-8afb-d50ec117433f)
 

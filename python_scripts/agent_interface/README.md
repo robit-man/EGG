@@ -10,15 +10,18 @@ add the following to startup scripts, or convert to a bash script
 ![image](https://github.com/user-attachments/assets/426b239f-581a-4376-949c-4d57597abcfa)
 
 ```gnome-terminal -- bash -c "cd container_shared && python3 tts_chunk.py"```
+Runs [tts_chunk.py](https://github.com/robit-man/EGG/blob/main/python_scripts/agent_interface/tts_chunk.py) 
 
 ## Run ASR Service
 
 ![image](https://github.com/user-attachments/assets/8f3b9209-89bf-425d-bf9a-be60ddd238a8)
 
 ```gnome-terminal -- bash -c "cd container_shared && python3 asr_echo_check.py"```
+Runs [asr_echo_check.py](https://github.com/robit-man/EGG/blob/main/python_scripts/agent_interface/asr_echo_check.py)
 
 ## Run LLM Service
 
 ![image](https://github.com/user-attachments/assets/bc45a3c5-671a-4fa1-b9f2-73e66bc7ae9c)
 
 ```gnome-terminal -- bash -c "/home/roko/run_default.sh; exec bash"```
+Runs a bash script called [run_default.sh](https://github.com/robit-man/EGG/blob/main/bash_scripts/run_default.sh) which handles [spinning up the LLM](https://github.com/robit-man/EGG/blob/main/python_scripts/agent_interface/llm_settings_demo.py) with permissions 

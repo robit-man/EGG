@@ -24,5 +24,5 @@ You must install RIVA for ASR / TTS Services or incorporate whisper for some scr
 2. Install [jetson-containers](https://github.com/dusty-nv/jetson-containers) and [NANOLLM](https://dusty-nv.github.io/NanoLLM/install.html) by [dusty-nv](https://github.com/dusty-nv)
 3. Install any missing dependencies and [provide console output in issues](https://github.com/robit-man/EGG/issues) for improving this readme!
 
-## To Start TTS / ASR LLM Services
+## Start TTS / ASR LLM Services
 Refer to the [agent_interface folder](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface) to see how we automate the python scripts there.

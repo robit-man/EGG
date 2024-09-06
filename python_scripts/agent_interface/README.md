@@ -1,7 +1,7 @@
 # TTS, ASR, and an LLM in between
 
-1. Install Riva and nano_llm in the intro read-me.
-2. Download and incorporate the pretrained TTS Voice Model from [DavesArmory Huggingface Repo](https://huggingface.co/DavesArmoury/GLaDOS_TTS)
+1. Install [Riva](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64) and [nano_llm](https://dusty-nv.github.io/NanoLLM/install.html) in the intro [readme](https://github.com/robit-man/EGG/blob/main/README.md).
+2. Download and incorporate the [pretrained TTS Voice Model](https://github.com/davesarmoury/GLaDOS?tab=readme-ov-file) from [DavesArmory Huggingface Repo](https://huggingface.co/DavesArmoury/GLaDOS_TTS)
 3. Run all 3 python scripts Via the following bash scripts, for the TTS, ASR, and LLM components
 
 ## Run TTS Service

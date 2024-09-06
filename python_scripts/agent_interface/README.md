@@ -4,6 +4,14 @@
 2. Download and incorporate the [pretrained TTS Voice Model](https://github.com/davesarmoury/GLaDOS?tab=readme-ov-file) from [DavesArmory Huggingface Repo](https://huggingface.co/DavesArmoury/GLaDOS_TTS)
 3. Run all 3 python scripts Via the following bash scripts, for the TTS, ASR, and LLM components
 
+## Get system info
+
+Check available audio devices
+```aplay -l```
+Update audio device [default sink and source](https://web.archive.org/web/20240906045018/https://askubuntu.com/questions/1038490/how-do-you-set-a-default-audio-output-device-in-ubuntu#1038492) to be persistent across reboots
+
+Check system settings for correct default audio devices
+
 ## Run TTS Service
 add the following to [startup applications](https://help.ubuntu.com/stable/ubuntu-help/startup-applications.html.en), or convert to a bash script and run it at startup with [this guide](https://web.archive.org/web/20240906044738/https://medium.com/@girishbhasinofficial/configuring-a-script-to-run-at-startup-on-ubuntu-22-04-ffe1f3e649d1)
 

@@ -24,4 +24,4 @@ Runs [asr_echo_check.py](https://github.com/robit-man/EGG/blob/main/python_scrip
 ![image](https://github.com/user-attachments/assets/bc45a3c5-671a-4fa1-b9f2-73e66bc7ae9c)
 
 ```gnome-terminal -- bash -c "/home/roko/run_default.sh; exec bash"```
-Runs a bash script called [run_default.sh](https://github.com/robit-man/EGG/blob/main/bash_scripts/run_default.sh) which handles [spinning up the LLM](https://github.com/robit-man/EGG/blob/main/python_scripts/agent_interface/llm_settings_demo.py) with permissions 
+Runs a bash script called [run_default.sh](https://github.com/robit-man/EGG/blob/main/bash_scripts/run_default.sh) which handles [spinning up the LLM](https://github.com/robit-man/EGG/blob/main/python_scripts/agent_interface/llm_settings_demo.py) with permissions by way of the password cache from [dummy_script.sh](https://github.com/robit-man/EGG/blob/main/bash_scripts/dummy_script.sh)

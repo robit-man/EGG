@@ -8,6 +8,7 @@
 
 Check available audio devices
 ```aplay -l```
+
 Update audio device [default sink and source](https://web.archive.org/web/20240906045018/https://askubuntu.com/questions/1038490/how-do-you-set-a-default-audio-output-device-in-ubuntu#1038492) to be persistent across reboots
 
 Check system settings for correct default audio devices

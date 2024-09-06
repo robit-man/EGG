@@ -1,5 +1,5 @@
 # EGG
-
+```
 Scripts tested on the following system:
 Jetson AGX ORIN 32BIT DEVKIT
 L4T 35.2.1
@@ -7,9 +7,12 @@ JETPACK 5.1.2
 CUDA 11.4.315
 cuDNN 8.6.
 PYTHON 3.8.10
+```
 
+## To Start TTS / ASR LLM Services
+Refer to the [agent_interface folder](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface)
 
-# Install Dependencies
+## Install Dependencies
 
 You must install RIVA for ASR / TTS Services or incorporate whisper for some scripts to function.
 

@@ -12,6 +12,10 @@ CUDA 11.4.315
 cuDNN 8.6.
 PYTHON 3.8.10
 ```
+## Acquire Parts and Construct
+1. Order all parts in the [bill of materials](https://github.com/robit-man/EGG/blob/main/hardware/README.md)
+2. Print all parts present in the [egg-parts.stp file](https://github.com/robit-man/EGG/blob/main/hardware/egg-parts.stp)
+3. Construct According to the Assembly Guide (WIP)
 
 ## Setup and Remote Access
 1. Determine the appropriate version of Jetpack based on hardware ([e-con systems for example requires 5.1~](https://www.e-consystems.com/nvidia-cameras/jetson-agx-orin-cameras/ar0821-4k-hdr-gmsl2-camera.asp)) and relative Host machine from [this Compatability matrix](https://docs.nvidia.com/sdk-manager/system-requirements/index.html).

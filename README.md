@@ -32,6 +32,7 @@ You must install RIVA for ASR / TTS Services or incorporate whisper for some scr
 ## Start TTS / ASR LLM Services
 Refer to the [agent_interface folder](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface) to see how we automate the python scripts there.
 
-# This Project is a Hardware / Software Collaboration with Fractional Robots, [Hyperspawn](https://github.com/Hyperspawn), and [RokoNetwork](https://x.com/RokoNetwork) ![roko](https://github.com/user-attachments/assets/7072886e-9427-4058-bad9-0fbd4fa2f7f0)
+# This Project is a Hardware / Software Collaboration with Fractional Robots, [Hyperspawn](https://github.com/Hyperspawn), and [RokoNetwork](https://x.com/RokoNetwork) ![image](https://github.com/user-attachments/assets/840da160-a2ec-45d8-a161-5e1caf258eec)
+
 [![Group 2](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/bd13c6f5-7a3f-4262-9891-4259f17abbe0)](https://t.me/fractionalrobots)
 

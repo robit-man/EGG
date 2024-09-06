@@ -14,7 +14,7 @@ PYTHON 3.8.10
 
 ## Setup and Remote Access
 1. Determine the appropriate version of Jetpack based on hardware ([e-con systems for example requires 5.1~](https://www.e-consystems.com/nvidia-cameras/jetson-agx-orin-cameras/ar0821-4k-hdr-gmsl2-camera.asp)) and relative Host machine from [this Compatability matrix](https://docs.nvidia.com/sdk-manager/system-requirements/index.html).
-2. Install Ubuntu on a host machine of the particular version which is compatable to then host Jetson SDK Manager which will be used to [install the desired Jetpack version](https://docs.nvidia.com/sdk-manager/install-with-sdkm-jetson/index.html) on an AGX ORIN
+2. [Install Ubuntu](https://ubuntu.com/download/desktop/thank-you?version=24.04.1&architecture=amd64&lts=true) on a host machine of the particular version which is compatable to then host Jetson SDK Manager which will be used to [install the desired Jetpack version](https://docs.nvidia.com/sdk-manager/install-with-sdkm-jetson/index.html) on an AGX ORIN
 3. Connect to a network and install [NOMACHINE](https://downloads.nomachine.com/download/?id=114&distro=ARM) for arm64 and use machine credentials to access on LAN or port forward!
 
 ## Install Dependencies

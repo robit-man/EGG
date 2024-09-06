@@ -1,4 +1,4 @@
-# EGG
+# 🥚 EGG
 
 A multi-modal data acquisition tool based on an [AGX ORIN](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) with peripherals!
 

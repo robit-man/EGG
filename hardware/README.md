@@ -14,6 +14,8 @@
 
 3. Install the plate that mates to the top of the battery, compress onto the battery gently and then position camera mounting blocks around the 6 mount points
 
+![image](https://github.com/user-attachments/assets/4460c0ae-f122-4d2f-a944-c99a7ad1301f)
+
 ![image](https://github.com/user-attachments/assets/58e27d6b-54fc-48a0-a631-da53992df2b2)
 
 

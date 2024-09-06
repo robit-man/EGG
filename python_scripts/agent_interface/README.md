@@ -12,4 +12,13 @@ add the following to startup scripts, or convert to a bash script
 ```gnome-terminal -- bash -c "cd container_shared && python3 tts_chunk.py"```
 
 ## Run ASR Service
+
+![image](https://github.com/user-attachments/assets/8f3b9209-89bf-425d-bf9a-be60ddd238a8)
+
 ```gnome-terminal -- bash -c "cd container_shared && python3 asr_echo_check.py"```
+
+## Run LLM Service
+
+![image](https://github.com/user-attachments/assets/bc45a3c5-671a-4fa1-b9f2-73e66bc7ae9c)
+
+```gnome-terminal -- bash -c "/home/roko/run_default.sh; exec bash"```

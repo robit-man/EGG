@@ -5,7 +5,7 @@
 3. Run all 3 python scripts Via the following bash scripts, for the TTS, ASR, and LLM components
 
 ## Run TTS Service
-add the following to startup scripts, or convert to a bash script
+add the following to [startup applications](https://help.ubuntu.com/stable/ubuntu-help/startup-applications.html.en), or convert to a bash script and run it at startup with [this guide](https://web.archive.org/web/20240906044738/https://medium.com/@girishbhasinofficial/configuring-a-script-to-run-at-startup-on-ubuntu-22-04-ffe1f3e649d1)
 
 ![image](https://github.com/user-attachments/assets/426b239f-581a-4376-949c-4d57597abcfa)
 

@@ -6,7 +6,9 @@
 
 ## Run TTS Service
 add the following to startup scripts, or convert to a bash script
+
 ![image](https://github.com/user-attachments/assets/426b239f-581a-4376-949c-4d57597abcfa)
+
 ```gnome-terminal -- bash -c "cd container_shared && python3 tts_chunk.py"```
 
 ## Run ASR Service

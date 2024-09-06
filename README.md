@@ -27,7 +27,7 @@ You must install RIVA for ASR / TTS Services or incorporate whisper for some scr
 
 1. Install [RIVA docker service](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64), automate via bash script on startup
 2. Install [jetson-containers](https://github.com/dusty-nv/jetson-containers) and [NANOLLM](https://dusty-nv.github.io/NanoLLM/install.html) by [dusty-nv](https://github.com/dusty-nv)
-3. Install any missing dependencies and [provide console output in issues](https://github.com/robit-man/EGG/issues) for improving this readme!
+3. Install any missing dependencies and [provide console output in issues](https://github.com/robit-man/EGG/issues) for improving this readme. you can also find helpful resources on [jetsonhacks](https://jetsonhacks.com/2023/09/04/use-these-jetson-docker-containers-tutorial/)!
 
 ## Start TTS / ASR LLM Services
 Refer to the [agent_interface folder](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface) to see how we automate the python scripts there.

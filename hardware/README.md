@@ -21,29 +21,13 @@
 - [1kg PLA](https://www.amazon.com/stores/page/2E20608D-8170-49B9-B3F6-E6E303A31716?ingress=2&visitId=61691869-e98c-47f2-92b8-6009e12a5c8b&ref_=ast_bln) or other material of your choice
 - Various [M4 bolts](https://www.amazon.com/FullerKreg-M4-0-7-Alloy-Socket-Finish/dp/B07B2R7LZF?pd_rd_w=seMIU&content-id=amzn1.sym.1c5f8f79-ee2f-4fb3-a1b5-3d8384cdfaf3&pf_rd_p=1c5f8f79-ee2f-4fb3-a1b5-3d8384cdfaf3&pf_rd_r=V1Z8NVCTWJKQA3D9WX55&pd_rd_wg=JEufD&pd_rd_r=21aff4f9-323b-46a1-93b6-df129144a7a1&pd_rd_i=B07B2R7LZF&psc=1&ref_=pd_bap_d_grid_rp_0_31_t), Check thickness of stacked parts in your CAD program of choice
 - [10mm m3 bolts](https://www.amazon.com/Socket-Screws-Bolts-Thread-100pcs/dp/B07CMSBQ11/ref=sr_1_3?dib=eyJ2IjoiMSJ9.8Knz6EvxDQIxJ9y2jaeMjB0ArEg5PHONHTRXyFa4Lnm_hzxgviWp_u4V2MABrocvM3UweVVcNe4UdQWBNSu_8G7mbqL5K88Y1oUXnTKPAfrIuzs8_QlM1gKxQDJEhWvZCYd98RBCn9zbAtQvkyfkKQOLf4-CHExklCjb0T2pUbTHjOKcKpubSnSXv5PmcZ69p8hPhXGSkL2XW-gGfsWyOXrCmbECY8IN-eggy9b16OBD3vBiivfGopnCdr9ec84F_Qfx15M75oVb_nKz69JhuekVKVgqZDaczWmZHfUnzK0._aPHueCerzWwz7hf5MSsDCLQjClTQLAHFZDuLUKEhb0&dib_tag=se&keywords=m3+bolt+hex+10mm&qid=1725601077&s=industrial&sr=1-3) for camera cooling fan mounting
-
 ## Construction Procedure
 
-Assemble the following initial structure with 4x 20mm or 25mm m4 bolts, leave the center hole open for the battery corner protector later on
-
-<img src="https://github.com/user-attachments/assets/f7a44754-64d0-4c89-b323-158b3dad556b" alt="step-1" style="max-width:50%;">
-
-Drop in the battery, and fit the battery hat on top and between the battery bracket
-
-<img src="https://github.com/user-attachments/assets/7c6771ae-3190-4195-ac3c-1cdb65b2d383" alt="step-2" style="max-width:50%;">
-
-Fasten the camera mounts to the battery hat using 14mm m4 bolts, and the battery corner protectors to the bottom bracket via the single screw hole in the center, using 35mm m4 bolts on either side
-
-<img src="https://github.com/user-attachments/assets/1f64c5d5-6aaa-404a-81bb-95e0ea1ef430" alt="step-3" style="max-width:50%;">
-
-Fasten the AGX ORIN seat to the top of the camera mounts
-
-<img src="https://github.com/user-attachments/assets/fc89bd90-c9d1-4c74-ac3c-6071cf0f9263" alt="step-4" style="max-width:50%;">
-
-Place the AGX ORIN atop the seat, and then bolt the agx top straps to the battery straps using 20mm m4 bolts
-
-<img src="https://github.com/user-attachments/assets/94aa6438-6361-471f-b4a8-3fa30ac54003" alt="step-5" style="max-width:50%;">
-
-Install the camera protector faces to the camera mounts using 20mm m4 bolts
-
-<img src="https://github.com/user-attachments/assets/1f425bec-9d82-4500-8afb-d50ec117433f" alt="step-6" style="max-width:50%;">
+| Step Description | Image |
+|------------------|-------|
+| Assemble the following initial structure with 4x 20mm or 25mm m4 bolts, leave the center hole open for the battery corner protector later on | <img src="https://github.com/user-attachments/assets/f7a44754-64d0-4c89-b323-158b3dad556b" alt="step-1" style="max-width:600px;"> |
+| Drop in the battery, and fit the battery hat on top and between the battery bracket | <img src="https://github.com/user-attachments/assets/7c6771ae-3190-4195-ac3c-1cdb65b2d383" alt="step-2" style="max-width:600px;"> |
+| Fasten the camera mounts to the battery hat using 14mm m4 bolts, and the battery corner protectors to the bottom bracket via the single screw hole in the center, using 35mm m4 bolts on either side | <img src="https://github.com/user-attachments/assets/1f64c5d5-6aaa-404a-81bb-95e0ea1ef430" alt="step-3" style="max-width:600px;"> |
+| Fasten the AGX ORIN seat to the top of the camera mounts | <img src="https://github.com/user-attachments/assets/fc89bd90-c9d1-4c74-ac3c-6071cf0f9263" alt="step-4" style="max-width:600px;"> |
+| Place the AGX ORIN atop the seat, and then bolt the agx top straps to the battery straps using 20mm m4 bolts | <img src="https://github.com/user-attachments/assets/94aa6438-6361-471f-b4a8-3fa30ac54003" alt="step-5" style="max-width:600px;"> |
+| Install the camera protector faces to the camera mounts using 20mm m4 bolts | <img src="https://github.com/user-attachments/assets/1f425bec-9d82-4500-8afb-d50ec117433f" alt="step-6" style="max-width:600px;"> |

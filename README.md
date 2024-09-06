@@ -1,5 +1,5 @@
 # 🥚 EGG
-![image](https://github.com/user-attachments/assets/76106cec-d65b-4093-acdd-db0ba125a3af)
+![egg_transparent](https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14)
 
 A multi-modal data acquisition tool based on an [AGX ORIN](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) with peripherals!
 

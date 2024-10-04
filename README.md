@@ -5,12 +5,22 @@ A multi-modal data acquisition tool based on an [AGX ORIN](https://www.nvidia.co
 
 ```
 Scripts tested on the following system:
-Jetson AGX ORIN 32BIT DEVKIT
+Jetson AGX ORIN 32GB DEVKIT
 L4T 35.2.1
 JETPACK 5.1.2
 CUDA 11.4.315
-cuDNN 8.6.
+cuDNN 8.6.*
 PYTHON 3.8.10
+```
+Currently Testing and Refactoring on JETPACK 6
+```
+Scripts tested on the following system:
+Jetson AGX ORIN 32GB DEVKIT
+L4T 36.3.0
+JETPACK 6.0 (rev 2)
+CUDA 12.2
+cuDNN 8.9.4.25
+PYTHON 3.10.12
 ```
 ## Acquire Parts and Construct
 1. Order all parts in the [bill of materials](https://github.com/robit-man/EGG/blob/main/hardware/README.md)

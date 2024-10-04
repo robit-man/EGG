@@ -1,5 +1,3 @@
-install steps egg
-
 ## 1. install [jetpack 6](https://developer.nvidia.com/embedded/jetpack) on Jetson AGX Orin
 
 Use Jetson SDK from a host linux machine with more than 100 gb of storage available

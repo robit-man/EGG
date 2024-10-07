@@ -25,6 +25,13 @@ jetson-containers run $(autotag l4t-pytorch)
 
 e-con systems provides a developer portal with driver downloads in your account.
 
+extract the firmware to a given folder
+
+run
+```
+sudo bash install_binaries.sh 81
+```
+
 
 ## 4. install [riva 2.16.0 ](https://docs.nvidia.com/deeplearning/riva/user-guide/docs/quick-start-guide.html)
 

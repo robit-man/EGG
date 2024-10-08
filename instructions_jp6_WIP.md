@@ -54,13 +54,43 @@ sudo nano /etc/docker/daemon.json
 }
 ```
 
-## 5. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
+## 6. Configure Default Audio Devices (sink and source)
+
+first, list your sinks:
+```
+pactl get-default-sink
+```
+then, list your sources:
+```
+pactl get-default-source
+```
+Now add these lines to both prevent automatic switching of defaults, as well as set default audio devices after first:
+```
+sudo gedit /etc/pulse/default.pa
+
+```
+Then, since we are using a respeaker 2.0:
+```
+### Disable module-switch-on-connect
+unload-module module-switch-on-connect
+
+# Set default sink and source
+set-default-sink alsa_output.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-stereo
+set-default-source alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.multichannel-input
+```
+Save and restart pulseaudio
+```
+pulseaudio -k
+pulseaudio --start
+```
+
+## 6. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
 
 RIVA GLADOS INSTALL
 ```
 sudo docker run --runtime=nvidia -it --rm \
-    -v /home/roko/RIVA/artifacts:/servicemaker-dev \
-    -v /home/roko/RIVA/riva_repo:/data \
+    -v /home/$(whoami)/RIVA/artifacts:/servicemaker-dev \
+    -v /home/$(whoami)/RIVA/riva_repo:/data \
     --entrypoint="/bin/bash" \
      nvcr.io/nvidia/riva/riva-speech:2.13.1-servicemaker-l4t-aarch64
 ```

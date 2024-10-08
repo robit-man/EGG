@@ -10,9 +10,11 @@ Press the two rightmost buttons and hold them down prior to applying power, then
 
 
 ### 1A. [install nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) to access the machine on your network and keep it headless
+To install run:
 ```
 sudo dpkg -i nomachine_8.14.2_1_arm64.deb
 ```
+then make sure to disable your hosts nx option to enable audio streaming and microphone forwarding under Server Settings > Devices
 
 ## 2. install [jetson-containers](https://github.com/dusty-nv/jetson-containers)
 

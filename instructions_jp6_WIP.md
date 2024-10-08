@@ -38,7 +38,15 @@ run
 ```
 sudo bash install_binaries.sh 81
 ```
-
+test
+```
+# Camera 0
+gst-launch-1.0 v4l2src device=/dev/video0 ! \
+    videoconvert ! \
+    videoflip method=clockwise ! \
+    jpegenc ! \
+    multifilesink location=/tmp/latest_frame_0.jpg
+```
 
 ## 4. install [riva 2.16.0 ](https://docs.nvidia.com/deeplearning/riva/user-guide/docs/quick-start-guide.html)
 
@@ -59,6 +67,13 @@ sudo nano /etc/docker/daemon.json
         }
     }
 }
+```
+and
+```
+jetson-containers run -v /home/roko/Shared:/Shared  \
+    -e HUGGINGFACE_TOKEN=<YOUR HF TOKEN> \
+    $(autotag llama-vision) \
+      python3 /Shared/frame-inference-test.py
 ```
 
 ## 6. Configure Default Audio Devices (sink and source)

@@ -9,6 +9,11 @@ Use the provided USBA-USBC cable provided with the ORIN specifically for firmwar
 Press the two rightmost buttons and hold them down prior to applying power, then once power is applied, release the rightmost button still holding the center button, this sets DFU mode
 
 
+### 1A. [install nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) to access the machine on your network and keep it headless
+```
+sudo dpkg -i nomachine_8.14.2_1_arm64.deb
+```
+
 ## 2. install [jetson-containers](https://github.com/dusty-nv/jetson-containers)
 
 install the container tools
@@ -56,7 +61,20 @@ sudo nano /etc/docker/daemon.json
 
 ## 6. Configure Default Audio Devices (sink and source)
 
-first, list your sinks:
+Disable nomachine EnableAudio flag by first:
+```
+sudo gedit /usr/NX/etc/node.cfg
+```
+then search for and change EnableAudio to 0:
+```
+EnableAudio=0
+```
+Restart nx
+```
+sudo /etc/NX/nxserver --restart
+```
+
+list your sinks:
 ```
 pactl get-default-sink
 ```

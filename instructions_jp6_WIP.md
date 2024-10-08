@@ -103,6 +103,20 @@ pulseaudio -k
 pulseaudio --start
 ```
 
+if devices from nomachine are stubborn create a bash script and save it in home:
+```
+#!/bin/bash
+while true; do
+  pactl set-default-source alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.multichannel-input
+  sleep 5
+done
+```
+add this line to startup scripts
+
+```
+gnome-terminal -- bash -c "bash /home/$(whoami)/reset_pulseaudio.sh; exec bash"
+```
+
 ## 6. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
 
 RIVA GLADOS INSTALL

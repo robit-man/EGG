@@ -47,6 +47,15 @@ gst-launch-1.0 v4l2src device=/dev/video0 ! \
     jpegenc ! \
     multifilesink location=/tmp/latest_frame_0.jpg
 ```
+run jetson-containers and load and run python script from [Shared folder found here](https://github.com/robit-man/EGG/blob/main/Shared/frame-inference-test.py)
+```
+jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
+    -e HUGGINGFACE_TOKEN=<YOUR-HF-TOKEN> \
+    $(autotag llama-vision) \
+      python3 /Shared/frame-inference-test.py
+```
+
+
 
 ## 4. install [riva 2.16.0 ](https://docs.nvidia.com/deeplearning/riva/user-guide/docs/quick-start-guide.html)
 
@@ -70,7 +79,7 @@ sudo nano /etc/docker/daemon.json
 ```
 and
 ```
-jetson-containers run -v /home/roko/Shared:/Shared  \
+jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
     -e HUGGINGFACE_TOKEN=<YOUR HF TOKEN> \
     $(autotag llama-vision) \
       python3 /Shared/frame-inference-test.py

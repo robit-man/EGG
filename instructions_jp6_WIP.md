@@ -67,7 +67,6 @@ pactl get-default-source
 Now add these lines to both prevent automatic switching of defaults, as well as set default audio devices after first:
 ```
 sudo gedit /etc/pulse/default.pa
-
 ```
 Then, since we are using a respeaker 2.0:
 ```

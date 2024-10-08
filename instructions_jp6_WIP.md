@@ -103,7 +103,7 @@ pulseaudio -k
 pulseaudio --start
 ```
 
-if devices from nomachine are stubborn create a bash script and save it in home:
+if devices from nomachine are stubborn create a bash script and save it in home as reset_pulseaudio.sh:
 ```
 #!/bin/bash
 while true; do
@@ -114,7 +114,7 @@ done
 add this line to startup scripts
 
 ```
-gnome-terminal -- bash -c "bash /home/$(whoami)/reset_pulseaudio.sh; exec bash"
+/home/$(whoami)/reset_pulseaudio.sh
 ```
 
 ## 6. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 

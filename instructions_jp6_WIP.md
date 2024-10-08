@@ -38,7 +38,7 @@ run
 ```
 sudo bash install_binaries.sh 81
 ```
-test
+Begin streaming frames from camera
 ```
 # Camera 0
 gst-launch-1.0 v4l2src device=/dev/video0 ! \
@@ -47,6 +47,11 @@ gst-launch-1.0 v4l2src device=/dev/video0 ! \
     jpegenc ! \
     multifilesink location=/tmp/latest_frame_0.jpg
 ```
+route frames to localhost route using this script run anywhere on the system
+```
+python3 http-gw.py
+```
+
 run jetson-containers and load and run python script from [Shared folder found here](https://github.com/robit-man/EGG/blob/main/Shared/frame-inference-test.py)
 ```
 jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
@@ -76,13 +81,6 @@ sudo nano /etc/docker/daemon.json
         }
     }
 }
-```
-and
-```
-jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
-    -e HUGGINGFACE_TOKEN=<YOUR HF TOKEN> \
-    $(autotag llama-vision) \
-      python3 /Shared/frame-inference-test.py
 ```
 
 ## 6. Configure Default Audio Devices (sink and source)

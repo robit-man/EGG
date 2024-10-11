@@ -28,7 +28,7 @@ automatically pull & run any container
 jetson-containers run $(autotag l4t-pytorch)
 ```
 
-## 4. install nilecam81 drivers (JP6)
+## 4. install nilecam81 [drivers](https://github.com/robit-man/EGG/tree/main/drivers/JP6FWNC81) (JP6)
 
 e-con systems provides a developer portal with driver downloads in your account.
 

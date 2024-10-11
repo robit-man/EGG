@@ -40,7 +40,9 @@ You must install RIVA for ASR / TTS Services or incorporate whisper for some scr
 3. Install [jetson-containers](https://github.com/dusty-nv/jetson-containers) and [NANOLLM](https://dusty-nv.github.io/NanoLLM/install.html) by [dusty-nv](https://github.com/dusty-nv)
 4. Install any missing dependencies and [provide console output in issues](https://github.com/robit-man/EGG/issues) for improving this readme. you can also find helpful resources on [jetsonhacks](https://jetsonhacks.com/2023/09/04/use-these-jetson-docker-containers-tutorial/)!
 
-## Start TTS / ASR LLM Services
+## Experiment with the [Orchestator / Peripherals](https://github.com/robit-man/EGG/tree/main/Orchestrator) System
+
+## Experiment with TTS / ASR LLM Services
 Refer to the [agent_interface folder](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface) to see how we automate the python scripts there.
 
 # This Project is a Hardware / Software Collaboration with Fractional Robots, [Hyperspawn](https://github.com/Hyperspawn), and [RokoNetwork](https://x.com/RokoNetwork)[![roko-amll](https://github.com/user-attachments/assets/c0e19c4f-6c3b-461c-9866-937424b12c3e)](https://roko.network/)

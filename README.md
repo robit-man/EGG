@@ -10,7 +10,7 @@ Currently undergoing testing and refactoring on **JetPack 6**, with a focus on t
 
 ### Tested Systems
 
-#### Orchestrator Scripts
+#### [Orchestrator Scripts](https://github.com/robit-man/EGG/tree/main/Orchestrator)
 
 - **Hardware**: Jetson AGX ORIN 32GB DEVKIT
 - **Software Versions**:
@@ -20,7 +20,9 @@ Currently undergoing testing and refactoring on **JetPack 6**, with a focus on t
   - cuDNN: 8.9.4.25
   - Python: 3.10.12
 
-#### Agent Interface
+![Orchestrator Diagram](https://github.com/user-attachments/assets/e980b2e7-8d4b-4240-9e68-3d923a72f259)
+
+#### [Agent Interface](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface)
 
 - **Version**: 5.1.2
 - **Hardware**: Jetson AGX ORIN 32GB DEVKIT
@@ -30,8 +32,6 @@ Currently undergoing testing and refactoring on **JetPack 6**, with a focus on t
   - CUDA: 11.4.315
   - cuDNN: 8.6.*
   - Python: 3.8.10
-
-![Orchestrator Diagram](https://github.com/user-attachments/assets/e980b2e7-8d4b-4240-9e68-3d923a72f259)
 
 ---
 

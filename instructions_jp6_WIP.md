@@ -180,5 +180,4 @@ riva-build speech_synthesis \
 riva-deploy /servicemaker-dev/glados.rmir:tlt_encode /data/models
 ```
 ```
-sudo cp -r /riva_repo/models/*. /model_repository/models/
-```
+sudo cp -r /home/$(whoami)/RIVA/riva_repo/models/* /home/$(whoami)/RIVA/model_repository/models/*```

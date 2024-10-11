@@ -1,4 +1,5 @@
 # EGG Orchestrator System Overview
+![image](https://github.com/user-attachments/assets/073d380e-4ca0-4061-9285-ff6f23c353b0)
 
 ## Introduction
 

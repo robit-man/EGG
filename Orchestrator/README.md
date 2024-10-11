@@ -4,7 +4,7 @@
 
 The **EGG (Enhanced Gateway Gateway)** system is a comprehensive framework designed to facilitate seamless communication and data processing between various peripherals within a networked environment. It leverages modular components to handle specific tasks such as speech recognition, text-to-speech synthesis, and data routing. The core components of the EGG system include the **Orchestrator**, **ASR Engine**, **TTS Engine**, and **SLM Engine**. Each component is designed to operate independently while interacting cohesively to provide a robust and scalable solution for real-time data processing and peripheral management.
 
-This overview provides a high-level understanding of each component, their functionalities, and how they interconnect within the EGG system. For detailed information on each component, refer to their respective [README](https://github.com/robit-man/EGG/edit/main/Orchestrator/asr/README.md) files.
+This overview provides a high-level understanding of each component, their functionalities, and how they interconnect within the EGG system. For detailed information on each component, refer to their respective README files.
 
 ---
 
@@ -38,7 +38,7 @@ The **Orchestrator** serves as the central hub of the EGG system. It manages and
 
 ### Further Information
 
-For detailed configuration and operational instructions, refer to the [Orchestrator README](https://github.com/robit-man/EGG/edit/main/Orchestrator/orch/README.md).
+For detailed configuration and operational instructions, refer to the [Orchestrator README](https://github.com/robit-man/EGG/blob/main/Orchestrator/orch/README.md).
 
 ---
 
@@ -62,7 +62,7 @@ The **ASR (Automatic Speech Recognition) Engine** is responsible for converting 
 
 ### Further Information
 
-For detailed configuration and operational instructions, refer to the [ASR Engine README](https://github.com/robit-man/EGG/edit/main/Orchestrator/asr/README.md).
+For detailed configuration and operational instructions, refer to the [ASR Engine README](https://github.com/robit-man/EGG/blob/main/Orchestrator/asr/README.md).
 
 ---
 
@@ -86,7 +86,7 @@ The **TTS (Text-to-Speech) Engine** synthesizes spoken language from written tex
 
 ### Further Information
 
-For detailed configuration and operational instructions, refer to the [TTS Engine README](https://github.com/robit-man/EGG/edit/main/Orchestrator/tts/README.md).
+For detailed configuration and operational instructions, refer to the [TTS Engine README](https://github.com/robit-man/EGG/blob/main/Orchestrator/tts/README.md).
 
 ---
 
@@ -110,7 +110,7 @@ The **SLM (Speech Language Model) Engine** acts as an intermediary that processe
 
 ### Further Information
 
-For detailed configuration and operational instructions, refer to the [SLM Engine README](https://github.com/robit-man/EGG/edit/main/Orchestrator/slm/README.md).
+For detailed configuration and operational instructions, refer to the [SLM Engine README](https://github.com/robit-man/EGG/blob/main/Orchestrator/slm/README.md).
 
 ---
 

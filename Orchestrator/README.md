@@ -1,8 +1,8 @@
-# EGG System Overview
+# EGG Orchestrator System Overview
 
 ## Introduction
 
-The **EGG (Enhanced Gateway Gateway)** system is a comprehensive framework designed to facilitate seamless communication and data processing between various peripherals within a networked environment. It leverages modular components to handle specific tasks such as speech recognition, text-to-speech synthesis, and data routing. The core components of the EGG system include the **Orchestrator**, **ASR Engine**, **TTS Engine**, and **SLM Engine**. Each component is designed to operate independently while interacting cohesively to provide a robust and scalable solution for real-time data processing and peripheral management.
+The **EGG Orchestrator** system is a comprehensive framework designed to facilitate seamless communication and data processing between various peripherals within a networked environment. It leverages modular components to handle specific tasks such as speech recognition, text-to-speech synthesis, and data routing. The core components of the EGG system include the **Orchestrator**, **ASR Engine**, **TTS Engine**, and **SLM Engine**. Each component is designed to operate independently while interacting cohesively to provide a robust and scalable solution for real-time data processing and peripheral management.
 
 This overview provides a high-level understanding of each component, their functionalities, and how they interconnect within the EGG system. For detailed information on each component, refer to their respective README files.
 

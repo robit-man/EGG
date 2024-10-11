@@ -38,16 +38,32 @@ run
 ```
 sudo bash install_binaries.sh 81
 ```
-Begin streaming frames from camera
+# Run the following to expost the camera stream as a route
 ```
-# Camera 0
 gst-launch-1.0 v4l2src device=/dev/video0 ! \
     videoconvert ! \
     videoflip method=clockwise ! \
     jpegenc ! \
     multifilesink location=/tmp/latest_frame_0.jpg
 ```
-route frames to localhost route using this script run anywhere on the system
+# Or Not Rotated
+```
+gst-launch-1.0 v4l2src device=/dev/video0 ! \
+    videoconvert ! \
+    jpegenc ! \
+    multifilesink location=/tmp/latest_frame_0.jpg
+```
+# Or Flipped
+```
+gst-launch-1.0 v4l2src device=/dev/video0 ! \
+    videoconvert ! \
+    videoflip method=rotate-180 ! \
+    jpegenc ! \
+    multifilesink location=/tmp/latest_frame_0.jpg
+
+```
+
+route frames to localhost route using [this script](https://github.com/robit-man/EGG/blob/main/Shared/http-gw.py) run anywhere on the system
 ```
 python3 http-gw.py
 ```
@@ -69,7 +85,7 @@ Sometimes riva_start.sh fails due to docker daemon not recognizing nvidia as def
 "default-runtime": "nvidia",
 
 ```
-sudo nano /etc/docker/daemon.json
+sudo gedit /etc/docker/daemon.json
 ```
 ```
 {
@@ -139,7 +155,7 @@ add this line to startup scripts
 /home/$(whoami)/reset_pulseaudio.sh
 ```
 
-## 6. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
+## 7. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
 
 RIVA GLADOS INSTALL
 ```

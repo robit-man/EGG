@@ -159,6 +159,9 @@ add this line to startup scripts
 
 RIVA GLADOS INSTALL
 ```
+sudo cp glados_hifigan.riva glados_fastpitch.riva /home/$(whoami)/RIVA/artifacts/
+```
+```
 sudo docker run --runtime=nvidia -it --rm \
     -v /home/$(whoami)/RIVA/artifacts:/servicemaker-dev \
     -v /home/$(whoami)/RIVA/riva_repo:/data \

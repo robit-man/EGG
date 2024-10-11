@@ -363,7 +363,7 @@ If NoMachine interferes with audio device settings, create a script to enforce d
 
 ## 8. Download and Install GLaDOS TTS
 
-GLaDOS TTS provides a text-to-speech model for conversational AI applications.
+GLaDOS TTS provides a text-to-speech model for conversational AI applications. Place the .riva files in the RIVA folder (parallel to riva_init.sh).
 
 ### 8.1. Download GLaDOS TTS Files
 

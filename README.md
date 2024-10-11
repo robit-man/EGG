@@ -42,6 +42,9 @@ You must install RIVA for ASR / TTS Services or incorporate whisper for some scr
 
 ## Experiment with the [Orchestator / Peripherals](https://github.com/robit-man/EGG/tree/main/Orchestrator) System
 
+![image](https://github.com/user-attachments/assets/e980b2e7-8d4b-4240-9e68-3d923a72f259)
+
+
 ## Experiment with TTS / ASR LLM Services
 Refer to the [agent_interface folder](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface) to see how we automate the python scripts there.
 

@@ -1,3 +1,5 @@
+## Phasing out, was run on 5.1.2 L4T 35 here for posterity :)
+
 # TTS, ASR, and an LLM in between
 
 1. Install [Riva](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64) and [nano_llm](https://dusty-nv.github.io/NanoLLM/install.html) in the intro [readme](https://github.com/robit-man/EGG/blob/main/README.md).

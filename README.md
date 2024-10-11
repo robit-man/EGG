@@ -12,7 +12,7 @@ CUDA 11.4.315
 cuDNN 8.6.*
 PYTHON 3.8.10
 ```
-Currently Testing and Refactoring on JETPACK 6
+Currently Testing and Refactoring on JETPACK 6, [Read instructions here!](https://github.com/robit-man/EGG/blob/main/instructions_jp6_WIP.md)
 ```
 Scripts tested on the following system:
 Jetson AGX ORIN 32GB DEVKIT

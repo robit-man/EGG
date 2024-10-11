@@ -63,12 +63,12 @@ gst-launch-1.0 v4l2src device=/dev/video0 ! \
 
 ```
 
-route frames to localhost route using [this script](https://github.com/robit-man/EGG/blob/main/Shared/http-gw.py) run anywhere on the system
+### route frames to localhost route using [this script](https://github.com/robit-man/EGG/blob/main/Shared/http-gw.py) run anywhere on the system
 ```
 python3 http-gw.py
 ```
 
-run jetson-containers and load and run python script from [Shared folder found here](https://github.com/robit-man/EGG/blob/main/Shared/frame-inference-test.py)
+### run jetson-containers and load and run python script from [Shared folder found here](https://github.com/robit-man/EGG/blob/main/Shared/frame-inference-test.py)
 ```
 jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
     -e HUGGINGFACE_TOKEN=<YOUR-HF-TOKEN> \
@@ -78,9 +78,19 @@ jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
 
 
 
-## 5. install [riva 2.16.0 ](https://docs.nvidia.com/deeplearning/riva/user-guide/docs/quick-start-guide.html)
+## 5. install [riva 2.16.0 ](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64)
 
-Sometimes riva_start.sh fails due to docker daemon not recognizing nvidia as default, therefor we add the following line to the daemon: 
+### Install from [catalog download](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64/files?version=2.16.0):
+
+Alternatively you can download via NGC from cli if you have it installed
+
+### Riva Download:
+```
+ngc registry resource download-version nvidia/riva/riva_quickstart:2.16.0
+```
+I place the content parallel to riva_start.sh in a folder called 'RIVA' which yields '/home/user/RIVA/riva_start.sh' etc
+
+### Sometimes riva_start.sh fails due to docker daemon not recognizing nvidia as default, therefor we add the following line to the daemon: 
 
 "default-runtime": "nvidia",
 
@@ -99,9 +109,11 @@ sudo gedit /etc/docker/daemon.json
 }
 ```
 
+Now proceed to GLaDOS TTS Model installation in step 7, but first preempt issues that may arise when using nomachine, and virtual audio routing by following the steps to automate selection of the correct audio devices and setting defaults in the next step!
+
 ## 6. Configure Default Audio Devices (sink and source)
 
-Disable nomachine EnableAudio flag by first:
+### Disable nomachine EnableAudio flag by first:
 ```
 sudo gedit /usr/NX/etc/node.cfg
 ```
@@ -141,7 +153,7 @@ pulseaudio -k
 pulseaudio --start
 ```
 
-if devices from nomachine are stubborn create a bash script and save it in home as reset_pulseaudio.sh:
+### if devices from nomachine are stubborn create a bash script and save it in home as reset_pulseaudio.sh:
 ```
 #!/bin/bash
 while true; do
@@ -149,7 +161,7 @@ while true; do
   sleep 5
 done
 ```
-add this line to startup scripts
+### add this line to startup scripts
 
 ```
 /home/$(whoami)/reset_pulseaudio.sh
@@ -158,6 +170,8 @@ add this line to startup scripts
 ## 7. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
 
 RIVA GLADOS INSTALL
+### First Initialize Riva in a folder called RIVA where you extracted the riva files
+
 ```
 sudo cp glados_hifigan.riva glados_fastpitch.riva /home/$(whoami)/RIVA/artifacts/
 ```

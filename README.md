@@ -1,7 +1,7 @@
 # 🥚 EGG
 ![egg_transparent](https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14)
 
-A multi-modal data acquisition tool based on an [AGX ORIN](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) with peripherals!
+## A multi-modal data acquisition, inference, storage, processing, and training / fine-tuning system at the edge based on an [AGX ORIN](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) with peripherals!
 
 ```
 Scripts tested on the following system:

@@ -38,7 +38,7 @@ run
 ```
 sudo bash install_binaries.sh 81
 ```
-# Run the following to expost the camera stream as a route
+### Run the following to expost the camera stream as a route
 ```
 gst-launch-1.0 v4l2src device=/dev/video0 ! \
     videoconvert ! \
@@ -46,14 +46,14 @@ gst-launch-1.0 v4l2src device=/dev/video0 ! \
     jpegenc ! \
     multifilesink location=/tmp/latest_frame_0.jpg
 ```
-# Or Not Rotated
+### Or Not Rotated
 ```
 gst-launch-1.0 v4l2src device=/dev/video0 ! \
     videoconvert ! \
     jpegenc ! \
     multifilesink location=/tmp/latest_frame_0.jpg
 ```
-# Or Flipped
+### Or Flipped
 ```
 gst-launch-1.0 v4l2src device=/dev/video0 ! \
     videoconvert ! \

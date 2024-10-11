@@ -56,7 +56,7 @@ This documentation provides a comprehensive guide on how to install, configure, 
 
 1. **Clone the Repository** (if applicable):
    ```bash
-   git clone https://github.com/your-repo/orchestrator-prototype.git
+   git clone https://github.com/your-repo/orchestrator-prototype](https://github.com/robit-man/EGG.git
    cd orchestrator-prototype/orch
    ```
 

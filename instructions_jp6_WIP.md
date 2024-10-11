@@ -204,4 +204,13 @@ riva-build speech_synthesis \
 riva-deploy /servicemaker-dev/glados.rmir:tlt_encode /data/models
 ```
 ```
-sudo cp -r /home/$(whoami)/RIVA/riva_repo/models/* /home/$(whoami)/RIVA/model_repository/models/*```
+sudo cp -r /home/$(whoami)/RIVA/riva_repo/models/* /home/$(whoami)/RIVA/model_repository/models/*
+```
+
+## 8. Run the Ollama Jetson-Container
+
+### Place this following line in an additional startup program using the Startup Applications Gui in jetpack L4T
+```
+gnome-terminal -- bash -c "jetson-containers run --name ollama $(autotag ollama); exec bash"
+```
+This will run ollama and allow other scripts to take advantage of it during runtime over port 11434

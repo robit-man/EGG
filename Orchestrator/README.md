@@ -61,10 +61,13 @@ The **ASR (Automatic Speech Recognition) Engine** is responsible for converting 
 - **Data Flow**: Receives audio input, processes it, and sends the transcribed text back to the Orchestrator.
 - **Configuration**: Can be configured to adjust parameters like language code, input device, and output mode.
 
-### Further Information
+### Dependency Information
 
-For detailed configuration and operational instructions, refer to the [ASR Engine README](https://github.com/robit-man/EGG/blob/main/Orchestrator/asr/README.md).
+The only dependencies that need to be installed via pip are grpcio, pyaudio, sounddevice, and nvidia-riva-client
 
+```
+pip3 install grpcio pyaudio sounddevice nvidia-riva-client
+```
 ---
 
 ## TTS Engine

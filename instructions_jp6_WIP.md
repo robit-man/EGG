@@ -90,13 +90,19 @@ ngc registry resource download-version nvidia/riva/riva_quickstart:2.16.0
 ```
 I place the content parallel to riva_start.sh in a folder called 'RIVA' which yields '/home/user/RIVA/riva_start.sh' etc
 
-### Sometimes riva_start.sh fails due to docker daemon not recognizing nvidia as default, therefor we add the following line to the daemon: 
+Then initialize riva:
+```
+sudo bash riva_init.sh
+```
+
+Sometimes riva_start.sh fails due to docker daemon not recognizing nvidia as default, therefor we add the following line to the daemon: 
 
 "default-runtime": "nvidia",
 
 ```
 sudo gedit /etc/docker/daemon.json
 ```
+This is how it should look
 ```
 {
     "default-runtime": "nvidia",
@@ -107,6 +113,10 @@ sudo gedit /etc/docker/daemon.json
         }
     }
 }
+```
+Now we should be able to start riva!
+```
+sudo bash riva_start.sh
 ```
 
 Now proceed to GLaDOS TTS Model installation in step 7, but first preempt issues that may arise when using nomachine, and virtual audio routing by following the steps to automate selection of the correct audio devices and setting defaults in the next step!
@@ -170,7 +180,7 @@ done
 ## 7. Download files from [GLaDOS_TTS](https://huggingface.co/DavesArmoury/GLaDOS_TTS/tree/main) 
 
 RIVA GLADOS INSTALL
-### First Initialize Riva in a folder called RIVA where you extracted the riva files
+### First Initialize Riva in a folder called RIVA where you extracted the riva files, this means fixing docker daemon, running both riva_init.sh AND riva_start.sh
 
 ```
 sudo cp glados_hifigan.riva glados_fastpitch.riva /home/$(whoami)/RIVA/artifacts/

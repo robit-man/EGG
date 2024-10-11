@@ -3,16 +3,8 @@
 
 ## A multi-modal data acquisition, inference, storage, processing, and training / fine-tuning system at the edge based on an [AGX ORIN](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) with peripherals!
 
-```
-Scripts tested on the following system:
-Jetson AGX ORIN 32GB DEVKIT
-L4T 35.2.1
-JETPACK 5.1.2
-CUDA 11.4.315
-cuDNN 8.6.*
-PYTHON 3.8.10
-```
-Currently Testing and Refactoring on JETPACK 6, [Read instructions here!](https://github.com/robit-man/EGG/blob/main/instructions_jp6_WIP.md)
+
+Currently Testing and Refactoring on JETPACK 6, focusing on the [Orchestrator](https://github.com/robit-man/EGG/tree/main/Orchestrator) system and adding peripherals, [Read instructions here!](https://github.com/robit-man/EGG/blob/main/instructions_jp6_WIP.md)
 ```
 Scripts tested on the following system:
 Jetson AGX ORIN 32GB DEVKIT
@@ -21,6 +13,16 @@ JETPACK 6.0 (rev 2)
 CUDA 12.2
 cuDNN 8.9.4.25
 PYTHON 3.10.12
+```
+[Agent Interface](https://github.com/robit-man/EGG/tree/main/python_scripts/agent_interface) tested on 5.1.2
+```
+Scripts tested on the following system:
+Jetson AGX ORIN 32GB DEVKIT
+L4T 35.2.1
+JETPACK 5.1.2
+CUDA 11.4.315
+cuDNN 8.6.*
+PYTHON 3.8.10
 ```
 ## Acquire Parts and Construct
 1. Order all parts in the [bill of materials](https://github.com/robit-man/EGG/blob/main/hardware/README.md)

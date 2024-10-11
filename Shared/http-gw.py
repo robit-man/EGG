@@ -2,6 +2,32 @@ from flask import Flask, send_file
 import os
 import threading
 
+
+# Run the following to expost the camera stream as a route
+'''
+gst-launch-1.0 v4l2src device=/dev/video0 ! \
+    videoconvert ! \
+    videoflip method=clockwise ! \
+    jpegenc ! \
+    multifilesink location=/tmp/latest_frame_0.jpg
+'''
+# Or Not Rotated
+'''
+gst-launch-1.0 v4l2src device=/dev/video0 ! \
+    videoconvert ! \
+    jpegenc ! \
+    multifilesink location=/tmp/latest_frame_0.jpg
+'''
+# Or Flipped
+'''
+gst-launch-1.0 v4l2src device=/dev/video0 ! \
+    videoconvert ! \
+    videoflip method=rotate-180 ! \
+    jpegenc ! \
+    multifilesink location=/tmp/latest_frame_0.jpg
+
+'''
+
 # Function to create a Flask app for each stream
 def create_app(stream_id):
     app = Flask(__name__)

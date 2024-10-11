@@ -9,7 +9,7 @@ Use the provided USBA-USBC cable provided with the ORIN specifically for firmwar
 Press the two rightmost buttons and hold them down prior to applying power, then once power is applied, release the rightmost button still holding the center button, this sets DFU mode
 
 
-### 2. [install nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) to access the machine on your network and keep it headless
+## 2. [install nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) to access the machine on your network and keep it headless
 To install run:
 ```
 sudo dpkg -i nomachine_8.14.2_1_arm64.deb

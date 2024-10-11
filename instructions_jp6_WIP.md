@@ -9,14 +9,14 @@ Use the provided USBA-USBC cable provided with the ORIN specifically for firmwar
 Press the two rightmost buttons and hold them down prior to applying power, then once power is applied, release the rightmost button still holding the center button, this sets DFU mode
 
 
-### 1A. [install nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) to access the machine on your network and keep it headless
+### 2. [install nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) to access the machine on your network and keep it headless
 To install run:
 ```
 sudo dpkg -i nomachine_8.14.2_1_arm64.deb
 ```
 then make sure to disable your hosts nx option to enable audio streaming and microphone forwarding under Server Settings > Devices
 
-## 2. install [jetson-containers](https://github.com/dusty-nv/jetson-containers)
+## 3. install [jetson-containers](https://github.com/dusty-nv/jetson-containers)
 
 install the container tools
 ```
@@ -28,7 +28,7 @@ automatically pull & run any container
 jetson-containers run $(autotag l4t-pytorch)
 ```
 
-## 3. install nilecam81 drivers (JP6)
+## 4. install nilecam81 drivers (JP6)
 
 e-con systems provides a developer portal with driver downloads in your account.
 
@@ -78,7 +78,7 @@ jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
 
 
 
-## 4. install [riva 2.16.0 ](https://docs.nvidia.com/deeplearning/riva/user-guide/docs/quick-start-guide.html)
+## 5. install [riva 2.16.0 ](https://docs.nvidia.com/deeplearning/riva/user-guide/docs/quick-start-guide.html)
 
 Sometimes riva_start.sh fails due to docker daemon not recognizing nvidia as default, therefor we add the following line to the daemon: 
 

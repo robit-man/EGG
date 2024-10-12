@@ -65,7 +65,16 @@ The **ASR (Automatic Speech Recognition) Engine** is responsible for converting 
 
 ### Dependency Information
 
-The only dependencies that need to be installed via pip are grpcio, pyaudio, sounddevice, and nvidia-riva-client
+For the run.py in this folder, tmux / tmuxp must be installed. To do so, run
+```
+sudo apt install tmuxp
+```
+Additionally you can install via pip
+```
+pip3 install --user tmuxp
+```
+
+The only additional python dependencies that need to be installed via pip are grpcio, pyaudio, sounddevice, and nvidia-riva-client
 
 ```
 pip3 install grpcio pyaudio sounddevice nvidia-riva-client

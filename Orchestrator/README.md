@@ -67,7 +67,7 @@ The **ASR (Automatic Speech Recognition) Engine** is responsible for converting 
 
 For the run.py in this folder, tmux / tmuxp must be installed. To do so, run
 ```
-sudo apt install tmuxp
+sudo apt install tmux
 ```
 Additionally you can install via pip
 ```

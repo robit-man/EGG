@@ -13,7 +13,8 @@ import os  # For file operations
 from riva.client.proto import riva_tts_pb2, riva_tts_pb2_grpc
 import riva.client
 import uuid
-# ...
+
+# Initialize UUID and script name
 script_uuid = None  # Initialize as None for UUID persistence
 script_name = 'TTS_Engine'
 
@@ -70,13 +71,15 @@ CONFIG_FILE = 'tts.cf'  # Configuration file name
 
 # Default configuration dictionary
 default_config = {
-    'input_mode': 'terminal',   # Options: 'terminal', 'port', 'route'
+    'input_mode': 'port',   # Options: 'terminal', 'port', 'route'
     'input_format': 'chunk',    # Options: 'streaming', 'chunk' (currently only 'chunk' is implemented)
     'output_mode': 'speaker',   # Options: 'speaker', 'file', 'stream'
     'port': str(args.port),     # Store as string for consistency in config file
     'route': '/tts_route',
     'voice': '',                # Voice name; empty string means not set
+    'script_uuid': '',          # UUID for the TTS script
 }
+
 config = {}  # Will be populated by reading config file or using defaults
 
 config_changed = False  # Flag to indicate if config has changed
@@ -91,13 +94,13 @@ SPECIAL_CHAR_MAP = {
 #    '"': 'double quote',
 #    '#': 'hash',
 #    '$': 'dollar',
-#    '%': 'percent',
-#    '&': 'and',
+    '%': 'percent',
+    '&': 'and',
 #    "'": 'apostrophe',
 #    '(': 'left parenthesis',
 #    ')': 'right parenthesis',
 #    '*': 'asterisk',
-#    '+': 'plus',
+    '+': 'plus',
 #    ',': 'comma',
 #    '-': 'dash',
 #    '.': 'dot',
@@ -105,10 +108,10 @@ SPECIAL_CHAR_MAP = {
 #    ':': 'colon',
 #    ';': 'semicolon',
 #    '<': 'less than',
-#    '=': 'equals',
+    '=': 'equals',
 #    '>': 'greater than',
 #    '?': 'question mark',
-#    '@': 'at',
+    '@': 'at',
 #    '[': 'left bracket',
 #    '\\': 'backslash',
 #    ']': 'right bracket',
@@ -252,7 +255,7 @@ def read_config():
                 if '=' in line and not line.startswith('#'):
                     key, value = line.split('=', 1)
                     key = key.strip()
-                    value = value.strip()
+                    value = value.strip().strip('"').strip("'")  # Remove potential quotes
                     if key in config:
                         config[key] = value
                     else:
@@ -264,14 +267,16 @@ def read_config():
         config['script_uuid'] = script_uuid
         write_config(config)
         print(f"[Info] Generated new UUID: {script_uuid} and created {CONFIG_FILE}")
+
     # After reading config, check for 'script_uuid'
-    if 'script_uuid' in config:
+    if 'script_uuid' in config and config['script_uuid']:
         script_uuid = config['script_uuid']
     else:
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config(config)
         print(f"[Info] Generated new UUID: {script_uuid} and updated {CONFIG_FILE}")
+
     # Debug: Print configuration after reading
     print("[Debug] Configuration Loaded:")
     for k, v in config.items():
@@ -494,6 +499,43 @@ def run_config_menu(config, available_voices):
         curses.nocbreak()
         curses.endwin()
 
+# Function to register with the orchestrator
+def register_with_orchestrator():
+    orchestrator_host = 'localhost'
+    orchestrator_command_port = 6000  # As defined in orchestrator's orch.py
+
+    registration_successful = False
+    attempt = 0
+    max_attempts = 12  # Try for up to 1 minute (12 * 5 seconds)
+
+    while not registration_successful and attempt < max_attempts and not cancel_event.is_set():
+        try:
+            with socket.create_connection((orchestrator_host, orchestrator_command_port), timeout=5) as sock:
+                register_command = f"/register {script_name} {script_uuid} {config['port']}\n"
+                sock.sendall(register_command.encode())
+
+                # Wait for acknowledgment
+                response = sock.recv(1024).decode().strip()
+                if response.startswith("/ack"):
+                    ack_data = response.split(' ', 1)[1] if ' ' in response else ''
+                    print(f"Successfully registered with orchestrator. Ack Data: {ack_data}")
+                    registration_successful = True
+                else:
+                    print(f"Registration failed. Response: {response}")
+        except ConnectionRefusedError:
+            print(f"Orchestrator not available at {orchestrator_host}:{orchestrator_command_port}. Retrying in 5 seconds...")
+        except Exception as e:
+            print(f"Error during registration attempt {attempt + 1}: {e}")
+
+        if not registration_successful:
+            attempt += 1
+            time.sleep(5)  # Wait before retrying
+
+    if not registration_successful:
+        print("Failed to register with the orchestrator after multiple attempts. Exiting...")
+        cancel_event.set()
+        exit(1)  # Exit the script as registration is critical
+
 # Input Handler
 def input_handler():
     if config['input_mode'] == 'terminal':
@@ -619,6 +661,9 @@ def main():
     # Read configuration from file
     global config
     config = read_config()
+
+    # Register with the orchestrator
+    register_with_orchestrator()
 
     # Initialize TTS stub
     try:

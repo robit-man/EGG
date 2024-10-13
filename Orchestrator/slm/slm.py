@@ -30,6 +30,7 @@ default_config = {
     'max_tokens': '150',            # Model parameter: max tokens
     'repeat_penalty': '1.0',        # Model parameter: repeat penalty
     'inference_timeout': '5',       # Timeout in seconds for inference
+    'json_filtering': 'true',
 }
 config = {}
 
@@ -414,6 +415,7 @@ def send_exit(client_socket):
 def perform_inference(user_input):
     model_name = config.get('model_name', 'llama3.2:1b')
     system_prompt = config.get('system_prompt', '')
+    json_filtering = config.get('json_filtering', 'true').lower() == 'true'  # Enable JSON filtering based on config
 
     # Model parameters
     try:
@@ -432,9 +434,9 @@ def perform_inference(user_input):
         return
 
     # Build the prompt
-    # Including clear instructions to format output as JSON
     prompt = f"{system_prompt}\n\nUser Input: {user_input}\nOutput:"
 
+    # Set format to "json" if json_filtering is enabled, otherwise no specific format
     payload = {
         "model": model_name,
         "prompt": prompt,
@@ -442,8 +444,8 @@ def perform_inference(user_input):
         "top_p": top_p,
         "repeat_penalty": repeat_penalty,
         "max_tokens": max_tokens,
-        "format": "json",  # Ensures JSON response
-        "stream": False     # Disable streaming for simplified handling
+        "format": "json" if json_filtering else "",
+        "stream": False  # Disable streaming for simplified handling
     }
 
     headers = {
@@ -459,21 +461,40 @@ def perform_inference(user_input):
         print(f"[Performing Inference] Sending request to Ollama API with payload: {json.dumps(payload, indent=2)}")
         response = requests.post(OLLAMA_URL, json=payload, headers=headers, timeout=60)
         print(f"[Ollama API Response Status] {response.status_code}")
+        
         if response.status_code == 200:
             response_json = response.json()
             model_response = response_json.get("response", "")
+
             if not model_response:
                 send_error_response("Error: Empty response from model.")
                 return
-            # Validate that the response is valid JSON
-            try:
-                parsed_json = json.loads(model_response)
-                formatted_response = json.dumps(parsed_json, indent=2)
-                print(f"[Inference Complete] Model Output:\n{formatted_response}\n")
-                send_response(formatted_response)
-            except json.JSONDecodeError as e:
-                print(f"[Error] Parsing model response failed: {e}")
-                send_error_response(f"Error parsing model response: {e}\nResponse Content: {model_response}")
+            
+            # Apply JSON filtering only if json_filtering is enabled
+            if json_filtering:
+                try:
+                    parsed_json = json.loads(model_response)
+
+                    # Extract only the values from the JSON object
+                    def extract_values(data):
+                        if isinstance(data, dict):
+                            return ' '.join(extract_values(v) for v in data.values())
+                        elif isinstance(data, list):
+                            return ' '.join(extract_values(v) for v in data)
+                        else:
+                            return str(data)
+
+                    filtered_response = extract_values(parsed_json)
+                    print(f"[Inference Complete] Model Output (Filtered):\n{filtered_response}\n")
+                    send_response(filtered_response)
+                except json.JSONDecodeError as e:
+                    print(f"[Error] Parsing model response failed: {e}")
+                    send_error_response(f"Error parsing model response: {e}\nResponse Content: {model_response}")
+            else:
+                # If json_filtering is disabled, send raw response
+                print(f"[Inference Complete] Model Output (Raw):\n{model_response}\n")
+                send_response(model_response)
+
         else:
             print(f"[Error] Ollama API responded with status code: {response.status_code}")
             send_error_response(f"Error: {response.status_code} - {response.text}")
@@ -487,6 +508,8 @@ def perform_inference(user_input):
         print(f"[Error] Exception during model inference: {e}")
         traceback.print_exc()
         send_error_response(f"Error during model inference: {e}")
+
+
 
 # Function to send response back to orchestrator
 def send_response(output_data):

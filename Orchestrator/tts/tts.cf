@@ -5,3 +5,4 @@ port=6100
 route=/tts_route
 voice=GLaDOS
 script_uuid=225900b7-a737-49bd-9728-56efdc9e4acb
+command_ports=6000-6005

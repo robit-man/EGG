@@ -90,38 +90,11 @@ output_channels = 1  # Mono audio for TTS output
 
 # Mapping of special characters to their spelled-out versions
 SPECIAL_CHAR_MAP = {
-#    '!': 'exclamation mark',
-#    '"': 'double quote',
-#    '#': 'hash',
-#    '$': 'dollar',
     '%': 'percent',
     '&': 'and',
-#    "'": 'apostrophe',
-#    '(': 'left parenthesis',
-#    ')': 'right parenthesis',
-#    '*': 'asterisk',
     '+': 'plus',
-#    ',': 'comma',
-#    '-': 'dash',
-#    '.': 'dot',
-#    '/': 'slash',
-#    ':': 'colon',
-#    ';': 'semicolon',
-#    '<': 'less than',
     '=': 'equals',
-#    '>': 'greater than',
-#    '?': 'question mark',
     '@': 'at',
-#    '[': 'left bracket',
-#    '\\': 'backslash',
-#    ']': 'right bracket',
-#    '^': 'caret',
-#    '_': 'underscore',
-#    '`': 'backtick',
-#    '{': 'left brace',
-#    '|': 'pipe',
-#    '}': 'right brace',
-#    '~': 'tilde',
 }
 
 # Regular expression patterns
@@ -135,18 +108,9 @@ def number_to_words(n):
         return 'zero'
 
     # Define words for numbers
-    ones = [
-        '', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
-        'nine'
-    ]
-    teens = [
-        'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
-        'sixteen', 'seventeen', 'eighteen', 'nineteen'
-    ]
-    tens = [
-        '', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy',
-        'eighty', 'ninety'
-    ]
+    ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']
+    teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+    tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
     # Expanded list to include very large numbers
     thousands = [
         '', 'thousand', 'million', 'billion', 'trillion', 'quadrillion',
@@ -180,7 +144,6 @@ def number_to_words(n):
         'septennonagintillion', 'octononagintillion', 'novemnonagintillion',
         'centillion'
     ]
-
     words = []
     num_str = str(n)
     num_length = len(num_str)
@@ -248,6 +211,11 @@ def replace_special_characters_and_numbers(text):
 
     return text
 
+# Function to split text into sentences
+def split_text_into_sentences(text):
+    """Split text into sentences based on common sentence-ending punctuation."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())  # Split on sentence boundaries
+    return sentences
 
 # Function to read configuration from file
 def read_config():
@@ -345,47 +313,49 @@ def tts_generation_and_playback(tts_stub, selected_voice):
             processed_text = replace_special_characters_and_numbers(text)
             print(f"Processed text: {processed_text}")
 
-            # Split long text into smaller chunks to prevent server timeouts
-            text_chunks = split_text_into_chunks(processed_text, max_chunk_size=200)  # Adjust chunk size as needed
+            # Split the text into sentences before processing to avoid overloading the model
+            sentences = split_text_into_sentences(processed_text)
 
-            for chunk in text_chunks:
-                req = riva_tts_pb2.SynthesizeSpeechRequest(
-                    text=chunk,
-                    language_code=selected_voice['language'],
-                    encoding=riva.client.AudioEncoding.LINEAR_PCM,
-                    sample_rate_hz=sample_rate,
-                    voice_name=selected_voice['name']
-                )
+            for sentence in sentences:
+                text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
 
-                # Retry mechanism
-                retries = 3
-                for attempt in range(retries):
-                    try:
-                        # Increased timeout to 15 seconds to avoid premature deadline exceeded errors
-                        resp = tts_stub.Synthesize(req, timeout=15)  # Adjust the timeout as needed
-                        audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
+                for chunk in text_chunks:
+                    req = riva_tts_pb2.SynthesizeSpeechRequest(
+                        text=chunk,
+                        language_code=selected_voice['language'],
+                        encoding=riva.client.AudioEncoding.LINEAR_PCM,
+                        sample_rate_hz=sample_rate,
+                        voice_name=selected_voice['name']
+                    )
 
-                        if output_mode == 'speaker':
-                            stream.write(audio_samples.tobytes())
-                        elif output_mode == 'file':
-                            output_file.write(resp.audio)
-                        elif output_mode == 'stream':
-                            # Implement streaming output
-                            pass
+                    retries = 3
+                    for attempt in range(retries):
+                        try:
+                            # Increased timeout to 15 seconds to avoid premature deadline exceeded errors
+                            resp = tts_stub.Synthesize(req, timeout=15)  # Adjust the timeout as needed
+                            audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
 
-                        # Small sleep to prevent buffer overruns
-                        time.sleep(0.05)
-                        break  # Exit retry loop if successful
-                    except grpc.RpcError as e:
-                        if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                            print(f"Attempt {attempt + 1}/{retries}: TTS deadline exceeded. Retrying...")
-                            time.sleep(1)  # Small delay before retrying
-                        else:
-                            print(f"TTS generation failed: {e.details()}")
-                            break  # Exit if it's not a deadline error
-                    except Exception as e:
-                        print(f"An unexpected error occurred: {e}")
-                        break  # Exit retry loop for unexpected errors
+                            if output_mode == 'speaker':
+                                stream.write(audio_samples.tobytes())
+                            elif output_mode == 'file':
+                                output_file.write(resp.audio)
+                            elif output_mode == 'stream':
+                                # Implement streaming output
+                                pass
+
+                            # Small sleep to prevent buffer overruns
+                            time.sleep(0.05)
+                            break  # Exit retry loop if successful
+                        except grpc.RpcError as e:
+                            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                                print(f"Attempt {attempt + 1}/{retries}: TTS deadline exceeded. Retrying...")
+                                time.sleep(1)  # Small delay before retrying
+                            else:
+                                print(f"TTS generation failed: {e.details()}")
+                                break  # Exit if it's not a deadline error
+                        except Exception as e:
+                            print(f"An unexpected error occurred: {e}")
+                            break  # Exit retry loop for unexpected errors
 
     if output_mode == 'speaker':
         stream.stop_stream()
@@ -393,7 +363,6 @@ def tts_generation_and_playback(tts_stub, selected_voice):
         p.terminate()
     elif output_mode == 'file':
         output_file.close()
-
 
 # Function to split text into manageable chunks
 def split_text_into_chunks(text, max_chunk_size=200):

@@ -72,19 +72,21 @@ def read_config():
                                 config[key] = json.loads(value)
                             except json.JSONDecodeError:
                                 config[key] = []
+                                log_message(f"Invalid JSON for peripherals in {CONFIG_FILE}. Resetting to empty list.")
                         else:
                             config[key] = value
                     else:
                         print(f"Unknown configuration key: {key}")
     else:
         write_config()
-    # Removed the redundant json.loads call
-    # try:
-    #     config['peripherals'] = json.loads(config['peripherals'])
-    # except json.JSONDecodeError:
-    #     config['peripherals'] = []
+    # Ensure consistent UUID
+    if 'script_uuid' in config and config['script_uuid']:
+        orchestrator_uuid = config['script_uuid']
+    else:
+        orchestrator_uuid = str(uuid.uuid4())
+        config['script_uuid'] = orchestrator_uuid
+        write_config()
     return config
-
 
 
 def write_config():
@@ -523,34 +525,53 @@ def handle_incoming_data(peripheral_uuid, data):
 
 
 def command_listener():
-    command_port = int(config.get('command_port', '6000'))
+    command_ports = [6000, 6001, 6002, 6003, 6004, 6005]  # Define your port range here
     host = '0.0.0.0'
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, command_port))
-            s.listen(5)
-            log_message(f"Command listener started on {host}:{command_port}")
-            while True:
-                conn, addr = s.accept()
-                log_message(f"Received connection from {addr}")
-                threading.Thread(target=handle_client_connection, args=(conn, addr), daemon=True).start()
-    except Exception as e:
-        log_message(f"Error in command_listener: {e}")
+    
+    def listen_on_port(port):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Enable address reuse
+                s.bind((host, port))
+                s.listen(5)
+                log_message(f"Command listener started on {host}:{port}")
+                while True:
+                    try:
+                        conn, addr = s.accept()
+                        log_message(f"Received connection from {addr} on port {port}")
+                        threading.Thread(target=handle_client_connection, args=(conn, addr), daemon=True).start()
+                    except socket.error as e:
+                        log_message(f"Socket error on port {port}: {e}")
+        except Exception as e:
+            log_message(f"Error in command_listener on port {port}: {e}")
 
+    # Start a listener thread for each port in the range
+    for port in command_ports:
+        threading.Thread(target=listen_on_port, args=(port,), daemon=True).start()
 
 def data_listener():
-    data_port = int(config.get('data_port', '6001'))
+    data_ports = [6001, 6002, 6003, 6004, 6005, 6006]  # Define your data port range here
     host = '0.0.0.0'
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, data_port))
-            s.listen(5)
-            log_message(f"Data listener started on {host}:{data_port}")
-            while True:
-                conn, addr = s.accept()
-                threading.Thread(target=handle_data_connection, args=(conn, addr), daemon=True).start()
-    except Exception as e:
-        log_message(f"Error in data_listener: {e}")
+    
+    def listen_on_port(port):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Enable address reuse
+                s.bind((host, port))
+                s.listen(5)
+                log_message(f"Data listener started on {host}:{port}")
+                while True:
+                    try:
+                        conn, addr = s.accept()
+                        threading.Thread(target=handle_data_connection, args=(conn, addr), daemon=True).start()
+                    except socket.error as e:
+                        log_message(f"Socket error on data port {port}: {e}")
+        except Exception as e:
+            log_message(f"Error in data_listener on port {port}: {e}")
+
+    # Start a listener thread for each port in the range
+    for port in data_ports:
+        threading.Thread(target=listen_on_port, args=(port,), daemon=True).start()
 
 
 def handle_client_connection(conn, addr):
@@ -572,6 +593,7 @@ def handle_client_connection(conn, addr):
             except socket.timeout:
                 continue
             except Exception as e:
+                log_message(f"Error handling client {addr}: {e}")
                 break
 
 
@@ -596,6 +618,7 @@ def handle_data_connection(conn, addr):
             except socket.timeout:
                 continue
             except Exception as e:
+                log_message(f"Error handling data connection from {addr}: {e}")
                 break
 
 
@@ -632,20 +655,32 @@ def main_overview():
         height, width = stdscr.getmaxyx()
         # Display title
         title = "Orchestrator Overview"
-        stdscr.attron(curses.A_BOLD | curses.A_UNDERLINE)
-        stdscr.addstr(1, (width - len(title)) // 2, title)
-        stdscr.attroff(curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            stdscr.attron(curses.A_BOLD | curses.A_UNDERLINE)
+            stdscr.addstr(1, (width - len(title)) // 2, title)
+            stdscr.attroff(curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass  # Handle cases where window size is too small
 
         # Display session UUID in top right
         session_uuid_str = f"Session UUID: {orchestrator_uuid}"
         if len(session_uuid_str) < width - 1:
-            stdscr.addstr(1, width - len(session_uuid_str) - 2, session_uuid_str)
+            try:
+                stdscr.addstr(1, width - len(session_uuid_str) - 2, session_uuid_str)
+            except curses.error:
+                pass
         else:
             truncated_uuid = (session_uuid_str[:width - 5] + '...') if len(session_uuid_str) > width else session_uuid_str
-            stdscr.addstr(1, width - len(truncated_uuid) - 2, truncated_uuid)
+            try:
+                stdscr.addstr(1, width - len(truncated_uuid) - 2, truncated_uuid)
+            except curses.error:
+                pass
 
         # Display peripherals
-        stdscr.addstr(3, 2, "Peripherals:", curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            stdscr.addstr(3, 2, "Peripherals:", curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
         with peripherals_lock:
             for idx, peripheral in enumerate(config['peripherals']):
                 color = peripheral_colors.get(peripheral['name'].split('_')[0], 0)
@@ -660,10 +695,16 @@ def main_overview():
                     truncated_line = line[:width - 7] + '...'
                 else:
                     truncated_line = line
-                stdscr.addstr(4 + idx, 4, truncated_line, color_attr)
+                try:
+                    stdscr.addstr(4 + idx, 4, truncated_line, color_attr)
+                except curses.error:
+                    pass  # Handle cases where window size is too small
 
         # Display routes
-        stdscr.addstr(6 + len(config['peripherals']), 2, "Routes:", curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            stdscr.addstr(6 + len(config['peripherals']), 2, "Routes:", curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
         with routes_lock:
             for idx, route in enumerate(routes):
                 incoming_name = get_peripheral_name_by_uuid(route['incoming'])
@@ -677,28 +718,46 @@ def main_overview():
                 in_color = peripheral_colors.get(incoming_name.split('_')[0], 0)
                 out_color = peripheral_colors.get(outgoing_name.split('_')[0], 0)
                 route_line = f"{route['name']}: "
-                stdscr.addstr(7 + len(config['peripherals']) + idx, 4, route_line)
+                try:
+                    stdscr.addstr(7 + len(config['peripherals']) + idx, 4, route_line)
+                except curses.error:
+                    pass
                 # Truncate incoming name if necessary
                 incoming_display = incoming_name
                 if len(incoming_display) > width - 20:
                     incoming_display = (incoming_display[:width - 23] + '...') if len(incoming_display) > width - 20 else incoming_display
-                if in_color != 0:
-                    stdscr.addstr(incoming_display, curses.color_pair(in_color))
-                else:
-                    stdscr.addstr(incoming_display)
-                stdscr.addstr(" -> ")
+                try:
+                    if in_color != 0:
+                        stdscr.addstr(incoming_display, curses.color_pair(in_color))
+                    else:
+                        stdscr.addstr(incoming_display)
+                except curses.error:
+                    pass
+                try:
+                    stdscr.addstr(" -> ")
+                except curses.error:
+                    pass
                 # Truncate outgoing name if necessary
                 outgoing_display = outgoing_name
                 if len(outgoing_display) > width - 20:
                     outgoing_display = (outgoing_display[:width - 23] + '...') if len(outgoing_display) > width - 20 else outgoing_display
-                if out_color != 0:
-                    stdscr.addstr(outgoing_display, curses.color_pair(out_color))
-                else:
-                    stdscr.addstr(outgoing_display)
-                stdscr.addstr(f" | Last Used: {last_used_str}")
+                try:
+                    if out_color != 0:
+                        stdscr.addstr(outgoing_display, curses.color_pair(out_color))
+                    else:
+                        stdscr.addstr(outgoing_display)
+                except curses.error:
+                    pass
+                try:
+                    stdscr.addstr(f" | Last Used: {last_used_str}")
+                except curses.error:
+                    pass
 
         # Display activity log
-        stdscr.addstr(9 + len(config['peripherals']) + len(routes), 2, "Recent Activity:", curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            stdscr.addstr(9 + len(config['peripherals']) + len(routes), 2, "Recent Activity:", curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
         log_start_line = 10 + len(config['peripherals']) + len(routes)
         max_log_lines = height - log_start_line - 4
         with threading.Lock():
@@ -708,11 +767,17 @@ def main_overview():
             log_line = f"[{time_str}] {message}"
             if len(log_line) > width - 4:
                 log_line = log_line[:width - 7] + '...'
-            stdscr.addstr(log_start_line + idx, 4, log_line)
+            try:
+                stdscr.addstr(log_start_line + idx, 4, log_line)
+            except curses.error:
+                pass  # Handle cases where window size is too small
 
         # Display instructions
         instruction = "Press 'm' to open the menu."
-        stdscr.addstr(height - 2, 2, instruction, curses.A_DIM)
+        try:
+            stdscr.addstr(height - 2, 2, instruction, curses.A_DIM)
+        except curses.error:
+            pass
 
         stdscr.refresh()
 
@@ -741,19 +806,28 @@ def main_menu():
         stdscr.clear()
         height, width = stdscr.getmaxyx()
         title = "Orchestrator Menu"
-        stdscr.attron(curses.A_BOLD | curses.A_UNDERLINE)
-        stdscr.addstr(1, (width - len(title)) // 2, title)
-        stdscr.attroff(curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            stdscr.attron(curses.A_BOLD | curses.A_UNDERLINE)
+            stdscr.addstr(1, (width - len(title)) // 2, title)
+            stdscr.attroff(curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
 
         for idx, row in enumerate(menu_items):
             x = (width - len(row)) // 2
             y = 3 + idx
             if idx == current_row:
-                stdscr.attron(curses.color_pair(1))
-                stdscr.addstr(y, x, row)
-                stdscr.attroff(curses.color_pair(1))
+                try:
+                    stdscr.attron(curses.color_pair(1))
+                    stdscr.addstr(y, x, row)
+                    stdscr.attroff(curses.color_pair(1))
+                except curses.error:
+                    pass
             else:
-                stdscr.addstr(y, x, row)
+                try:
+                    stdscr.addstr(y, x, row)
+                except curses.error:
+                    pass
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -964,7 +1038,10 @@ def prompt_user(prompt_text):
     """Prompts the user for input in a separate curses window. Returns None if ESC is pressed."""
     stdscr.clear()
     height, width = stdscr.getmaxyx()
-    stdscr.addstr(1, 2, prompt_text)
+    try:
+        stdscr.addstr(1, 2, prompt_text)
+    except curses.error:
+        pass
     stdscr.refresh()
     curses.echo()
     curses.curs_set(1)
@@ -977,16 +1054,22 @@ def prompt_user(prompt_text):
             return None
         elif key in [10, 13]:  # Enter key
             break
-        elif key == curses.KEY_BACKSPACE or key == 127:
+        elif key in [curses.KEY_BACKSPACE, 127, 8]:
             if len(input_str) > 0:
                 input_str = input_str[:-1]
                 y, x = 3, len(input_str) + 2
-                stdscr.addch(3, x, ' ')
-                stdscr.move(3, x)
+                try:
+                    stdscr.move(3, x)
+                    stdscr.delch(3, x)
+                except curses.error:
+                    pass
         else:
             if 0 <= key <= 255:
                 input_str += chr(key)
-                stdscr.addch(3, len(input_str) + 1, key)
+                try:
+                    stdscr.addch(3, len(input_str) + 1, key)
+                except curses.error:
+                    pass
     curses.noecho()
     curses.curs_set(0)
     return input_str.strip()
@@ -998,16 +1081,25 @@ def select_item(prompt_text, options):
     while True:
         stdscr.clear()
         height, width = stdscr.getmaxyx()
-        stdscr.addstr(0, 0, prompt_text, curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            stdscr.addstr(0, 0, prompt_text, curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
         for idx, option in enumerate(options):
             x = 2
             y = 2 + idx
             if idx == current_row:
-                stdscr.attron(curses.color_pair(1))
-                stdscr.addstr(y, x, option)
-                stdscr.attroff(curses.color_pair(1))
+                try:
+                    stdscr.attron(curses.color_pair(1))
+                    stdscr.addstr(y, x, option)
+                    stdscr.attroff(curses.color_pair(1))
+                except curses.error:
+                    pass
             else:
-                stdscr.addstr(y, x, option)
+                try:
+                    stdscr.addstr(y, x, option)
+                except curses.error:
+                    pass
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -1049,13 +1141,22 @@ def display_message(title, message):
     stdscr.clear()
     height, width = stdscr.getmaxyx()
     lines = message.split('\n')
-    stdscr.attron(curses.A_BOLD | curses.A_UNDERLINE)
-    stdscr.addstr(1, (width - len(title)) // 2, title)
-    stdscr.attroff(curses.A_BOLD | curses.A_UNDERLINE)
+    try:
+        stdscr.attron(curses.A_BOLD | curses.A_UNDERLINE)
+        stdscr.addstr(1, max((width - len(title)) // 2, 0), title)
+        stdscr.attroff(curses.A_BOLD | curses.A_UNDERLINE)
+    except curses.error:
+        pass
     for idx, line in enumerate(lines):
         if 3 + idx < height - 2:
-            stdscr.addstr(3 + idx, 2, line)
-    stdscr.addstr(height - 2, 2, "Press any key to return to the overview.")
+            try:
+                stdscr.addstr(3 + idx, 2, line)
+            except curses.error:
+                pass
+    try:
+        stdscr.addstr(height - 2, 2, "Press any key to return to the overview.")
+    except curses.error:
+        pass
     stdscr.refresh()
     stdscr.getch()
 

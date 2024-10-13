@@ -21,7 +21,7 @@ default_config = {
     'output_format': 'streaming',   # Options: 'streaming', 'chunk'
     'port_range': '6200-6300',
     'orchestrator_host': 'localhost',
-    'orchestrator_port': '6000',
+    'orchestrator_ports': '6000-6005',  # Updated to handle multiple ports
     'route': '/slm',
     'script_uuid': '',              # Initialize as empty; will be set in read_config()
     'system_prompt': "You Respond Conversationally",
@@ -123,7 +123,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='SLM Engine Peripheral')
     parser.add_argument('--port-range', type=str, help='Port range to use for connections')
     parser.add_argument('--orchestrator-host', type=str, help='Orchestrator host address')
-    parser.add_argument('--orchestrator-port', type=str, help='Orchestrator command port')
+    parser.add_argument('--orchestrator-ports', type=str, help='Comma-separated list or range of orchestrator command ports (e.g., 6000,6001,6002 or 6000-6005)')
     parser.add_argument('--model-name', type=str, help='Name of the language model to use')
     parser.add_argument('--system-prompt', type=str, help='System prompt for the model')
     parser.add_argument('--temperature', type=str, help='Model parameter: temperature')
@@ -138,8 +138,8 @@ def parse_args():
         config['port_range'] = args.port_range
     if args.orchestrator_host:
         config['orchestrator_host'] = args.orchestrator_host
-    if args.orchestrator_port:
-        config['orchestrator_port'] = args.orchestrator_port
+    if args.orchestrator_ports:
+        config['orchestrator_ports'] = args.orchestrator_ports
     if args.model_name:
         config['model_name'] = args.model_name
     if args.system_prompt:
@@ -200,58 +200,81 @@ def register_with_orchestrator(port):
     global registered
     if registered:
         print("[Info] Already registered with the orchestrator. Skipping registration.")
-        return
+        return True
     host = config.get('orchestrator_host', 'localhost')
-    try:
-        port_orch = int(config.get('orchestrator_port', '6000'))
-    except ValueError:
-        print(f"[Error] Invalid orchestrator port: {config.get('orchestrator_port')}")
-        return
+    orchestrator_ports_str = config.get('orchestrator_ports', '6000-6005')
+    orchestrator_command_ports = []
+
+    # Parse orchestrator_ports which can be a range like '6000-6005' or a list '6000,6001,6002'
+    for port_entry in orchestrator_ports_str.split(','):
+        port_entry = port_entry.strip()
+        if '-' in port_entry:
+            try:
+                start_port, end_port = map(int, port_entry.split('-'))
+                orchestrator_command_ports.extend(range(start_port, end_port + 1))
+            except ValueError:
+                print(f"Invalid orchestrator port range: {port_entry}")
+        elif port_entry.isdigit():
+            orchestrator_command_ports.append(int(port_entry))
+        else:
+            print(f"Invalid orchestrator port entry: {port_entry}")
+
+    if not orchestrator_command_ports:
+        print("[Error] No valid orchestrator command ports found.")
+        return False
+
     message = f"/register {script_name} {script_uuid} {port}\n"
     max_retries = 5
     retry_delay = 1
     for attempt in range(max_retries):
-        try:
-            print(f"[Attempt {attempt + 1}] Registering with orchestrator at {host}:{port_orch}...")
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5)  # 5 seconds timeout
-            s.connect((host, port_orch))
-            s.sendall(message.encode())
-            print(f"[Info] Sent registration message: {message.strip()}")
-            # Receive acknowledgment
-            data = s.recv(1024)
-            if data:
-                ack_message = data.decode().strip()
-                print(f"[Info] Received acknowledgment: {ack_message}")
-                if isinstance(ack_message, str) and ack_message.startswith('/ack'):
-                    tokens = ack_message.split()
-                    if len(tokens) == 2 and tokens[0] == '/ack':
-                        try:
-                            data_port = tokens[1]  # Keep as string
-                            config['data_port'] = data_port
-                            write_config(config)
-                            print(f"[Info] Registered successfully. Data port: {data_port}")
-                            registered = True
-                            s.close()
-                            return
-                        except ValueError:
-                            print(f"[Error] Invalid data port received in acknowledgment: {tokens[1]}")
+        for orch_port in orchestrator_command_ports:
+            try:
+                print(f"[Attempt {attempt + 1}] Registering with orchestrator at {host}:{orch_port}...")
+                with socket.create_connection((host, orch_port), timeout=5) as s:
+                    s.sendall(message.encode())
+                    print(f"[Info] Sent registration message: {message.strip()}")
+                    # Receive acknowledgment
+                    data = s.recv(1024)
+                    if data:
+                        ack_message = data.decode().strip()
+                        print(f"[Info] Received acknowledgment: {ack_message}")
+                        if isinstance(ack_message, str) and ack_message.startswith('/ack'):
+                            tokens = ack_message.split()
+                            if len(tokens) == 2 and tokens[0] == '/ack':
+                                try:
+                                    data_port = tokens[1]  # Keep as string
+                                    config['data_port'] = data_port
+                                    write_config(config)
+                                    print(f"[Info] Registered successfully. Data port: {data_port}")
+                                    registered = True
+                                    return True
+                                except ValueError:
+                                    print(f"[Error] Invalid data port received in acknowledgment: {tokens[1]}")
+                            else:
+                                print(f"[Error] Unexpected acknowledgment format: {ack_message}")
+                        else:
+                            print(f"[Error] Invalid acknowledgment type: {type(ack_message)}")
                     else:
-                        print(f"[Error] Unexpected acknowledgment format: {ack_message}")
-                else:
-                    print(f"[Error] Invalid acknowledgment type: {type(ack_message)}")
-            s.close()
-            print(f"[Warning] No acknowledgment received. Retrying in {retry_delay} seconds...")
-        except socket.timeout:
-            print("[Error] Connection to orchestrator timed out.")
-        except ConnectionRefusedError:
-            print("[Error] Connection refused by orchestrator.")
-        except Exception as e:
-            print(f"[Error] Exception during registration: {e}")
-            traceback.print_exc()
+                        print(f"[Warning] No acknowledgment received from orchestrator at {host}:{orch_port}.")
+            except socket.timeout:
+                print(f"[Error] Connection to orchestrator at {host}:{orch_port} timed out.")
+            except ConnectionRefusedError:
+                print(f"[Error] Connection refused by orchestrator at {host}:{orch_port}.")
+            except Exception as e:
+                print(f"[Error] Exception during registration with orchestrator at {host}:{orch_port}: {e}")
+                traceback.print_exc()
+        print(f"Retrying registration in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
         time.sleep(retry_delay)
         retry_delay *= 2  # Exponential backoff
+
     print("[Error] Max retries reached. Could not register with orchestrator.")
+    if config['input_mode'] == 'terminal':
+        print("Failed to register with the orchestrator after multiple attempts. Entering terminal mode.")
+        return False  # Allow fallback to terminal mode
+    else:
+        print("Failed to register with the orchestrator after multiple attempts. Exiting...")
+        cancel_event.set()
+        exit(1)  # Exit the script as registration is critical
 
 # Start server to handle incoming connections
 def start_server():
@@ -279,12 +302,14 @@ def start_server():
         return
 
     # Register with orchestrator
-    register_with_orchestrator(port)
+    registration_successful = register_with_orchestrator(port)
 
-    # Check if registered before proceeding
-    if not registered:
-        print("[Error] Registration failed. Server will not start.")
-        server_socket.close()
+    if not registration_successful and config['input_mode'] == 'terminal':
+        # Fallback to terminal mode
+        terminal_input()
+        return
+    elif not registration_successful:
+        # If not in terminal mode, exit
         return
 
     server_socket.listen(5)
@@ -299,9 +324,9 @@ def start_server():
         except socket.timeout:
             continue
         except Exception as e:
-            print(f"[Error] Error accepting connections: {e}")
-            traceback.print_exc()
-            break
+            if not cancel_event.is_set():
+                print(f"[Error] Error accepting connections: {e}")
+                traceback.print_exc()
 
     server_socket.close()
     print("[Info] Server shut down.")
@@ -508,8 +533,6 @@ def perform_inference(user_input):
         print(f"[Error] Exception during model inference: {e}")
         traceback.print_exc()
         send_error_response(f"Error during model inference: {e}")
-
-
 
 # Function to send response back to orchestrator
 def send_response(output_data):

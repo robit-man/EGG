@@ -8,6 +8,9 @@
 
 Currently undergoing testing and refactoring on **JetPack 6**, with a focus on the [Orchestrator](https://github.com/robit-man/EGG/tree/main/Orchestrator) system and the integration of additional peripherals. For detailed instructions, refer to the [Installation Guide](https://github.com/robit-man/EGG/blob/main/instructions_jp6_WIP.md).
 
+
+[![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
+
 ### Tested Systems
 
 #### [Orchestrator Scripts](https://github.com/robit-man/EGG/tree/main/Orchestrator)

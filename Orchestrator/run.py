@@ -95,7 +95,7 @@ def create_tmuxp_config(scripts, session_name='scripts_session', panes_per_windo
 
     for idx, script in enumerate(scripts):
         # Use absolute paths to avoid path issues
-        pane_command = f"cd {script['folder']} && python3 {script['script']}"
+        pane_command = f"cd {script['folder']} && while true; do python3 {script['script']}; sleep 5; done"
         window["panes"].append({
             "shell_command": pane_command
         })

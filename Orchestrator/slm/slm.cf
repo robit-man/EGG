@@ -14,5 +14,6 @@ top_p=0.9
 max_tokens=150
 repeat_penalty=1.0
 inference_timeout=5
-port=6201
+json_filtering=true
+port=6200
 data_port=6001

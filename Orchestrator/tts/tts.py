@@ -227,11 +227,16 @@ def number_to_words(n):
 
 # Function to replace special characters and numbers with their spelled-out versions
 def replace_special_characters_and_numbers(text):
-    # Replace special characters
+    # Replace special characters except for specific ones where spaces are not wanted
     def special_char_replacer(match):
         char = match.group(0)
-        return ' ' + SPECIAL_CHAR_MAP.get(char, char) + ' '
+        # Only add spaces around certain characters
+        if char in SPECIAL_CHAR_MAP:
+            return ' ' + SPECIAL_CHAR_MAP.get(char, char) + ' '
+        # Keep characters like ' and ? without spaces
+        return char
 
+    # Use regular expression to substitute special characters
     text = SPECIAL_CHAR_PATTERN.sub(special_char_replacer, text)
 
     # Replace numbers
@@ -242,6 +247,7 @@ def replace_special_characters_and_numbers(text):
     text = NUMBER_PATTERN.sub(number_replacer, text)
 
     return text
+
 
 # Function to read configuration from file
 def read_config():
@@ -350,30 +356,36 @@ def tts_generation_and_playback(tts_stub, selected_voice):
                     sample_rate_hz=sample_rate,
                     voice_name=selected_voice['name']
                 )
-                try:
-                    # Reduced timeout to move on quickly if the server doesn't respond
-                    resp = tts_stub.Synthesize(req, timeout=5)  # Set timeout to 5 seconds
-                    audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
 
-                    if output_mode == 'speaker':
-                        stream.write(audio_samples.tobytes())
-                    elif output_mode == 'file':
-                        output_file.write(resp.audio)
-                    elif output_mode == 'stream':
-                        # Implement streaming output
-                        pass
+                # Retry mechanism
+                retries = 3
+                for attempt in range(retries):
+                    try:
+                        # Increased timeout to 15 seconds to avoid premature deadline exceeded errors
+                        resp = tts_stub.Synthesize(req, timeout=15)  # Adjust the timeout as needed
+                        audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
 
-                    # Small sleep to prevent buffer overruns
-                    time.sleep(0.05)
-                except grpc.RpcError as e:
-                    # Check for Triton timeout error
-                    if "Streaming timed out" in e.details():
-                        print("Triton model timed out during inference. Skipping this chunk.")
-                        continue  # Move on to the next chunk
-                    else:
-                        print(f"TTS generation failed: {e}")
-                except Exception as e:
-                    print(f"An unexpected error occurred: {e}")
+                        if output_mode == 'speaker':
+                            stream.write(audio_samples.tobytes())
+                        elif output_mode == 'file':
+                            output_file.write(resp.audio)
+                        elif output_mode == 'stream':
+                            # Implement streaming output
+                            pass
+
+                        # Small sleep to prevent buffer overruns
+                        time.sleep(0.05)
+                        break  # Exit retry loop if successful
+                    except grpc.RpcError as e:
+                        if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                            print(f"Attempt {attempt + 1}/{retries}: TTS deadline exceeded. Retrying...")
+                            time.sleep(1)  # Small delay before retrying
+                        else:
+                            print(f"TTS generation failed: {e.details()}")
+                            break  # Exit if it's not a deadline error
+                    except Exception as e:
+                        print(f"An unexpected error occurred: {e}")
+                        break  # Exit retry loop for unexpected errors
 
     if output_mode == 'speaker':
         stream.stop_stream()
@@ -381,6 +393,7 @@ def tts_generation_and_playback(tts_stub, selected_voice):
         p.terminate()
     elif output_mode == 'file':
         output_file.close()
+
 
 # Function to split text into manageable chunks
 def split_text_into_chunks(text, max_chunk_size=200):

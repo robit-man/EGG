@@ -78,12 +78,13 @@ def read_config():
                         print(f"Unknown configuration key: {key}")
     else:
         write_config()
-    # Load peripherals from config
-    try:
-        config['peripherals'] = json.loads(config['peripherals'])
-    except json.JSONDecodeError:
-        config['peripherals'] = []
+    # Removed the redundant json.loads call
+    # try:
+    #     config['peripherals'] = json.loads(config['peripherals'])
+    # except json.JSONDecodeError:
+    #     config['peripherals'] = []
     return config
+
 
 
 def write_config():

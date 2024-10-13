@@ -332,7 +332,7 @@ def tts_generation_and_playback(tts_stub, selected_voice):
                     for attempt in range(retries):
                         try:
                             # Increased timeout to 15 seconds to avoid premature deadline exceeded errors
-                            resp = tts_stub.Synthesize(req, timeout=3)  # Adjust the timeout as needed
+                            resp = tts_stub.Synthesize(req, timeout=15)  # Adjust the timeout as needed
                             audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
 
                             if output_mode == 'speaker':

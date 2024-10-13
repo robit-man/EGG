@@ -2,14 +2,17 @@
 
 ![Egg Transparent](https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14)
 
+## Quick Start
+
+[![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
+[![Install Riva](https://img.shields.io/badge/Install%20Riva-blue?style=for-the-badge)](https://your-link-to-riva-install-script)
+[![Install Jetson Containers](https://img.shields.io/badge/Install%20Jetson%20Containers-orange?style=for-the-badge)](https://your-link-to-jetson-containers-install-script)
+
 ## Overview
 
 **EGG** is a multi-modal data acquisition, inference, storage, processing, and training/fine-tuning system deployed at the edge. Built on the [NVIDIA Jetson AGX Orin](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) platform, EGG integrates various peripherals to deliver comprehensive AI capabilities.
 
 Currently undergoing testing and refactoring on **JetPack 6**, with a focus on the [Orchestrator](https://github.com/robit-man/EGG/tree/main/Orchestrator) system and the integration of additional peripherals. For detailed instructions, refer to the [Installation Guide](https://github.com/robit-man/EGG/blob/main/instructions_jp6_WIP.md).
-
-
-[![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
 
 ### Tested Systems
 

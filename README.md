@@ -7,10 +7,15 @@
 [![Install Riva](https://img.shields.io/badge/Install%20Riva-blue?style=for-the-badge)](https://your-link-to-riva-install-script)
 [![Install Jetson Containers](https://img.shields.io/badge/Install%20Jetson%20Containers-orange?style=for-the-badge)](https://your-link-to-jetson-containers-install-script)
 [![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
+### How to Install and Run
 
+To install and run the Orchestrator, simply copy and paste the following command into your terminal:
+
+[![Copy Command](https://img.shields.io/badge/Copy%20and%20Run%20Command-brightgreen?style=for-the-badge)](#)
 
 ```bash
 curl -O https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh && chmod +x install_and_run_orchestrator.sh && ./install_and_run_orchestrator.sh
+
 ```
 
 ## Overview

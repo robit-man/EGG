@@ -1,0 +1,5 @@
+known_ports=2000-8000
+scan_interval=5
+command_port=6000
+data_port=6001
+peripherals=[{"name": "SLM_Engine", "uuid": "5714ad06-a9f8-461a-b7dc-8faf07e6de6c", "config": "", "port": 6201, "last_seen": 1728785246.4801016}, {"name": "TTS_Engine", "uuid": "225900b7-a737-49bd-9728-56efdc9e4acb", "config": "input_mode=port\ninput_format=streaming\noutput_mode=speaker\nport=6100\nroute=/tts_route\nvoice=GLaDOS\nscript_uuid=225900b7-a737-49bd-9728-56efdc9e4acb\nEOF", "port": 6100, "last_seen": 1728785301.909746}, {"name": "ASR_Engine", "uuid": "82bd4826-1936-4a4c-9e5b-6f8c25ae9be6", "config": "port=6200\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_port=6000\nlanguage_code=en-US\nuse_ssl=False\nssl_cert=\nserver=localhost:50051\ninput_device=\nsample_rate=16000\nchunk_size=1600\nscript_uuid=82bd4826-1936-4a4c-9e5b-6f8c25ae9be6\nEOF", "port": 6200, "last_seen": 1728785301.9221618}]

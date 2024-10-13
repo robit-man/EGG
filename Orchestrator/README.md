@@ -22,6 +22,27 @@ This overview provides a high-level understanding of each component, their funct
 
 ## Orchestrator
 
+To Pull only the Orchestrator subdirectory perform the following commands
+
+```
+# Create a new directory for the sparse clone
+mkdir EGG_Orchestrator
+cd EGG_Orchestrator
+
+# Initialize a new Git repository
+git init
+
+# Add the remote repository
+git remote add origin https://github.com/robit-man/EGG.git
+
+# Configure sparse-checkout to include only the Orchestrator directory
+git sparse-checkout init --cone
+git sparse-checkout set Orchestrator
+
+# Pull the contents of the sparse checkout
+git pull origin main
+```
+
 ### Description
 
 The **Orchestrator** serves as the central hub of the EGG system. It manages and coordinates interactions between various peripherals, ensuring efficient data flow and task execution. The Orchestrator handles registration of peripherals, route management, and acts as the primary interface for command and control operations.

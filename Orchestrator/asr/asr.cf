@@ -1,0 +1,12 @@
+port=6200
+port_range=6200-6300
+orchestrator_host=localhost
+orchestrator_port=6000
+language_code=en-US
+use_ssl=False
+ssl_cert=
+server=localhost:50051
+input_device=
+sample_rate=16000
+chunk_size=1600
+script_uuid=82bd4826-1936-4a4c-9e5b-6f8c25ae9be6

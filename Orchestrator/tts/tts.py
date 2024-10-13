@@ -109,8 +109,10 @@ def number_to_words(n):
 
     # Define words for numbers
     ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']
-    teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
-    tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']
+    teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
+             'sixteen', 'seventeen', 'eighteen', 'nineteen']
+    tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty',
+            'sixty', 'seventy', 'eighty', 'ninety']
     # Expanded list to include very large numbers
     thousands = [
         '', 'thousand', 'million', 'billion', 'trillion', 'quadrillion',
@@ -277,6 +279,13 @@ def write_config(config):
 # Lock for thread-safe operations
 config_lock = threading.Lock()
 
+# Function to clear the tts_queue
+def clear_queue(q):
+    """Clears all items from the given queue."""
+    with q.mutex:
+        q.queue.clear()
+    print("[Info] TTS queue has been cleared.")
+
 # Generate TTS and Playback
 def tts_generation_and_playback(tts_stub, selected_voice):
     output_mode = config['output_mode']
@@ -301,6 +310,21 @@ def tts_generation_and_playback(tts_stub, selected_voice):
         print("Invalid output mode.")
         return
 
+    # Warm-up call to avoid latency on first inference
+    dummy_req = riva_tts_pb2.SynthesizeSpeechRequest(
+        text="Warm up call",
+        language_code=selected_voice['language'],
+        encoding=riva.client.AudioEncoding.LINEAR_PCM,
+        sample_rate_hz=sample_rate,
+        voice_name=selected_voice['name']
+    )
+    try:
+        print("[Info] Performing warm-up inference...")
+        tts_stub.Synthesize(dummy_req, timeout=15)
+        print("[Info] Warm-up completed successfully.")
+    except grpc.RpcError as e:
+        print(f"[Warning] Warm-up failed: {e.details()}")
+
     while not cancel_event.is_set():
         try:
             text = tts_queue.get(timeout=1)
@@ -317,7 +341,11 @@ def tts_generation_and_playback(tts_stub, selected_voice):
             sentences = split_text_into_sentences(processed_text)
 
             for sentence in sentences:
-                text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
+                # Further split sentences if they exceed 400 characters
+                if len(sentence) > 400:
+                    text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
+                else:
+                    text_chunks = [sentence]
 
                 for chunk in text_chunks:
                     req = riva_tts_pb2.SynthesizeSpeechRequest(
@@ -332,7 +360,7 @@ def tts_generation_and_playback(tts_stub, selected_voice):
                     for attempt in range(retries):
                         try:
                             # Increased timeout to 15 seconds to avoid premature deadline exceeded errors
-                            resp = tts_stub.Synthesize(req, timeout=15)  # Adjust the timeout as needed
+                            resp = tts_stub.Synthesize(req, timeout=15)
                             audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
 
                             if output_mode == 'speaker':
@@ -453,13 +481,19 @@ def run_config_menu(config, available_voices):
                 current_row += 1
             elif key == curses.KEY_LEFT:
                 # Change option to previous
-                current_option_idx = menu[current_row]['options'].index(menu[current_row]['current']) if menu[current_row]['current'] in menu[current_row]['options'] else 0
+                try:
+                    current_option_idx = menu[current_row]['options'].index(menu[current_row]['current'])
+                except ValueError:
+                    current_option_idx = 0
                 if current_option_idx > 0:
                     current_option_idx -= 1
                 menu[current_row]['current'] = menu[current_row]['options'][current_option_idx]
             elif key == curses.KEY_RIGHT:
                 # Change option to next
-                current_option_idx = menu[current_row]['options'].index(menu[current_row]['current']) if menu[current_row]['current'] in menu[current_row]['options'] else 0
+                try:
+                    current_option_idx = menu[current_row]['options'].index(menu[current_row]['current'])
+                except ValueError:
+                    current_option_idx = -1
                 if current_option_idx < len(menu[current_row]['options']) - 1:
                     current_option_idx += 1
                 menu[current_row]['current'] = menu[current_row]['options'][current_option_idx]
@@ -533,7 +567,7 @@ def input_handler():
 # Terminal Input Mode
 def terminal_input():
     global config_changed
-    print("Enter text to synthesize (type /config to enter configuration mode, /exit to quit):")
+    print("Enter text to synthesize (type /config to enter configuration mode, /cancel to clear the queue, /exit to quit):")
     while True:
         user_input = input("> ")
         if user_input.strip() == '/config':
@@ -545,6 +579,9 @@ def terminal_input():
             # Write updated configuration to file
             write_config(config)
             break
+        elif user_input.strip() == '/cancel':
+            clear_queue(tts_queue)
+            print("TTS queue has been cleared.")
         elif user_input.strip() == '/exit':
             cancel_event.set()
             break
@@ -577,6 +614,9 @@ def handle_port_client(client_socket, addr):
             client_socket.sendall(response.encode())
         elif data == '/config':
             client_socket.send("Entering configuration mode not supported over port.\n".encode())
+        elif data == '/cancel':
+            clear_queue(tts_queue)
+            client_socket.sendall(b"TTS queue has been cleared.\n")
         elif data == '/exit':
             client_socket.sendall(b"Exiting TTS Engine.\n")
             cancel_event.set()
@@ -608,6 +648,16 @@ def route_input():
                     self.send_header('Content-Type', 'text/plain')
                     self.end_headers()
                     self.wfile.write(response.encode())
+                elif post_data == '/cancel':
+                    clear_queue(tts_queue)
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"TTS queue has been cleared.\n")
+                elif post_data == '/exit':
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"Exiting TTS Engine.\n")
+                    cancel_event.set()
                 else:
                     print(f"Received text via HTTP POST: {post_data}")
                     tts_queue.put(post_data)
@@ -628,7 +678,7 @@ def route_input():
 
     try:
         while not cancel_event.is_set():
-            pass
+            time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:

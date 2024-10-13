@@ -10,10 +10,7 @@
 
 
 ```bash
-curl -O https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh
-chmod +x install_and_run_orchestrator.sh
-./install_and_run_orchestrator.sh
-
+curl -O https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh && chmod +x install_and_run_orchestrator.sh && ./install_and_run_orchestrator.sh
 ```
 
 ## Overview

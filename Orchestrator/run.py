@@ -7,6 +7,7 @@ import yaml
 import tempfile
 import subprocess
 import shutil
+import time
 
 # Define the necessary tmux configurations to be added locally
 LOCAL_TMUX_CONFIG_LINES = [
@@ -47,6 +48,20 @@ LOCAL_TMUX_CONFIG_LINES = [
     "",
     "# Customize status bar to include mode",
     'set -g status-left "#[fg=green]#{session_name} #[fg=yellow]@mode"',
+    # Removed incomplete binding lines to prevent configuration errors
+    # These lines were causing tmux to malfunction by interfering with mouse interactions
+    # "bind -n MouseDown1Pane select-pane -t=",
+    # "bind -n MouseDown3Pane display-menu -T \"tmux Menu\" \\",
+    # '    "Split Horizontally" "split-window -h" \\',
+    # '    "Split Vertically"   "split-window -v" \\',
+    # '    "New Window"         "new-window" \\',
+    # '    "Kill Pane"          "kill-pane" \\',
+    # '    "Kill Window"        "kill-window" \\',
+    # '    "Rename Window"      "command-prompt \'rename-window %%\'" \\',
+    # '    "Choose Session"     "switch-client -t \'%%\'" \\',
+    # '    "Detach"             "detach-client" \\',
+    # '    "Reload Config"      "source-file ~/.tmux.conf" \\',
+    # '    "Cancel"             ""',
 ]
 
 def get_script_folders(parent_dir):
@@ -65,7 +80,7 @@ def get_script_folders(parent_dir):
 def create_tmuxp_config(scripts, session_name='scripts_session', panes_per_window=4):
     """
     Creates a tmuxp configuration dictionary.
-    Organizes scripts into windows with a specified number of panes per window.
+    Organizes scripts into a single window with a specified number of panes.
     """
     config = {
         "session_name": session_name,
@@ -73,27 +88,19 @@ def create_tmuxp_config(scripts, session_name='scripts_session', panes_per_windo
     }
 
     window = {
-        "window_name": f"window_{len(config['windows']) + 1}",
-        "layout": "tiled",  # You can change this to 'even-horizontal', 'even-vertical', etc.
+        "window_name": f"window_1",
+        "layout": "tiled",  # 'tiled' layout arranges panes in a grid
         "panes": []
     }
 
     for idx, script in enumerate(scripts):
+        # Use absolute paths to avoid path issues
         pane_command = f"cd {script['folder']} && python3 {script['script']}"
         window["panes"].append(pane_command)
+        print(f"Prepared pane command: {pane_command}")
 
-        # When panes_per_window is reached, add the window and start a new one
-        if (idx + 1) % panes_per_window == 0:
-            config["windows"].append(window)
-            window = {
-                "window_name": f"window_{len(config['windows']) + 1}",
-                "layout": "tiled",
-                "panes": []
-            }
-
-    # Add any remaining panes to the last window
-    if window["panes"]:
-        config["windows"].append(window)
+    # Ensure only one window is created with four panes
+    config["windows"].append(window)
 
     return config
 
@@ -108,16 +115,18 @@ def save_config_to_tempfile(config):
     print(f"tmuxp configuration written to {config_path}")
     return config_path
 
+def is_tool_installed(tool):
+    """
+    Check if a tool is installed and available in PATH.
+    """
+    return shutil.which(tool) is not None
+
 def is_tmux_installed():
     """
     Checks if tmux is installed and accessible.
     Returns True if installed, False otherwise.
     """
-    try:
-        subprocess.check_output(["tmux", "-V"], stderr=subprocess.STDOUT)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+    return is_tool_installed('tmux')
 
 def session_exists(session_name):
     """
@@ -150,6 +159,14 @@ def load_tmuxp_session(config_path, session_name):
         print("tmuxp session loaded successfully.")
     except subprocess.CalledProcessError as e:
         print(f"Failed to load tmuxp session: {e}")
+        sys.exit(1)
+    
+    # Source the local tmux.conf to apply configurations
+    try:
+        subprocess.check_call(["tmux", "source-file", str(project_dir / "tmux.conf"), "-t", session_name])
+        print("Loaded local tmux.conf into the session.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to source local tmux.conf: {e}")
         sys.exit(1)
 
 def create_local_tmux_conf(project_dir):
@@ -192,8 +209,26 @@ def create_local_tmux_conf(project_dir):
     else:
         print(f"No updates needed for local tmux.conf at {tmux_conf_path}. All configurations already present.")
 
+def open_gnome_terminal(session_name):
+    """
+    Open gnome-terminal and attach to the specified tmux session.
+    """
+    try:
+        subprocess.Popen([
+            'gnome-terminal',
+            '--',
+            'bash',
+            '-c',
+            f'tmux attach-session -t {session_name}; exec bash'
+        ])
+        print(f"Opened gnome-terminal attached to tmux session '{session_name}'.")
+    except Exception as e:
+        print(f"Failed to open gnome-terminal: {e}")
+        sys.exit(1)
+
 def main():
     # Ensure the script is run from its directory
+    global project_dir  # To make it accessible in load_tmuxp_session
     project_dir = Path.cwd()
     print(f"Scanning directory: {project_dir}")
 
@@ -215,7 +250,7 @@ def main():
         print(f"Prepared script '{script_path}' for tmuxp.")
 
     # Step 2: Create tmuxp config
-    panes_per_window = 4  # You can adjust this number as needed
+    panes_per_window = 4  # Since we want four panes in one window
     session_name = "scripts_session"  # Consistent session name
     tmuxp_config = create_tmuxp_config(scripts, session_name=session_name, panes_per_window=panes_per_window)
     print(f"Generated tmuxp configuration: {tmuxp_config}")
@@ -226,24 +261,11 @@ def main():
     # Step 4: Create or update local tmux.conf
     create_local_tmux_conf(project_dir)
 
-    # Step 5: Check if the session already exists
+    # Step 5: Check if the session already exists and auto kill it
     if session_exists(session_name):
         print(f"Tmux session '{session_name}' already exists.")
-        # Prompt the user for action
-        response = input(f"Do you want to kill the existing tmux session '{session_name}' and start a new one? [Y/n] ").strip().lower()
-        if response in ['y', 'yes', '']:
-            kill_existing_session(session_name)
-        elif response in ['n', 'no']:
-            print(f"Attaching to existing tmux session '{session_name}'.")
-            try:
-                subprocess.check_call(["tmux", "attach-session", "-t", session_name])
-                sys.exit(0)
-            except subprocess.CalledProcessError as e:
-                print(f"Failed to attach to tmux session '{session_name}': {e}")
-                sys.exit(1)
-        else:
-            print("Invalid response. Please run the script again and respond with 'y' or 'n'.")
-            sys.exit(1)
+        print(f"Killing the existing tmux session '{session_name}' and starting a new one.")
+        kill_existing_session(session_name)
 
     # Step 6: Load tmuxp session
     load_tmuxp_session(config_path, session_name)
@@ -267,13 +289,21 @@ def main():
     except OSError:
         print(f"Could not remove temporary tmuxp configuration file {config_path}.")
 
-    print("All scripts are running in tmux. Use your mouse to select panes or your key bindings to navigate.")
-    print(f"To attach to the tmux session, run: tmux attach-session -t {session_name}")
+    # Step 9: Open gnome-terminal attached to the tmux session
+    open_gnome_terminal(session_name)
+
+    print("All scripts are running in tmux within a single gnome-terminal window.")
+    print("Use your mouse to select panes or your key bindings to navigate.")
 
 if __name__ == "__main__":
     # Verify tmux installation
     if not is_tmux_installed():
         print("tmux not found. Please install tmux before running this script.")
         sys.exit(1)
-
+    
+    # Verify tmuxp installation
+    if not is_tool_installed('tmuxp'):
+        print("tmuxp not found. Please install tmuxp using 'pip install tmuxp' before running this script.")
+        sys.exit(1)
+    
     main()

@@ -96,8 +96,15 @@ def create_tmuxp_config(scripts, session_name='scripts_session', panes_per_windo
     for idx, script in enumerate(scripts):
         # Use absolute paths to avoid path issues
         pane_command = f"cd {script['folder']} && python3 {script['script']}"
-        window["panes"].append(pane_command)
+        window["panes"].append({
+            "shell_command": pane_command
+        })
         print(f"Prepared pane command: {pane_command}")
+
+    # Add mouse support in the tmuxp configuration
+    config["options"] = {
+        "mouse": "on"
+    }
 
     # Ensure only one window is created with four panes
     config["windows"].append(window)
@@ -163,10 +170,18 @@ def load_tmuxp_session(config_path, session_name):
     
     # Source the local tmux.conf to apply configurations
     try:
-        subprocess.check_call(["tmux", "source-file", str(project_dir / "tmux.conf"), "-t", session_name])
+        subprocess.check_call(["tmux", "source-file", str(project_dir / "tmux.conf")])
         print("Loaded local tmux.conf into the session.")
     except subprocess.CalledProcessError as e:
         print(f"Failed to source local tmux.conf: {e}")
+        sys.exit(1)
+    
+    # Enable mouse support directly via tmux command
+    try:
+        subprocess.check_call(["tmux", "set-option", "-g", "mouse", "on", "-t", session_name])
+        print("Enabled mouse support in tmux session.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to enable mouse support: {e}")
         sys.exit(1)
 
 def create_local_tmux_conf(project_dir):
@@ -271,16 +286,7 @@ def main():
     load_tmuxp_session(config_path, session_name)
 
     # Step 7: Reload tmux configuration within the session
-    try:
-        subprocess.check_call([
-            "tmux",
-            "source-file", str(project_dir / "tmux.conf"),
-            "-t", session_name
-        ])
-        print("Reloaded tmux configuration within the session.")
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to reload tmux configuration within the session: {e}")
-        sys.exit(1)
+    # Already handled in load_tmuxp_session with the tmux set-option command
 
     # Step 8: Cleanup temporary config file
     try:

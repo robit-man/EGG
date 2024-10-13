@@ -1,0 +1,18 @@
+[
+    {
+        "name": "asr_slm",
+        "incoming": "82bd4826-1936-4a4c-9e5b-6f8c25ae9be6",
+        "outgoing": "5714ad06-a9f8-461a-b7dc-8faf07e6de6c",
+        "incoming_port": 6201,
+        "outgoing_port": 6200,
+        "last_used": 1728591834.234669
+    },
+    {
+        "name": "slm_tts",
+        "incoming": "5714ad06-a9f8-461a-b7dc-8faf07e6de6c",
+        "outgoing": "225900b7-a737-49bd-9728-56efdc9e4acb",
+        "incoming_port": 6200,
+        "outgoing_port": 6100,
+        "last_used": 1728591834.6977139
+    }
+]

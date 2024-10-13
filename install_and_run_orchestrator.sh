@@ -1,3 +1,4 @@
+#!/bin/bash
 # Create a new directory for the sparse clone
 mkdir EGG_Orchestrator
 cd EGG_Orchestrator

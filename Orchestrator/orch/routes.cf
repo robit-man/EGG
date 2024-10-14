@@ -5,14 +5,30 @@
         "outgoing": "5714ad06-a9f8-461a-b7dc-8faf07e6de6c",
         "incoming_port": 6201,
         "outgoing_port": 6200,
-        "last_used": 1728857504.808961
+        "last_used": 1728885783.5473142
     },
     {
-        "name": "slm_tts",
+        "name": "slm_llm",
         "incoming": "5714ad06-a9f8-461a-b7dc-8faf07e6de6c",
-        "outgoing": "225900b7-a737-49bd-9728-56efdc9e4acb",
+        "outgoing": "e090914e-a22e-4a36-80ce-fa7cb0b2e239",
         "incoming_port": 6200,
+        "outgoing_port": 6202,
+        "last_used": 1728885790.9733775
+    },
+    {
+        "name": "llm_sum",
+        "incoming": "e090914e-a22e-4a36-80ce-fa7cb0b2e239",
+        "outgoing": "a13d2700-7b27-4224-9ac3-63437c7ba781",
+        "incoming_port": 6201,
+        "outgoing_port": 6202,
+        "last_used": 1728885038.6484423
+    },
+    {
+        "name": "sum_tts",
+        "incoming": "a13d2700-7b27-4224-9ac3-63437c7ba781",
+        "outgoing": "225900b7-a737-49bd-9728-56efdc9e4acb",
+        "incoming_port": 6202,
         "outgoing_port": 6100,
-        "last_used": 1728857505.5586364
+        "last_used": 1728885779.2823818
     }
 ]

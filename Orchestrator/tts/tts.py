@@ -13,6 +13,16 @@ import os  # For file operations
 from riva.client.proto import riva_tts_pb2, riva_tts_pb2_grpc
 import riva.client
 import uuid
+import logging  # Import logging module
+import traceback  # For detailed exception traces
+
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Initialize UUID and script name
 script_uuid = None  # Initialize as None for UUID persistence
@@ -241,7 +251,7 @@ def read_config():
     global config, script_uuid
     config = default_config.copy()
     if os.path.exists(CONFIG_FILE):
-        print(f"Reading configuration from {CONFIG_FILE}")
+        logger.info(f"Reading configuration from {CONFIG_FILE}")
         with open(CONFIG_FILE, 'r') as f:
             for line in f:
                 line = line.strip()
@@ -252,14 +262,14 @@ def read_config():
                     if key in config:
                         config[key] = value
                     else:
-                        print(f"Unknown configuration key: {key}")
+                        logger.warning(f"Unknown configuration key: {key}")
     else:
-        print(f"No configuration file found. Creating default {CONFIG_FILE}")
+        logger.info(f"No configuration file found. Creating default {CONFIG_FILE}")
         # Generate UUID and set it
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config(config)
-        print(f"[Info] Generated new UUID: {script_uuid} and created {CONFIG_FILE}")
+        logger.info(f"[Info] Generated new UUID: {script_uuid} and created {CONFIG_FILE}")
 
     # After reading config, check for 'script_uuid'
     if 'script_uuid' in config and config['script_uuid']:
@@ -268,23 +278,23 @@ def read_config():
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config(config)
-        print(f"[Info] Generated new UUID: {script_uuid} and updated {CONFIG_FILE}")
+        logger.info(f"[Info] Generated new UUID: {script_uuid} and updated {CONFIG_FILE}")
 
     # Debug: Print configuration after reading
-    print("[Debug] Configuration Loaded:")
+    logger.debug("Configuration Loaded:")
     for k, v in config.items():
         if k == 'script_uuid':
-            print(f"{k}={v}")  # Display script_uuid
+            logger.debug(f"{k}={v}")  # Display script_uuid
         else:
-            print(f"{k}={v}")
+            logger.debug(f"{k}={v}")
     return config
 
 # Function to write configuration to file
-def write_config(config):
-    print(f"Writing configuration to {CONFIG_FILE}")
+def write_config(config_data):
+    logger.info(f"Writing configuration to {CONFIG_FILE}")
     with config_lock:
         with open(CONFIG_FILE, 'w') as f:
-            for key, value in config.items():
+            for key, value in config_data.items():
                 value = str(value)  # Ensure all values are strings
                 if any(c in value for c in ' \n"\\'):
                     # If value contains special characters, enclose it in quotes and escape
@@ -301,139 +311,16 @@ def clear_queue(q):
     """Clears all items from the given queue."""
     with q.mutex:
         q.queue.clear()
-    print("[Info] TTS queue has been cleared.")
-
-# Generate TTS and Playback
-def tts_generation_and_playback(tts_stub, selected_voice):
-    output_mode = config['output_mode']
-
-    if output_mode == 'speaker':
-        # Set up audio output stream with increased buffer size to prevent underruns
-        p = pyaudio.PyAudio()
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=output_channels,
-            rate=sample_rate,
-            output=True,
-            frames_per_buffer=2048  # Increased buffer size
-        )
-    elif output_mode == 'file':
-        # Open file for writing
-        try:
-            output_file = open(args.output or 'output.wav', 'wb')
-        except Exception as e:
-            print(f"Failed to open output file: {e}")
-            return
-    elif output_mode == 'stream':
-        # Implement stream output if needed
-        print("[Info] Stream output mode is not yet implemented.")
-        pass
-    else:
-        print("Invalid output mode.")
-        return
-
-    # Warm-up call to avoid latency on first inference
-    dummy_req = riva_tts_pb2.SynthesizeSpeechRequest(
-        text="Warm up call",
-        language_code=selected_voice['language'],
-        encoding=riva.client.AudioEncoding.LINEAR_PCM,
-        sample_rate_hz=sample_rate,
-        voice_name=selected_voice['name']
-    )
-    try:
-        print("[Info] Performing warm-up inference...")
-        tts_stub.Synthesize(dummy_req, timeout=15)
-        print("[Info] Warm-up completed successfully.")
-    except grpc.RpcError as e:
-        print(f"[Warning] Warm-up failed: {e.details()}")
-
-    while not cancel_event.is_set():
-        try:
-            text = tts_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-
-        if text:
-            print(f"Original text: {text}")
-            # Replace special characters and numbers
-            processed_text = replace_special_characters_and_numbers(text)
-            print(f"Processed text: {processed_text}")
-
-            # Split the text into sentences before processing to avoid overloading the model
-            sentences = split_text_into_sentences(processed_text)
-
-            for sentence in sentences:
-                # Further split sentences if they exceed 400 characters
-                if len(sentence) > 400:
-                    text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
-                else:
-                    text_chunks = [sentence]
-
-                for chunk in text_chunks:
-                    req = riva_tts_pb2.SynthesizeSpeechRequest(
-                        text=chunk,
-                        language_code=selected_voice['language'],
-                        encoding=riva.client.AudioEncoding.LINEAR_PCM,
-                        sample_rate_hz=sample_rate,
-                        voice_name=selected_voice['name']
-                    )
-
-                    retries = 3
-                    for attempt in range(retries):
-                        try:
-                            # Increased timeout to 15 seconds to avoid premature deadline exceeded errors
-                            resp = tts_stub.Synthesize(req, timeout=15)
-                            audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
-
-                            if output_mode == 'speaker':
-                                stream.write(audio_samples.tobytes())
-                            elif output_mode == 'file':
-                                output_file.write(resp.audio)
-                            elif output_mode == 'stream':
-                                # Implement streaming output
-                                print("[Info] Streaming output is not yet implemented.")
-                                pass
-
-                            # Small sleep to prevent buffer overruns
-                            time.sleep(0.05)
-                            break  # Exit retry loop if successful
-                        except grpc.RpcError as e:
-                            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                                print(f"Attempt {attempt + 1}/{retries}: TTS deadline exceeded. Retrying...")
-                                time.sleep(1)  # Small delay before retrying
-                            else:
-                                print(f"TTS generation failed: {e.details()}")
-                                break  # Exit if it's not a deadline error
-                        except Exception as e:
-                            print(f"An unexpected error occurred: {e}")
-                            break  # Exit retry loop for unexpected errors
-
-    if output_mode == 'speaker':
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-    elif output_mode == 'file':
-        output_file.close()
+    logger.info("TTS queue has been cleared.")
 
 # Function to split text into manageable chunks
 def split_text_into_chunks(text, max_chunk_size=200):
     # Use textwrap to split text at word boundaries
     return textwrap.wrap(text, width=max_chunk_size, break_long_words=False)
 
-# Start TTS Thread
-def start_tts_thread(tts_stub, selected_voice):
-    global current_tts_thread
-    if current_tts_thread and current_tts_thread.is_alive():
-        cancel_event.set()
-        current_tts_thread.join()
-
-    cancel_event.clear()
-    current_tts_thread = threading.Thread(target=tts_generation_and_playback, args=(tts_stub, selected_voice))
-    current_tts_thread.start()
-
 # Get Available TTS Voices
 def get_available_voices(tts_stub):
-    print("Retrieving available voices from Riva TTS...")
+    logger.info("Retrieving available voices from Riva TTS...")
 
     # Create the request to get synthesis configuration
     request = riva_tts_pb2.RivaSynthesisConfigRequest()
@@ -442,23 +329,23 @@ def get_available_voices(tts_stub):
     try:
         response = tts_stub.GetRivaSynthesisConfig(request)
     except Exception as e:
-        print(f"Failed to get TTS synthesis config: {e}")
+        logger.error(f"Failed to get TTS synthesis config: {e}")
         return []
 
     # Parse the response to find available voices
     available_voices = []
     if response.model_config:
-        print("Available TTS Models:")
+        logger.info("Available TTS Models:")
         for model in response.model_config:
             voice_name = model.parameters.get("voice_name", "")
             language_code = model.parameters.get("language_code", "")
 
             if voice_name:
                 available_voices.append({"name": voice_name, "language": language_code})
-                print(f"Voice: {voice_name}, Language: {language_code}")
+                logger.info(f"Voice: {voice_name}, Language: {language_code}")
 
     if not available_voices:
-        print("No available voices found in the response.")
+        logger.warning("No available voices found in the response.")
 
     return available_voices
 
@@ -552,108 +439,253 @@ def register_with_orchestrator():
                 start_port, end_port = map(int, port_entry.split('-'))
                 orchestrator_command_ports.extend(range(start_port, end_port + 1))
             except ValueError:
-                print(f"Invalid orchestrator port range: {port_entry}")
+                logger.warning(f"Invalid orchestrator port range: {port_entry}")
         elif port_entry.isdigit():
             orchestrator_command_ports.append(int(port_entry))
         else:
-            print(f"Invalid orchestrator port entry: {port_entry}")
+            logger.warning(f"Invalid orchestrator port entry: {port_entry}")
 
-    registration_successful = False
-    attempt = 0
-    max_attempts = 12  # Try for up to 1 minute (12 * 5 seconds)
-    while not registration_successful and attempt < max_attempts and not cancel_event.is_set():
-        for port in orchestrator_command_ports:
+    if not orchestrator_command_ports:
+        logger.error("No valid orchestrator command ports found.")
+        return False
+
+    message = f"/register {script_name} {script_uuid} {config['port']}\n"
+    max_retries = 5
+    retry_delay = 1
+    for attempt in range(max_retries):
+        for orch_port in orchestrator_command_ports:
             try:
-                with socket.create_connection((orchestrator_host, port), timeout=5) as sock:
-                    register_command = f"/register {script_name} {script_uuid} {config['port']}\n"
-                    sock.sendall(register_command.encode())
+                logger.info(f"[Attempt {attempt + 1}] Registering with orchestrator at {orchestrator_host}:{orch_port}...")
+                with socket.create_connection((orchestrator_host, orch_port), timeout=5) as s:
+                    s.sendall(message.encode())
+                    logger.info(f"Sent registration message: {message.strip()}")
 
-                    # Wait for acknowledgment
-                    response = sock.recv(1024).decode().strip()
-                    if response.startswith("/ack"):
-                        ack_data = response.split(' ', 1)[1] if ' ' in response else ''
-                        print(f"Successfully registered with orchestrator on port {port}. Ack Data: {ack_data}")
-                        registration_successful = True
-                        break  # Exit the port loop
+                    # Receive acknowledgment
+                    data = s.recv(1024)
+                    if data:
+                        ack_message = data.decode().strip()
+                        logger.info(f"Received acknowledgment: {ack_message}")
+                        if isinstance(ack_message, str) and ack_message.startswith('/ack'):
+                            tokens = ack_message.split()
+                            if len(tokens) == 2 and tokens[0] == '/ack':
+                                try:
+                                    data_port = tokens[1]  # Keep as string
+                                    config['data_port'] = data_port
+                                    write_config(config)
+                                    logger.info(f"Registered successfully. Data port: {data_port}")
+                                    return True
+                                except ValueError:
+                                    logger.error(f"Invalid data port received in acknowledgment: {tokens[1]}")
+                            else:
+                                logger.error(f"Unexpected acknowledgment format: {ack_message}")
+                        else:
+                            logger.error(f"Invalid acknowledgment type: {type(ack_message)}")
                     else:
-                        print(f"Registration failed on port {port}. Response: {response}")
+                        logger.warning(f"No acknowledgment received from orchestrator at {orchestrator_host}:{orch_port}.")
+            except socket.timeout:
+                logger.error(f"Connection to orchestrator at {orchestrator_host}:{orch_port} timed out.")
             except ConnectionRefusedError:
-                print(f"Orchestrator not available at {orchestrator_host}:{port}.")
+                logger.error(f"Connection refused by orchestrator at {orchestrator_host}:{orch_port}.")
             except Exception as e:
-                print(f"Error during registration attempt on port {port}: {e}")
+                logger.error(f"Exception during registration with orchestrator at {orchestrator_host}:{orch_port}: {e}")
+                logger.debug(traceback.format_exc())
+        logger.info(f"Retrying registration in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+        time.sleep(retry_delay)
+        retry_delay *= 2  # Exponential backoff
 
-        if registration_successful:
-            break
-        else:
-            attempt += 1
-            print(f"Retrying registration in 5 seconds... (Attempt {attempt}/{max_attempts})")
-            time.sleep(5)  # Wait before retrying
-
-    if not registration_successful:
-        if config['input_mode'] == 'terminal':
-            print("Failed to register with the orchestrator after multiple attempts. Entering terminal mode.")
-            # Do not exit; proceed to terminal input
-            return False
-        else:
-            print("Failed to register with the orchestrator after multiple attempts. Exiting...")
-            cancel_event.set()
-            exit(1)  # Exit the script as registration is critical
-    return True
-
-# Input Handler
-def input_handler():
+    logger.error("Max retries reached. Could not register with orchestrator.")
     if config['input_mode'] == 'terminal':
-        terminal_input()
-    elif config['input_mode'] == 'port':
-        port_input()
-    elif config['input_mode'] == 'route':
-        route_input()
+        logger.info("Failed to register with the orchestrator after multiple attempts. Entering terminal mode.")
+        return False  # Allow fallback to terminal mode
     else:
-        print("Invalid input mode.")
+        logger.error("Failed to register with the orchestrator after multiple attempts. Exiting...")
+        cancel_event.set()
+        exit(1)  # Exit the script as registration is critical
+
+# Function to perform a single warm-up call
+def perform_warmup(tts_stub, selected_voice):
+    dummy_req = riva_tts_pb2.SynthesizeSpeechRequest(
+        text="Warm up call",
+        language_code=selected_voice['language'],
+        encoding=riva.client.AudioEncoding.LINEAR_PCM,
+        sample_rate_hz=sample_rate,
+        voice_name=selected_voice['name']
+    )
+    try:
+        logger.info("Performing warm-up inference...")
+        tts_stub.Synthesize(dummy_req, timeout=15)
+        logger.info("Warm-up completed successfully.")
+    except grpc.RpcError as e:
+        logger.warning(f"Warm-up failed: {e.details()}")
+    except Exception as e:
+        logger.error(f"Unexpected error during warm-up: {e}")
+        logger.debug(traceback.format_exc())
+
+# Generate TTS and Playback
+def tts_generation_and_playback(tts_stub, selected_voice):
+    output_mode = config['output_mode']
+
+    # Initialize audio output stream
+    if output_mode == 'speaker':
+        try:
+            p = pyaudio.PyAudio()
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=output_channels,
+                rate=sample_rate,
+                output=True,
+                frames_per_buffer=2048  # Increased buffer size
+            )
+            logger.info("Audio output stream opened successfully.")
+        except Exception as e:
+            logger.error(f"Failed to open audio output stream: {e}")
+            return
+    elif output_mode == 'file':
+        try:
+            output_file_path = args.output or 'output.wav'
+            output_file = open(output_file_path, 'wb')
+            logger.info(f"Opened output file: {output_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to open output file: {e}")
+            return
+    elif output_mode == 'stream':
+        # Implement stream output if needed
+        logger.info("Stream output mode is not yet implemented.")
+        pass
+    else:
+        logger.error("Invalid output mode.")
         return
 
-# Terminal Input Mode
-def terminal_input():
-    global config_changed
-    print("Enter text to synthesize (type /config to enter configuration mode, /cancel to clear the queue, /exit to quit):")
-    while True:
+    # Process TTS requests from the queue
+    while not cancel_event.is_set():
         try:
-            user_input = input("> ")
-        except EOFError:
-            # Handle Ctrl+D
-            user_input = '/exit'
-        if user_input.strip() == '/config':
-            run_config_menu(config, available_voices)
-            print("Configuration updated.")
-            print("Current config:")
-            print(config)
-            config_changed = True
-            # Write updated configuration to file
-            write_config(config)
-            break
-        elif user_input.strip() == '/cancel':
-            clear_queue(tts_queue)
-            print("TTS queue has been cleared.")
-        elif user_input.strip() == '/exit':
-            cancel_event.set()
-            break
-        else:
-            tts_queue.put(user_input.strip())
+            text = tts_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        if text:
+            logger.info(f"Original text: {text}")
+            # Replace special characters and numbers
+            processed_text = replace_special_characters_and_numbers(text)
+            logger.info(f"Processed text: {processed_text}")
+
+            # Split the text into sentences before processing to avoid overloading the model
+            sentences = split_text_into_sentences(processed_text)
+
+            for sentence in sentences:
+                # Further split sentences if they exceed 400 characters
+                if len(sentence) > 400:
+                    text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
+                else:
+                    text_chunks = [sentence]
+
+                for chunk in text_chunks:
+                    req = riva_tts_pb2.SynthesizeSpeechRequest(
+                        text=chunk,
+                        language_code=selected_voice['language'],
+                        encoding=riva.client.AudioEncoding.LINEAR_PCM,
+                        sample_rate_hz=sample_rate,
+                        voice_name=selected_voice['name']
+                    )
+
+                    retries = 3
+                    for attempt in range(retries):
+                        try:
+                            # Send the TTS request
+                            resp = tts_stub.Synthesize(req, timeout=15)
+                            audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
+
+                            if output_mode == 'speaker':
+                                stream.write(audio_samples.tobytes())
+                            elif output_mode == 'file':
+                                output_file.write(resp.audio)
+                            elif output_mode == 'stream':
+                                # Implement streaming output
+                                logger.info("Streaming output is not yet implemented.")
+                                pass
+
+                            # Small sleep to prevent buffer overruns
+                            time.sleep(0.05)
+                            break  # Exit retry loop if successful
+                        except grpc.RpcError as e:
+                            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                                logger.warning(f"Attempt {attempt + 1}/{retries}: TTS deadline exceeded. Retrying...")
+                                time.sleep(1)  # Small delay before retrying
+                            else:
+                                logger.error(f"TTS generation failed: {e.details()}")
+                                break  # Exit if it's not a deadline error
+                        except Exception as e:
+                            logger.error(f"An unexpected error occurred during TTS generation: {e}")
+                            logger.debug(traceback.format_exc())
+                            break  # Exit retry loop for unexpected errors
+
+    # Cleanup resources upon cancellation
+    if output_mode == 'speaker':
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        logger.info("Audio output stream closed.")
+    elif output_mode == 'file':
+        output_file.close()
+        logger.info("Output file closed.")
+
+# Start TTS Thread
+def start_tts_thread(tts_stub, selected_voice):
+    global current_tts_thread
+    if current_tts_thread and current_tts_thread.is_alive():
+        logger.info("TTS thread is already running. Attempting to terminate existing thread...")
+        cancel_event.set()
+        current_tts_thread.join()
+        logger.info("Existing TTS thread terminated.")
+
+    cancel_event.clear()
+    current_tts_thread = threading.Thread(target=tts_generation_and_playback, args=(tts_stub, selected_voice), daemon=True)
+    current_tts_thread.start()
+    logger.info("TTS thread started successfully.")
+
+# Handle incoming text via port
+def handle_port_client(client_socket, addr):
+    with client_socket:
+        try:
+            data = client_socket.recv(1024).decode().strip()
+            if data == '/info':
+                response = f"{script_name}\n{script_uuid}\n"
+                # Include config
+                for key, value in config.items():
+                    response += f"{key}={value}\n"
+                response += 'EOF\n'
+                client_socket.sendall(response.encode())
+                logger.info(f"Sent configuration info to {addr}")
+            elif data == '/config':
+                client_socket.send("Entering configuration mode not supported over port.\n".encode())
+            elif data == '/cancel':
+                clear_queue(tts_queue)
+                client_socket.sendall(b"TTS queue has been cleared.\n")
+                logger.info(f"Received /cancel command from {addr}. Cleared TTS queue.")
+            elif data == '/exit':
+                client_socket.sendall(b"Exiting TTS Engine.\n")
+                logger.info(f"Received /exit command from {addr}. Shutting down.")
+                cancel_event.set()
+            else:
+                logger.info(f"Received from {addr}: {data}")
+                tts_queue.put(data)
+        except Exception as e:
+            logger.error(f"Error handling client {addr}: {e}")
 
 # Port Input Mode
 def port_input():
     host = '0.0.0.0'
     port = int(config['port'])  # Convert port to integer
-    print(f"Listening for text input on port {port}...")
+    logger.info(f"Listening for text input on port {port}...")
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         server_socket.bind((host, port))
         server_socket.listen(5)
-        print(f"Server started on port {port}. Waiting for connections...")
+        logger.info(f"Server started on port {port}. Waiting for connections...")
     except Exception as e:
-        print(f"Failed to bind to port {port}: {e}")
+        logger.error(f"Failed to bind to port {port}: {e}")
         if config['input_mode'] == 'terminal':
-            print("Switching to terminal mode due to port binding failure.")
+            logger.info("Switching to terminal mode due to port binding failure.")
             config['input_mode'] = 'terminal'
             write_config(config)
             terminal_input()
@@ -668,34 +700,10 @@ def port_input():
             threading.Thread(target=handle_port_client, args=(client_socket, addr), daemon=True).start()
         except Exception as e:
             if not cancel_event.is_set():
-                print(f"Error accepting connection: {e}")
+                logger.error(f"Error accepting connection: {e}")
 
     server_socket.close()
-
-def handle_port_client(client_socket, addr):
-    with client_socket:
-        try:
-            data = client_socket.recv(1024).decode().strip()
-            if data == '/info':
-                response = f"{script_name}\n{script_uuid}\n"
-                # Include config
-                for key, value in config.items():
-                    response += f"{key}={value}\n"
-                response += 'EOF\n'
-                client_socket.sendall(response.encode())
-            elif data == '/config':
-                client_socket.send("Entering configuration mode not supported over port.\n".encode())
-            elif data == '/cancel':
-                clear_queue(tts_queue)
-                client_socket.sendall(b"TTS queue has been cleared.\n")
-            elif data == '/exit':
-                client_socket.sendall(b"Exiting TTS Engine.\n")
-                cancel_event.set()
-            else:
-                print(f"Received from {addr}: {data}")
-                tts_queue.put(data)
-        except Exception as e:
-            print(f"Error handling client {addr}: {e}")
+    logger.info("Port input server shut down.")
 
 # Route Input Mode
 def route_input():
@@ -725,13 +733,15 @@ def route_input():
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b"TTS queue has been cleared.\n")
+                    logger.info("Received /cancel command via HTTP POST. Cleared TTS queue.")
                 elif post_data == '/exit':
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b"Exiting TTS Engine.\n")
+                    logger.info("Received /exit command via HTTP POST. Shutting down.")
                     cancel_event.set()
                 else:
-                    print(f"Received text via HTTP POST: {post_data}")
+                    logger.info(f"Received text via HTTP POST: {post_data}")
                     tts_queue.put(post_data)
                     self.send_response(200)
                     self.end_headers()
@@ -740,15 +750,16 @@ def route_input():
                 self.end_headers()
 
         def log_message(self, format, *args):
-            return
+            return  # Suppress default logging
 
     server_address = (host, port)
     try:
         httpd = HTTPServer(server_address, RequestHandler)
+        logger.info(f"HTTP server started on port {port}, route {route}")
     except Exception as e:
-        print(f"Failed to start HTTP server on port {port}: {e}")
+        logger.error(f"Failed to start HTTP server on port {port}: {e}")
         if config['input_mode'] == 'terminal':
-            print("Switching to terminal mode due to HTTP server failure.")
+            logger.info("Switching to terminal mode due to HTTP server failure.")
             config['input_mode'] = 'terminal'
             write_config(config)
             terminal_input()
@@ -756,8 +767,7 @@ def route_input():
         else:
             cancel_event.set()
             exit(1)
-    print(f"HTTP server started on port {port}, route {route}")
-    server_thread = threading.Thread(target=httpd.serve_forever)
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
 
     try:
@@ -769,20 +779,70 @@ def route_input():
         httpd.shutdown()
         httpd.server_close()
         server_thread.join()
+        logger.info("HTTP input server shut down.")
+
+# Terminal Input Mode
+def terminal_input():
+    global config_changed
+    print("Enter text to synthesize (type /config to enter configuration mode, /cancel to clear the queue, /exit to quit):")
+    while True:
+        try:
+            user_input = input("> ")
+        except EOFError:
+            # Handle Ctrl+D
+            user_input = '/exit'
+        if user_input.strip() == '/config':
+            run_config_menu(config, available_voices)
+            print("Configuration updated.")
+            logger.info("Configuration updated via terminal.")
+            print("Current config:")
+            for key, value in config.items():
+                print(f"{key}={value}")
+            config_changed = True
+            # Write updated configuration to file
+            write_config(config)
+            # Restart TTS thread if necessary
+            if current_tts_thread and current_tts_thread.is_alive():
+                logger.info("Restarting TTS thread due to configuration change.")
+                start_tts_thread(tts_stub, selected_voice)
+        elif user_input.strip() == '/cancel':
+            clear_queue(tts_queue)
+            print("TTS queue has been cleared.")
+            logger.info("Cleared TTS queue via terminal command.")
+        elif user_input.strip() == '/exit':
+            cancel_event.set()
+            logger.info("Received /exit command via terminal. Shutting down.")
+            break
+        else:
+            tts_queue.put(user_input.strip())
+            logger.info(f"Queued text for TTS: {user_input.strip()}")
+
+# Input Handler
+def input_handler():
+    if config['input_mode'] == 'terminal':
+        terminal_input()
+    elif config['input_mode'] == 'port':
+        port_input()
+    elif config['input_mode'] == 'route':
+        route_input()
+    else:
+        logger.error("Invalid input mode.")
+        return
 
 def main():
     global config_changed
-    global available_voices  # Add this to access available_voices in terminal_input
+    global available_voices  # To access in terminal_input
+    global tts_stub
+    global selected_voice
 
     # Read configuration from file
-    global config
-    config = read_config()
+    read_config()
 
     # Register with the orchestrator
     registration_successful = register_with_orchestrator()
 
     if not registration_successful and config['input_mode'] == 'terminal':
-        # Fallback to terminal mode already handled in register_with_orchestrator
+        # Proceed to terminal input mode
         pass
     else:
         # Initialize TTS stub
@@ -795,11 +855,12 @@ def main():
                 channel = grpc.insecure_channel(args.server)
 
             tts_stub = riva_tts_pb2_grpc.RivaSpeechSynthesisStub(channel)
-            print("TTS stub initialized successfully.")
+            logger.info("TTS stub initialized successfully.")
         except Exception as e:
-            print(f"Failed to initialize TTS stub: {e}")
+            logger.error(f"Failed to initialize TTS stub: {e}")
+            logger.debug(traceback.format_exc())
             if config['input_mode'] == 'terminal':
-                print("Entering terminal mode due to TTS stub initialization failure.")
+                logger.info("Entering terminal mode due to TTS stub initialization failure.")
                 config['input_mode'] = 'terminal'
                 write_config(config)
                 terminal_input()
@@ -811,9 +872,9 @@ def main():
         # Get available voices
         available_voices = get_available_voices(tts_stub)
         if not available_voices:
-            print("No available voices.")
+            logger.error("No available voices.")
             if config['input_mode'] == 'terminal':
-                print("Entering terminal mode due to no available voices.")
+                logger.info("Entering terminal mode due to no available voices.")
                 config['input_mode'] = 'terminal'
                 write_config(config)
                 terminal_input()
@@ -829,16 +890,16 @@ def main():
             matching_voices = [v for v in available_voices if v['name'] == config['voice']]
             if matching_voices:
                 selected_voice = matching_voices[0]
-                print(f"Using voice from config: {selected_voice['name']} (Language: {selected_voice['language']})")
+                logger.info(f"Using voice from config: {selected_voice['name']} (Language: {selected_voice['language']})")
             else:
-                print(f"Voice '{config['voice']}' specified in config not found.")
+                logger.warning(f"Voice '{config['voice']}' specified in config not found.")
                 config['voice'] = ''  # Reset the voice in config
 
         # If voice is not specified or not found, prompt user to select
         if not selected_voice:
-            print("\nAvailable voices:")
+            logger.info("\nAvailable voices:")
             for idx, voice in enumerate(available_voices):
-                print(f"{idx + 1}: {voice['name']} (Language: {voice['language']})")
+                logger.info(f"{idx + 1}: {voice['name']} (Language: {voice['language']})")
 
             while not selected_voice:
                 user_input = input("Select a voice by number or name: ").strip()
@@ -848,41 +909,47 @@ def main():
                     if 0 <= idx < len(available_voices):
                         selected_voice = available_voices[idx]
                     else:
-                        print("Invalid selection. Please try again.")
+                        logger.warning("Invalid selection. Please try again.")
                 except ValueError:
                     # Not a number, treat as name
                     matching_voices = [v for v in available_voices if v['name'].lower() == user_input.lower()]
                     if matching_voices:
                         selected_voice = matching_voices[0]
                     else:
-                        print("Voice not found. Please try again.")
+                        logger.warning("Voice not found. Please try again.")
 
-            print(f"Selected Voice: {selected_voice['name']} (Language: {selected_voice['language']})")
+            logger.info(f"Selected Voice: {selected_voice['name']} (Language: {selected_voice['language']})")
             # Update config with selected voice and write to file
             config['voice'] = selected_voice['name']
             write_config(config)
 
+        # Perform warm-up once
+        perform_warmup(tts_stub, selected_voice)
+
         # Start TTS thread with selected voice
         start_tts_thread(tts_stub, selected_voice)
 
-    # Input handler loop
-    while True:
-        config_changed = False
-        input_handler()
-        if config_changed:
-            print("Configuration has changed. Restarting input handler...")
-            # Restart TTS thread if output mode has changed
-            if 'output_mode' in config:
-                start_tts_thread(tts_stub, selected_voice)
-            continue
-        else:
-            break
+    # Start input handler in a separate thread
+    input_thread = threading.Thread(target=input_handler, daemon=True)
+    input_thread.start()
 
-    cancel_event.set()
+    # Keep the main thread alive until shutdown is signaled
+    try:
+        while not cancel_event.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Program terminated by user.")
+        cancel_event.set()
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        logger.debug(traceback.format_exc())
+        cancel_event.set()
+
+    # Wait for threads to finish
     if current_tts_thread and current_tts_thread.is_alive():
         current_tts_thread.join()
 
-    print("Program terminated.")
+    logger.info("Program terminated.")
 
 if __name__ == "__main__":
     try:
@@ -893,10 +960,11 @@ if __name__ == "__main__":
             curses.endwin()
         except Exception:
             pass
-        print("Program terminated by user.")
+        logger.info("Program terminated by user.")
     except Exception as e:
         # Handle any other exceptions
-        print(f"An unexpected error occurred: {e}")
+        logger.error(f"An unexpected error occurred: {e}")
+        logger.debug(traceback.format_exc())
         try:
             curses.endwin()
         except Exception:

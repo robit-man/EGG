@@ -425,7 +425,14 @@ Ollama provides advanced AI models that can be utilized within Jetson Containers
 2. **Add a New Startup Program** with the following command:
 
    ```bash
-   gnome-terminal -- bash -c "jetson-containers run --name ollama $(autotag ollama); exec bash"
+#!/bin/bash
+
+# Sudo Privaledge Caching
+/home/$(whoami)/Startup/dummy_script.sh
+
+# Ollama Jetson Container
+jetson-containers run --name ollama $(autotag ollama)
+
    ```
 
    - This command launches the Ollama container, making it accessible over port `11434` during runtime.

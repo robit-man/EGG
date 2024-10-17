@@ -22,7 +22,7 @@ default_config = {
     'port_range': '6200-6300',
     'orchestrator_host': 'localhost',
     'orchestrator_ports': '6000-6005',  # Updated to handle multiple ports
-    'route': '/slm',
+    'route': '/llm',
     'script_uuid': '',              # Initialize as empty; will be set in read_config()
     'system_prompt': "You Respond Conversationally",
     'temperature': '0.7',           # Model parameter: temperature
@@ -120,7 +120,7 @@ def write_config(config_to_write=None):
 
 # Function to parse command-line arguments
 def parse_args():
-    parser = argparse.ArgumentParser(description='SLM Engine Peripheral')
+    parser = argparse.ArgumentParser(description='LLM Engine Peripheral')
     parser.add_argument('--port-range', type=str, help='Port range to use for connections')
     parser.add_argument('--orchestrator-host', type=str, help='Orchestrator host address')
     parser.add_argument('--orchestrator-ports', type=str, help='Comma-separated list or range of orchestrator command ports (e.g., 6000,6001,6002 or 6000-6005)')
@@ -287,7 +287,7 @@ def start_server():
         try:
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.bind((host, port))
-            print(f"[Info] SLM Engine listening on port {port}...")
+            print(f"[Info] LLM Engine listening on port {port}...")
             config['port'] = str(port)  # Update the port in the config
             write_config(config)
             break
@@ -428,7 +428,7 @@ def send_info(client_socket):
 # Send exit acknowledgment and shutdown
 def send_exit(client_socket):
     try:
-        exit_message = "Exiting SLM Engine.\n"
+        exit_message = "Exiting LLM Engine.\n"
         client_socket.sendall(exit_message.encode())
         print(f"[Shutdown] Received /exit command from {client_socket.getpeername()}. Shutting down.")
         cancel_event.set()
@@ -611,7 +611,7 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[Shutdown] SLM Engine terminated by user.")
+        print("\n[Shutdown] LLM Engine terminated by user.")
     except Exception as e:
         print(f"[Fatal Error] An unexpected error occurred: {e}")
         traceback.print_exc()

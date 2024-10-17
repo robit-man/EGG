@@ -138,7 +138,6 @@ def scan_ports():
     for port in ports:
         check_port(port)
 
-
 def check_port(port):
     host = 'localhost'
     try:
@@ -154,14 +153,17 @@ def check_port(port):
                     break
             if response:
                 process_response(response, port)
-    except Exception:
-        pass  # Ignore ports that are not open
+    except Exception as e:
+        peripheral = get_peripheral_by_port(port)
+        peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
+        log_message(f"Error connecting to port {port} for {peripheral_info}: {e}")
 
 
 def process_response(response, port):
     # Optional logging
     lines = response.strip().split('\n')
     if len(lines) < 3:
+        log_message(f"Incomplete response from port {port}. Expected at least 3 lines.")
         return
 
     name = lines[0].strip()
@@ -197,6 +199,7 @@ def process_response(response, port):
     assign_colors_to_peripherals()
     if not in_command_mode.is_set():
         update_event.set()  # Signal to update the display
+
 
 
 def assign_colors_to_peripherals():
@@ -498,6 +501,11 @@ def get_peripheral_name_by_uuid(uuid_str):
     else:
         return 'Unknown'
 
+def get_peripheral_by_port(port):
+    with peripherals_lock:
+        peripheral = next((p for p in config['peripherals'] if p['port'] == port), None)
+    return peripheral
+
 
 def handle_incoming_data(peripheral_uuid, data):
     # Find routes where this peripheral is the incoming peripheral
@@ -541,13 +549,18 @@ def command_listener():
                         log_message(f"Received connection from {addr} on port {port}")
                         threading.Thread(target=handle_client_connection, args=(conn, addr), daemon=True).start()
                     except socket.error as e:
-                        log_message(f"Socket error on port {port}: {e}")
+                        peripheral = get_peripheral_by_port(port)
+                        peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
+                        log_message(f"Socket error on port {port} for {peripheral_info}: {e}")
         except Exception as e:
-            log_message(f"Error in command_listener on port {port}: {e}")
+            peripheral = get_peripheral_by_port(port)
+            peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
+            log_message(f"Error in command_listener on port {port} for {peripheral_info}: {e}")
 
     # Start a listener thread for each port in the range
     for port in command_ports:
         threading.Thread(target=listen_on_port, args=(port,), daemon=True).start()
+
 
 def data_listener():
     data_ports = [6001, 6002, 6003, 6004, 6005, 6006]  # Define your data port range here
@@ -565,19 +578,29 @@ def data_listener():
                         conn, addr = s.accept()
                         threading.Thread(target=handle_data_connection, args=(conn, addr), daemon=True).start()
                     except socket.error as e:
-                        log_message(f"Socket error on data port {port}: {e}")
+                        peripheral = get_peripheral_by_port(port)
+                        peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
+                        log_message(f"Socket error on data port {port} for {peripheral_info}: {e}")
         except Exception as e:
-            log_message(f"Error in data_listener on port {port}: {e}")
+            peripheral = get_peripheral_by_port(port)
+            peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
+            log_message(f"Error in data_listener on port {port} for {peripheral_info}: {e}")
 
     # Start a listener thread for each port in the range
     for port in data_ports:
         threading.Thread(target=listen_on_port, args=(port,), daemon=True).start()
-
-
+        
 def handle_client_connection(conn, addr):
     with conn:
         conn.settimeout(5)  # Increase timeout
         buffer = ''
+        try:
+            local_port = conn.getsockname()[1]
+            peripheral = get_peripheral_by_port(local_port)
+            peripheral_info = f"{peripheral['name']} (Port: {local_port})" if peripheral else f"Unknown Peripheral on Port {local_port}"
+        except Exception:
+            peripheral_info = f"Unknown Peripheral on Port Unknown"
+
         while True:
             try:
                 data = conn.recv(1024)
@@ -593,7 +616,7 @@ def handle_client_connection(conn, addr):
             except socket.timeout:
                 continue
             except Exception as e:
-                log_message(f"Error handling client {addr}: {e}")
+                log_message(f"Error handling client {addr} for {peripheral_info}: {e}")
                 break
 
 
@@ -602,6 +625,13 @@ def handle_data_connection(conn, addr):
         conn.settimeout(5)
         buffer = ''
         peripheral_uuid = None
+        try:
+            local_port = conn.getsockname()[1]
+            peripheral = get_peripheral_by_port(local_port)
+            peripheral_info = f"{peripheral['name']} (Port: {local_port})" if peripheral else f"Unknown Peripheral on Port {local_port}"
+        except Exception:
+            peripheral_info = f"Unknown Peripheral on Port Unknown"
+
         while True:
             try:
                 data = conn.recv(1024)
@@ -618,8 +648,9 @@ def handle_data_connection(conn, addr):
             except socket.timeout:
                 continue
             except Exception as e:
-                log_message(f"Error handling data connection from {addr}: {e}")
+                log_message(f"Error handling data connection from {addr} for {peripheral_info}: {e}")
                 break
+
 
 
 def run_curses_interface():

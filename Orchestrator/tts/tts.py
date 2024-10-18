@@ -7,6 +7,7 @@ import grpc
 import socket
 import curses
 import time
+import json
 import textwrap
 import re  # Import regular expressions module
 import os  # For file operations
@@ -246,62 +247,50 @@ def split_text_into_sentences(text):
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())  # Split on sentence boundaries
     return sentences
 
-# Function to read configuration from file
+# Function to read configuration from a JSON file
 def read_config():
     global config, script_uuid
     config = default_config.copy()
+    
     if os.path.exists(CONFIG_FILE):
         logger.info(f"Reading configuration from {CONFIG_FILE}")
-        with open(CONFIG_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if '=' in line and not line.startswith('#'):
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")  # Remove potential quotes
-                    if key in config:
-                        config[key] = value
-                    else:
-                        logger.warning(f"Unknown configuration key: {key}")
+        try:
+            # Read the JSON file
+            with open(CONFIG_FILE, 'r') as f:
+                config.update(json.load(f))  # Update default config with the values from the file
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            logger.error(f"Could not read {CONFIG_FILE}: {e}. Using default configuration.")
     else:
         logger.info(f"No configuration file found. Creating default {CONFIG_FILE}")
-        # Generate UUID and set it
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config(config)
         logger.info(f"[Info] Generated new UUID: {script_uuid} and created {CONFIG_FILE}")
 
-    # After reading config, check for 'script_uuid'
     if 'script_uuid' in config and config['script_uuid']:
         script_uuid = config['script_uuid']
     else:
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
+        config['voice'] = 'GLaDOS'  # Just to set an example voice
         write_config(config)
         logger.info(f"[Info] Generated new UUID: {script_uuid} and updated {CONFIG_FILE}")
-
-    # Debug: Print configuration after reading
+    
     logger.debug("Configuration Loaded:")
     for k, v in config.items():
-        if k == 'script_uuid':
-            logger.debug(f"{k}={v}")  # Display script_uuid
-        else:
-            logger.debug(f"{k}={v}")
+        logger.debug(f"{k}={v}")
+    
     return config
 
-# Function to write configuration to file
+
+# Function to write configuration to a JSON file
 def write_config(config_data):
     logger.info(f"Writing configuration to {CONFIG_FILE}")
     with config_lock:
+        # Save the config in proper JSON format
         with open(CONFIG_FILE, 'w') as f:
-            for key, value in config_data.items():
-                value = str(value)  # Ensure all values are strings
-                if any(c in value for c in ' \n"\\'):
-                    # If value contains special characters, enclose it in quotes and escape
-                    escaped_value = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                    f.write(f'{key}="{escaped_value}"\n')
-                else:
-                    f.write(f"{key}={value}\n")
+            json.dump(config_data, f, indent=4)
+
 
 # Lock for thread-safe operations
 config_lock = threading.Lock()

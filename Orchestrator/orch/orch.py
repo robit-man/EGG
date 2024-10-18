@@ -1,4 +1,5 @@
 import threading
+import traceback
 import time
 import socket
 import json
@@ -14,11 +15,13 @@ ROUTES_FILE = 'routes.cf'
 # Default configuration
 default_config = {
     'known_ports': '2000-8000',  # Scan ports from 2000 to 8000
-    'scan_interval': '5',        # Time interval in seconds to scan for peripherals
-    'command_port': '6000',      # Port to listen for commands and data
-    'data_port': '6001',         # Port to receive data from peripherals
-    'peripherals': '[]',         # List of known peripherals (will be stored as JSON)
+    'scan_interval': 5,          # Time interval in seconds to scan for peripherals (changed to integer)
+    'command_port': 6000,        # Port to listen for commands and data (changed to integer)
+    'data_port_range': '6001-6010',  # Range of ports to receive data from peripherals
+    'peripherals': [],           # List of known peripherals (stored as an empty list)
+    'script_uuid': str(uuid.uuid4()),  # Generate a unique UUID string for the script
 }
+
 
 config = {}
 
@@ -54,38 +57,38 @@ in_command_mode = threading.Event()
 # Lock for configuration file operations
 config_lock = threading.Lock()
 
-
 def read_config():
     global config, orchestrator_uuid
     config = default_config.copy()
+    
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if '=' in line and not line.startswith('#'):
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    if key in config:
-                        if key == 'peripherals':
-                            try:
-                                config[key] = json.loads(value)
-                            except json.JSONDecodeError:
-                                config[key] = []
-                                log_message(f"Invalid JSON for peripherals in {CONFIG_FILE}. Resetting to empty list.")
-                        else:
-                            config[key] = value
-                    else:
-                        print(f"Unknown configuration key: {key}")
+            try:
+                # Load the config as JSON
+                config = json.load(f)
+                
+                # Ensure peripherals is a list (in case it's missing or incorrectly formatted)
+                if 'peripherals' not in config or not isinstance(config['peripherals'], list):
+                    config['peripherals'] = []
+                    log_message(f"Invalid or missing 'peripherals' in {CONFIG_FILE}. Resetting to empty list.")
+
+            except json.JSONDecodeError:
+                log_message(f"Invalid JSON format in {CONFIG_FILE}. Resetting to default config.")
+                config = default_config.copy()
+                write_config()  # Write default config if there was an error
+
     else:
         write_config()
-    # Ensure consistent UUID
-    if 'script_uuid' in config and config['script_uuid']:
+
+    # Ensure UUID is handled correctly
+    if 'script_uuid' in config and isinstance(config['script_uuid'], str):
         orchestrator_uuid = config['script_uuid']
     else:
         orchestrator_uuid = str(uuid.uuid4())
         config['script_uuid'] = orchestrator_uuid
         write_config()
+
+    log_message(f"Config: {config}")  # Log the full config to inspect it
     return config
 
 
@@ -93,12 +96,8 @@ def write_config():
     with peripherals_lock:
         with config_lock:
             with open(CONFIG_FILE, 'w') as f:
-                for key, value in config.items():
-                    if key == 'peripherals':
-                        # Convert peripherals list to JSON string
-                        value = json.dumps(value)
-                    f.write(f"{key}={value}\n")
-
+                # Write the config dictionary as a formatted JSON object
+                json.dump(config, f, indent=4)
 
 def read_routes():
     global routes
@@ -117,6 +116,24 @@ def write_routes():
     with routes_lock:
         with open(ROUTES_FILE, 'w') as f:
             json.dump(routes, f, indent=4)
+
+def parse_port_range(port_range_str):
+    """
+    Parse a port range string (e.g., '6001-6010') into a list of ports.
+    """
+    ports = []
+    for part in port_range_str.split(','):
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                ports.extend(range(start, end + 1))
+            except ValueError:
+                print(f"Invalid port range: {part}")
+        elif part.isdigit():
+            ports.append(int(part))
+        else:
+            print(f"Invalid port entry: {part}")
+    return ports
 
 
 def scan_ports():
@@ -154,8 +171,12 @@ def check_port(port):
             if response:
                 process_response(response, port)
     except Exception as e:
+        # Handling peripheral information retrieval
         peripheral = get_peripheral_by_port(port)
-        peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
+        if peripheral:  # Check if peripheral is a valid dictionary
+            peripheral_info = f"{peripheral['name']} (Port: {port})" 
+        else:
+            peripheral_info = f"Unknown Peripheral on Port {port}"
         log_message(f"Error connecting to port {port} for {peripheral_info}: {e}")
 
 
@@ -192,7 +213,7 @@ def process_response(response, port):
             same_name_count = sum(1 for p in config['peripherals'] if p['name'] == name or p['name'].startswith(f"{name}_"))
             if same_name_count > 0:
                 peripheral['name'] = f"{name}_{same_name_count + 1}"
-            config['peripherals'].append(peripheral)
+            config['peripherals'].append(peripheral)  # Ensure peripherals is a list
             log_message(f"Discovered new peripheral: {peripheral['name']} on port {port}")
 
     write_config()
@@ -219,23 +240,36 @@ def periodic_scan():
 
 
 def start_orchestrator():
-    try:
-        read_config()
-        read_routes()
-        assign_colors_to_peripherals()
-        threading.Thread(target=periodic_scan, daemon=True).start()
-        threading.Thread(target=command_listener, daemon=True).start()
-        threading.Thread(target=data_listener, daemon=True).start()
-        run_curses_interface()
-    except Exception as e:
-        log_message(f"Error in start_orchestrator: {e}")
-        # Ensure curses is cleaned up if an error occurs
+    retry_delay = 5  # Delay in seconds before retrying
+
+    while True:
         try:
-            curses.endwin()
-        except Exception:
-            pass
-        # Restart the orchestrator
-        start_orchestrator()
+            log_message("Reading config...")
+            read_config()  # Check config structure here
+            log_message("Reading routes...")
+            read_routes()  # Check if routes file is processed correctly
+            log_message("Assigning colors...")
+            assign_colors_to_peripherals()
+            
+            log_message("Starting threads...")
+            threading.Thread(target=periodic_scan, daemon=True).start()
+            threading.Thread(target=command_listener, daemon=True).start()
+            threading.Thread(target=data_listener, daemon=True).start()
+            
+            log_message("Running curses interface...")
+            run_curses_interface()  # Only if everything else succeeds
+        except Exception as e:
+            log_message(f"Error in start_orchestrator: {e}")
+            
+            # Ensure curses is cleaned up if an error occurs
+            try:
+                curses.endwin()
+            except Exception:
+                pass
+
+            log_message(f"Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+
 
 
 def process_command(command, source, conn=None):
@@ -327,25 +361,25 @@ def register_peripheral(name, peripheral_uuid, port, conn):
             'port': port,
             'last_seen': time.time(),
         }
-        # Check for existing peripheral by UUID
+
+        # Dynamically assign a data port from the available range
+        available_data_ports = parse_port_range(config.get('data_port_range', '6001-6010'))
+        assigned_data_port = available_data_ports[len(config['peripherals']) % len(available_data_ports)]  # Rotate through the data ports
+
+        peripheral['data_port'] = assigned_data_port  # Assign the unique data port to the peripheral
+
+        # Add or update the peripheral in the config
         existing = next((p for p in config['peripherals'] if p['uuid'] == peripheral_uuid), None)
         if existing:
-            # Update existing peripheral's last_seen and other info
             existing.update(peripheral)
-            log_message(f"Updated existing peripheral: {existing['name']} on port {port}")
         else:
-            # Handle multiple instances of the same peripheral
-            same_name_count = sum(1 for p in config['peripherals'] if p['name'] == name or p['name'].startswith(f"{name}_"))
-            if same_name_count > 0:
-                peripheral['name'] = f"{name}_{same_name_count + 1}"
             config['peripherals'].append(peripheral)
-            log_message(f"Registered new peripheral: {peripheral['name']} on port {port}")
+        
+        log_message(f"Registered new peripheral: {peripheral['name']} on port {port}, assigned data port {assigned_data_port}")
     write_config()
-    assign_colors_to_peripherals()
 
-    # Send acknowledgment with data port
-    data_port = config.get('data_port', '6001')
-    response = f"/ack {data_port}\n"
+    # Send acknowledgment with the assigned data port
+    response = f"/ack {assigned_data_port}\n"
     if conn:
         try:
             conn.sendall(response.encode())
@@ -464,11 +498,17 @@ def add_route(route_name, incoming_name, outgoing_name):
 
 
 def remove_route(route_name):
-    with routes_lock:
+    with routes_lock:  # Lock for thread safety
+        # Find the route by name
         route = next((r for r in routes if r['name'] == route_name), None)
+        
         if not route:
             return f"Route '{route_name}' not found."
+
+        # Remove the entire route object from the list
         routes.remove(route)
+
+    # Write the updated routes list to the routes.cf file
     write_routes()
     return f"Route '{route_name}' removed successfully."
 
@@ -563,13 +603,14 @@ def command_listener():
 
 
 def data_listener():
-    data_ports = [6001, 6002, 6003, 6004, 6005, 6006]  # Define your data port range here
+    data_port_range = config.get('data_port_range', '6001-6010')
+    data_ports = parse_port_range(data_port_range)  # Dynamically parse the port range
     host = '0.0.0.0'
     
     def listen_on_port(port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Enable address reuse
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind((host, port))
                 s.listen(5)
                 log_message(f"Data listener started on {host}:{port}")
@@ -578,17 +619,14 @@ def data_listener():
                         conn, addr = s.accept()
                         threading.Thread(target=handle_data_connection, args=(conn, addr), daemon=True).start()
                     except socket.error as e:
-                        peripheral = get_peripheral_by_port(port)
-                        peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
-                        log_message(f"Socket error on data port {port} for {peripheral_info}: {e}")
+                        log_message(f"Socket error on data port {port}: {e}")
         except Exception as e:
-            peripheral = get_peripheral_by_port(port)
-            peripheral_info = f"{peripheral['name']} (Port: {port})" if peripheral else f"Unknown Peripheral on Port {port}"
-            log_message(f"Error in data_listener on port {port} for {peripheral_info}: {e}")
+            log_message(f"Error in data_listener on port {port}: {e}")
 
-    # Start a listener thread for each port in the range
+    # Start listeners for each data port
     for port in data_ports:
         threading.Thread(target=listen_on_port, args=(port,), daemon=True).start()
+
         
 def handle_client_connection(conn, addr):
     with conn:
@@ -828,6 +866,7 @@ def main_menu():
         "Add Route",
         "Edit Route",
         "Remove Route",
+        "Remove Peripheral",  # Add this new option
         "Reset Orchestrator",
         "Exit Menu"
     ]
@@ -877,6 +916,8 @@ def main_menu():
                 edit_route_menu()
             elif selected_item == "Remove Route":
                 remove_route_menu()
+            elif selected_item == "Remove Peripheral":  # Handle new menu item
+                remove_peripheral_menu()  # Call the new function
             elif selected_item == "Reset Orchestrator":
                 reset_orchestrator_menu()
             elif selected_item == "Exit Menu":
@@ -884,6 +925,7 @@ def main_menu():
         elif key == 27:  # ESC key
             break
         time.sleep(0.1)
+
 
 
 def list_peripherals_menu():
@@ -897,6 +939,51 @@ def list_peripherals_menu():
                 message += f"{idx + 1}. {peripheral['name']} (UUID: {peripheral['uuid']})\n"
 
     display_message("List Peripherals", message)
+
+def remove_peripheral_menu():
+    try:
+        log_message("Entered remove_peripheral_menu.")
+        
+        # Lock the peripherals to safely access the shared resource
+        with peripherals_lock:
+            if not config['peripherals']:
+                display_message("Remove Peripheral", "No peripherals to remove.")
+                log_message("No peripherals to remove.")
+                return
+
+            # List the available peripherals
+            peripheral_names = [p['name'] for p in config['peripherals']]
+        
+        log_message("Peripherals fetched successfully.")
+
+        # Ask the user to select a peripheral to remove
+        selected_peripheral = select_item("Select Peripheral to Remove (press Enter to remove, ESC to cancel):", peripheral_names)
+        
+        # Handle ESC key or cancellation by user
+        if not selected_peripheral:
+            log_message("Remove Peripheral canceled by user during selection.")
+            return  # Properly exit if no peripheral is selected (ESC was pressed)
+        
+        log_message(f"User selected peripheral: {selected_peripheral}")
+
+        # Confirm removal
+        confirmation = prompt_user(f"Are you sure you want to remove the peripheral '{selected_peripheral}'? (y/n or press ESC to cancel): ")
+        if confirmation is None or confirmation.lower() != 'y':
+            log_message(f"Remove Peripheral for '{selected_peripheral}' canceled by user.")
+            return
+
+        # Proceed with peripheral removal
+        with peripherals_lock:
+            config['peripherals'] = [p for p in config['peripherals'] if p['name'] != selected_peripheral]
+        
+        write_config()  # Update the config file after removal
+        
+        display_message("Remove Peripheral", f"Peripheral '{selected_peripheral}' removed successfully.")
+        log_message(f"Peripheral '{selected_peripheral}' removed successfully.")
+    
+    except Exception as e:
+        # Log the error with traceback
+        log_message(f"Exception in remove_peripheral_menu: {e}\n{traceback.format_exc()}")
 
 
 def add_route_menu():
@@ -1008,30 +1095,50 @@ def edit_route_menu():
 
 
 def remove_route_menu():
-    with routes_lock:
-        if not routes:
-            display_message("Remove Route", "No routes to remove.")
+    try:
+        log_message("Entered remove_route_menu.")
+        
+        # Lock the routes to safely access the shared resource
+        with routes_lock:
+            if not routes:
+                display_message("Remove Route", "No routes to remove.")
+                log_message("No routes to remove.")
+                return
+
+            # List the available routes
+            route_names = [route['name'] for route in routes if route['name'].strip()]
+        
+        log_message("Routes fetched successfully.")
+
+        # Ask the user to select a route to remove
+        selected_route = select_item("Select Route to Remove (press Enter to remove, ESC to cancel):", route_names)
+        
+        # Handle ESC key or cancellation by user
+        if not selected_route:
+            log_message("Remove Route canceled by user during selection.")
+            return  # Properly exit if no route is selected (ESC was pressed)
+        
+        log_message(f"User selected route: {selected_route}")
+
+        # Confirm removal
+        confirmation = prompt_user(f"Are you sure you want to remove the route '{selected_route}'? (y/n or press ESC to cancel): ")
+        if confirmation is None or confirmation.lower() != 'y':
+            log_message(f"Remove Route for '{selected_route}' canceled by user.")
             return
-        route_names = [route['name'] for route in routes]
 
-    selected_route = select_item("Select Route to Remove (or press ESC to cancel):", route_names)
-    if not selected_route:
-        return
+        # Proceed with route removal
+        result = remove_route(selected_route)
+        display_message("Remove Route", result)
+        
+        # Clear and refresh the screen after removal
+        stdscr.clear()  # Clear the screen
+        stdscr.refresh()  # Refresh the curses interface to show updated routes
+        log_message(f"UI refreshed successfully after removal of route '{selected_route}'.")
 
-    confirmation = prompt_user(f"Are you sure you want to remove route '{selected_route}'? (y/n or press ESC to cancel): ")
-    if confirmation is None or confirmation.lower() != 'y':
-        log_message("Remove Route canceled by user during confirmation.")
-        return
+    except Exception as e:
+        # Log the error with traceback
+        log_message(f"Exception in remove_route_menu: {e}\n{traceback.format_exc()}")
 
-    with routes_lock:
-        route = next((r for r in routes if r['name'] == selected_route), None)
-        if route:
-            routes.remove(route)
-            write_routes()
-            log_message(f"Removed route '{selected_route}'")
-            display_message("Remove Route", f"Route '{selected_route}' removed successfully.")
-        else:
-            display_message("Remove Route", "Selected route not found.")
 
 
 def reset_orchestrator_menu():
@@ -1078,6 +1185,7 @@ def prompt_user(prompt_text):
     curses.curs_set(1)
     input_str = ""
     while True:
+        stdscr.timeout(5000)  # Timeout after 5 seconds
         key = stdscr.getch()
         if key == 27:  # ESC key
             curses.noecho()
@@ -1104,6 +1212,7 @@ def prompt_user(prompt_text):
     curses.noecho()
     curses.curs_set(0)
     return input_str.strip()
+
 
 
 def select_item(prompt_text, options):

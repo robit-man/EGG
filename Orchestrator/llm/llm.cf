@@ -1,5 +1,5 @@
 {
-    "model_name": "llama3.2:1b",
+    "model_name": "llama3.2:3b",
     "input_mode": "port",
     "output_mode": "port",
     "input_format": "chunk",
@@ -8,7 +8,7 @@
     "orchestrator_host": "localhost",
     "orchestrator_ports": "6000-6010",
     "route": "/llm",
-    "script_uuid": "6df74b76-8ae4-41bd-aed4-c5451656b823",
+    "script_uuid": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
     "system_prompt": "You Respond Conversationally",
     "temperature": 0.7,
     "top_p": 0.9,
@@ -18,5 +18,5 @@
     "json_filtering": false,
     "api_endpoint": "generate",
     "port": "6200",
-    "data_port": "6001"
+    "data_port": "6006"
 }

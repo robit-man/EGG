@@ -1,34 +1,26 @@
 [
     {
-        "name": "asr_slm",
-        "incoming": "e8868ec1-83f4-485c-8e55-8d582cea49f5",
-        "outgoing": "65b121e3-050d-47d1-992d-13e230bc7863",
-        "incoming_port": 6202,
-        "outgoing_port": 6201,
-        "last_used": 1729281477.2360692
-    },
-    {
-        "name": "slm_sum",
-        "incoming": "65b121e3-050d-47d1-992d-13e230bc7863",
-        "outgoing": "cb7505b4-1758-4ee4-b9e9-fb1d4f0f1f0b",
-        "incoming_port": 6201,
-        "outgoing_port": 6203,
-        "last_used": 1729281495.9768035
+        "name": "asr_sum",
+        "incoming": "2e3cf303-5df6-44bc-b3ff-1425e243745e",
+        "outgoing": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
+        "incoming_port": 6203,
+        "outgoing_port": 6202,
+        "last_used": 1729292666.4903502
     },
     {
         "name": "sum_llm",
-        "incoming": "cb7505b4-1758-4ee4-b9e9-fb1d4f0f1f0b",
-        "outgoing": "6df74b76-8ae4-41bd-aed4-c5451656b823",
-        "incoming_port": 6203,
+        "incoming": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
+        "outgoing": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
+        "incoming_port": 6202,
         "outgoing_port": 6200,
-        "last_used": 1729281497.265491
+        "last_used": 1729292667.735386
     },
     {
         "name": "llm_tts",
-        "incoming": "6df74b76-8ae4-41bd-aed4-c5451656b823",
-        "outgoing": "3d8a8924-fe44-48e6-ab80-5fcd1be3710e",
+        "incoming": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
+        "outgoing": "37d46837-f12a-4215-bd74-8d123bdb6a3d",
         "incoming_port": 6200,
         "outgoing_port": 6100,
-        "last_used": 1729281497.8696635
+        "last_used": 1729292670.0468836
     }
 ]

@@ -1,5 +1,5 @@
 {
-    "port": "6202",
+    "port": "6203",
     "port_range": "6200-6300",
     "orchestrator_host": "localhost",
     "orchestrator_port": "6000",
@@ -10,5 +10,5 @@
     "input_device": "",
     "sample_rate": "16000",
     "chunk_size": "1600",
-    "script_uuid": "e8868ec1-83f4-485c-8e55-8d582cea49f5"
+    "script_uuid": "2e3cf303-5df6-44bc-b3ff-1425e243745e"
 }

@@ -171,13 +171,17 @@ def asr_processing():
     offline_config = riva.client.RecognitionConfig(
         encoding=riva.client.AudioEncoding.LINEAR_PCM,
         sample_rate_hertz=sample_rate,
-        max_alternatives=1,
-        enable_automatic_punctuation=True,
-        verbatim_transcripts=True,
+        max_alternatives=3,
+        enable_automatic_punctuation=True,  # Ensure punctuation is automatically added
+        verbatim_transcripts=True,          # Ensure transcripts reflect exactly what's said
         language_code=language_code
     )
+
+    # Simplified StreamingRecognitionConfig without manual endpointing
     streaming_config = riva.client.StreamingRecognitionConfig(
-        config=deepcopy(offline_config), interim_results=False
+        config=deepcopy(offline_config),
+        interim_results=False               # Only deliver final results
+        # We rely on Riva's default endpointing behavior to handle sentence completion
     )
 
     # Set up audio input stream
@@ -217,6 +221,8 @@ def asr_processing():
 
     except Exception as e:
         print(f"Error during ASR streaming: {e}")
+
+
 
 def send_text_to_orchestrator(response_generator):
     host = config.get('orchestrator_host', 'localhost')

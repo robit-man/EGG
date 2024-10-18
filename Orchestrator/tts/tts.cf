@@ -5,7 +5,7 @@
     "port": "6100",
     "route": "/tts_route",
     "voice": "GLaDOS",
-    "script_uuid": "3d8a8924-fe44-48e6-ab80-5fcd1be3710e",
+    "script_uuid": "37d46837-f12a-4215-bd74-8d123bdb6a3d",
     "orchestrator_host": "localhost",
     "orchestrator_ports": "6000-6005",
     "data_port": "6006"

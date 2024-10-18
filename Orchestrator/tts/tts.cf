@@ -1,10 +1,12 @@
-input_mode=port
-input_format=streaming
-output_mode=speaker
-port=6100
-route=/tts_route
-voice=GLaDOS
-script_uuid=225900b7-a737-49bd-9728-56efdc9e4acb
-orchestrator_host=localhost
-orchestrator_ports=6000-6005
-data_port=6001
+{
+    "input_mode": "port",
+    "input_format": "chunk",
+    "output_mode": "speaker",
+    "port": "6100",
+    "route": "/tts_route",
+    "voice": "GLaDOS",
+    "script_uuid": "3d8a8924-fe44-48e6-ab80-5fcd1be3710e",
+    "orchestrator_host": "localhost",
+    "orchestrator_ports": "6000-6005",
+    "data_port": "6006"
+}

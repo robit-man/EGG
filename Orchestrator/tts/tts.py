@@ -16,6 +16,7 @@ import riva.client
 import uuid
 import logging  # Import logging module
 import traceback  # For detailed exception traces
+import subprocess  # For calling pactl to mute/unmute mic
 
 # Initialize logging
 logging.basicConfig(
@@ -510,9 +511,38 @@ def perform_warmup(tts_stub, selected_voice):
         logger.error(f"Unexpected error during warm-up: {e}")
         logger.debug(traceback.format_exc())
 
-# Generate TTS and Playback
-def tts_generation_and_playback(tts_stub, selected_voice):
+# Function to mute the microphone
+def mute_microphone():
+    try:
+        # Use pactl to get the default input source
+        default_source = subprocess.check_output(
+            ["pactl", "get-default-source"], universal_newlines=True
+        ).strip()
+
+        # Mute the default input source
+        subprocess.run(["pactl", "set-source-mute", default_source, "1"], check=True)
+        logger.info(f"Microphone {default_source} muted.")
+    except Exception as e:
+        logger.error(f"Failed to mute the microphone: {e}")
+
+# Function to unmute the microphone
+def unmute_microphone():
+    try:
+        # Use pactl to get the default input source
+        default_source = subprocess.check_output(
+            ["pactl", "get-default-source"], universal_newlines=True
+        ).strip()
+
+        # Unmute the default input source
+        subprocess.run(["pactl", "set-source-mute", default_source, "0"], check=True)
+        logger.info(f"Microphone {default_source} unmuted.")
+    except Exception as e:
+        logger.error(f"Failed to unmute the microphone: {e}")
+
+# Function to generate TTS and playback in batches with microphone muting
+def tts_generation_and_playback(tts_stub, selected_voice, batch_size=4, batch_delay=0.1):
     output_mode = config['output_mode']
+    output_file = None  # Initialize output_file to None
 
     # Initialize audio output stream
     if output_mode == 'speaker':
@@ -523,9 +553,12 @@ def tts_generation_and_playback(tts_stub, selected_voice):
                 channels=output_channels,
                 rate=sample_rate,
                 output=True,
-                frames_per_buffer=2048  # Increased buffer size
+                frames_per_buffer=1024  # Adjusted buffer size
             )
             logger.info("Audio output stream opened successfully.")
+            
+            # Add a short delay to ensure the stream is stable
+            time.sleep(0.1)  # 100ms delay for stability
         except Exception as e:
             logger.error(f"Failed to open audio output stream: {e}")
             return
@@ -537,38 +570,81 @@ def tts_generation_and_playback(tts_stub, selected_voice):
         except Exception as e:
             logger.error(f"Failed to open output file: {e}")
             return
-    elif output_mode == 'stream':
-        # Implement stream output if needed
-        logger.info("Stream output mode is not yet implemented.")
-        pass
-    else:
-        logger.error("Invalid output mode.")
-        return
+
+    batch = []
 
     # Process TTS requests from the queue
     while not cancel_event.is_set():
         try:
-            text = tts_queue.get(timeout=1)
+            text = tts_queue.get(timeout=10)  # Adjust timeout as needed
         except queue.Empty:
             continue
 
         if text:
             logger.info(f"Original text: {text}")
-            # Replace special characters and numbers
+            # Process the text for TTS
             processed_text = replace_special_characters_and_numbers(text)
-            logger.info(f"Processed text: {processed_text}")
-
-            # Split the text into sentences before processing to avoid overloading the model
             sentences = split_text_into_sentences(processed_text)
 
             for sentence in sentences:
-                # Further split sentences if they exceed 400 characters
                 if len(sentence) > 400:
                     text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
                 else:
                     text_chunks = [sentence]
 
+                # Process each sentence chunk one at a time
                 for chunk in text_chunks:
+                    batch.append(chunk)
+
+                    if len(batch) >= batch_size:
+                        process_batch(tts_stub, selected_voice, batch, output_mode, stream, output_file)
+                        batch = []  # Reset batch after processing
+                        time.sleep(batch_delay)  # Throttle requests minimally
+
+    # Cleanup resources after completion
+    if output_mode == 'speaker':
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        logger.info("Audio output stream closed.")
+    elif output_mode == 'file' and output_file is not None:
+        output_file.close()
+        logger.info("Output file closed.")
+
+
+
+tts_lock = threading.Lock()
+
+def check_server_readiness(tts_stub):
+    """Checks if the TTS server is ready for inference."""
+    try:
+        # Send a request for synthesis configuration as a lightweight readiness check
+        request = riva_tts_pb2.RivaSynthesisConfigRequest()
+        response = tts_stub.GetRivaSynthesisConfig(request)
+        if response:
+            logger.info("TTS server is ready.")
+            return True
+    except grpc.RpcError as e:
+        logger.error(f"TTS server readiness check failed: {e.details()}")
+    return False
+
+
+def process_batch(tts_stub, selected_voice, batch, output_mode, stream, output_file):
+    logger.info(f"Processing batch of size {len(batch)}")
+    mute_microphone()  # Mute the microphone during playback
+
+    for chunk in batch:
+        retries = 2
+        attempt = 0
+        while attempt < retries:
+            with tts_lock:
+                try:
+                    # Check server readiness before each inference
+                    if not check_server_readiness(tts_stub):
+                        logger.warning("TTS server is not ready, waiting briefly before retrying.")
+                        time.sleep(0.5)  # Wait briefly before retrying if server is not ready
+                        continue
+
                     req = riva_tts_pb2.SynthesizeSpeechRequest(
                         text=chunk,
                         language_code=selected_voice['language'],
@@ -577,46 +653,34 @@ def tts_generation_and_playback(tts_stub, selected_voice):
                         voice_name=selected_voice['name']
                     )
 
-                    retries = 3
-                    for attempt in range(retries):
-                        try:
-                            # Send the TTS request
-                            resp = tts_stub.Synthesize(req, timeout=15)
-                            audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
+                    # Issue the TTS request to the server
+                    resp = tts_stub.Synthesize(req, timeout=5)
+                    audio_samples = np.frombuffer(resp.audio, dtype=np.int16)
 
-                            if output_mode == 'speaker':
-                                stream.write(audio_samples.tobytes())
-                            elif output_mode == 'file':
-                                output_file.write(resp.audio)
-                            elif output_mode == 'stream':
-                                # Implement streaming output
-                                logger.info("Streaming output is not yet implemented.")
-                                pass
+                    # Playback the audio
+                    if output_mode == 'speaker':
+                        stream.write(audio_samples.tobytes())
+                    elif output_mode == 'file':
+                        output_file.write(resp.audio)
 
-                            # Small sleep to prevent buffer overruns
-                            time.sleep(0.05)
-                            break  # Exit retry loop if successful
-                        except grpc.RpcError as e:
-                            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                                logger.warning(f"Attempt {attempt + 1}/{retries}: TTS deadline exceeded. Retrying...")
-                                time.sleep(1)  # Small delay before retrying
-                            else:
-                                logger.error(f"TTS generation failed: {e.details()}")
-                                break  # Exit if it's not a deadline error
-                        except Exception as e:
-                            logger.error(f"An unexpected error occurred during TTS generation: {e}")
-                            logger.debug(traceback.format_exc())
-                            break  # Exit retry loop for unexpected errors
+                    logger.info(f"Successfully processed chunk: {chunk}")
+                    break  # Exit retry loop if successful
 
-    # Cleanup resources upon cancellation
-    if output_mode == 'speaker':
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-        logger.info("Audio output stream closed.")
-    elif output_mode == 'file':
-        output_file.close()
-        logger.info("Output file closed.")
+                except grpc.RpcError as e:
+                    if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                        attempt += 1
+                        logger.warning(f"Attempt {attempt}/{retries}: TTS deadline exceeded, retrying...")
+                    else:
+                        logger.error(f"TTS generation failed: {e.details()}")
+                        break  # Don't retry on non-deadline errors
+
+                except Exception as e:
+                    logger.error(f"Unexpected error during TTS generation: {e}")
+                    logger.debug(traceback.format_exc())
+                    break  # Break on unknown errors
+
+    unmute_microphone()  # Unmute the microphone after playback
+
 
 # Start TTS Thread
 def start_tts_thread(tts_stub, selected_voice):
@@ -624,7 +688,7 @@ def start_tts_thread(tts_stub, selected_voice):
     if current_tts_thread and current_tts_thread.is_alive():
         logger.info("TTS thread is already running. Attempting to terminate existing thread...")
         cancel_event.set()
-        current_tts_thread.join()
+        current_tts_thread.join()  # Ensure the thread terminates before starting a new one
         logger.info("Existing TTS thread terminated.")
 
     cancel_event.clear()
@@ -632,14 +696,23 @@ def start_tts_thread(tts_stub, selected_voice):
     current_tts_thread.start()
     logger.info("TTS thread started successfully.")
 
-# Handle incoming text via port
+
+
+# Function to monitor queue size before adding text to the queue
+def add_text_to_queue(text):
+    if tts_queue.qsize() < 10:  # Adjust this threshold based on system capacity
+        tts_queue.put(text)
+        logger.info(f"Queued text for TTS: {text}")
+    else:
+        logger.warning(f"Queue is full. Skipping text: {text}")
+
+# Example usage in a handler
 def handle_port_client(client_socket, addr):
     with client_socket:
         try:
             data = client_socket.recv(1024).decode().strip()
             if data == '/info':
                 response = f"{script_name}\n{script_uuid}\n"
-                # Include config
                 for key, value in config.items():
                     response += f"{key}={value}\n"
                 response += 'EOF\n'
@@ -657,7 +730,7 @@ def handle_port_client(client_socket, addr):
                 cancel_event.set()
             else:
                 logger.info(f"Received from {addr}: {data}")
-                tts_queue.put(data)
+                add_text_to_queue(data)
         except Exception as e:
             logger.error(f"Error handling client {addr}: {e}")
 
@@ -823,6 +896,9 @@ def main():
     global available_voices  # To access in terminal_input
     global tts_stub
     global selected_voice
+
+    # Unmute the microphone on startup
+    unmute_microphone()
 
     # Read configuration from file
     read_config()

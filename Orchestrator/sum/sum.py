@@ -17,33 +17,34 @@ default_config = {
     'model_name': 'llama3.2:1b',
     'input_mode': 'port',           # Options: 'port', 'terminal', 'route'
     'output_mode': 'port',          # Options: 'port', 'terminal', 'route'
-    'input_format': 'streaming',    # Options: 'streaming', 'chunk'
-    'output_format': 'streaming',   # Options: 'streaming', 'chunk'
+    'input_format': 'chunk',        # Options: 'streaming', 'chunk'
+    'output_format': 'chunk',       # Options: 'streaming', 'chunk'
     'port_range': '6200-6300',
     'orchestrator_host': 'localhost',
-    'orchestrator_ports': '6000-6005',  # Updated to handle multiple ports
+    'orchestrator_ports': '6000-6010',  # Updated to handle multiple ports
     'route': '/sum',
     'script_uuid': '',              # Initialize as empty; will be set in read_config()
-    'system_prompt': "You Respond Conversationally",
-    'temperature': '0.6',           # Model parameter: temperature
-    'top_p': '0.9',                 # Model parameter: top_p
-    'max_tokens': '70',            # Model parameter: max tokens
-    'repeat_penalty': '1.0',        # Model parameter: repeat penalty
-    'inference_timeout': '5',       # Timeout in seconds for inference
-    'json_filtering': 'true',
+    'system_prompt': "You summarize what you recieve and perform additional analysis",
+    'temperature': 0.7,             # Model parameter: temperature
+    'top_p': 0.9,                   # Model parameter: top_p
+    'max_tokens': 150,              # Model parameter: max tokens
+    'repeat_penalty': 1.0,          # Model parameter: repeat penalty
+    'inference_timeout': 5,         # Timeout in seconds for inference
+    'json_filtering': False,        # Use JSON filtering by default
+    'api_endpoint': 'generate'      # New option: 'generate' or 'chat'
 }
+
 config = {}
 
 # UUID and name for the peripheral
-# Initialize script_uuid as None; it will be set in read_config()
 script_uuid = None
 script_name = 'SUM_Engine'
 
 # Event to signal shutdown
 cancel_event = threading.Event()
 
-# Ollama API endpoint
-OLLAMA_URL = "http://localhost:11434/api/generate"
+# Ollama API base URL
+OLLAMA_URL = "http://localhost:11434/api/"
 
 # Lock for thread-safe operations
 config_lock = threading.Lock()
@@ -51,86 +52,61 @@ config_lock = threading.Lock()
 # Registration flag
 registered = False
 
-# Function to read configuration from file
+# Function to read configuration from a JSON file
 def read_config():
     global config, script_uuid
-    config = default_config.copy()
+    config = default_config.copy()  # Start with the default configuration
+
+    # Read from JSON file if it exists
     if os.path.exists(CONFIG_FILE):
         print(f"Reading configuration from {CONFIG_FILE}")
-        with open(CONFIG_FILE, 'r') as f:
-            content = f.read()
-            # Use regex to parse key="value" pairs with support for escaped characters
-            matches = re.findall(r'(\w+)\s*=\s*("(?:\\.|[^"])*"|[^\n]+)', content)
-            for key, value in matches:
-                key = key.strip()
-                value = value.strip()
-                if value.startswith('"') and value.endswith('"'):
-                    # Remove surrounding quotes and unescape characters
-                    try:
-                        value = bytes(value[1:-1], "utf-8").decode("unicode_escape")
-                    except UnicodeDecodeError:
-                        print(f"[Error] Decoding error for key '{key}'. Using raw value.")
-                        value = value[1:-1]
-                if key in config:
-                    config[key] = value
-                else:
-                    print(f"Unknown configuration key: {key}")
-    else:
-        # If CONFIG_FILE does not exist, generate a new UUID and create the config file
-        script_uuid = str(uuid.uuid4())
-        config['script_uuid'] = script_uuid  # Add UUID to config
-        write_config(config)
-        print(f"[Info] Generated new UUID: {script_uuid} and created {CONFIG_FILE}")
-    
-    # After reading config, check for 'script_uuid'
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config.update(json.load(f))  # Update default config with the values from the file
+        except (json.JSONDecodeError, FileNotFoundError):
+            print(f"[Error] Could not read {CONFIG_FILE}. Using default configuration.")
+
+    # Ensure script_uuid is set
     if 'script_uuid' in config and config['script_uuid']:
         script_uuid = config['script_uuid']
     else:
-        # If 'script_uuid' is missing or empty, generate it and update config
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
-        write_config(config)
-        print(f"[Info] Generated new UUID: {script_uuid} and updated {CONFIG_FILE}")
-    
-    # Debug: Print configuration after reading
+        write_config()  # Save updated config with the new UUID
+
+    # Debug: Print the loaded configuration
     print("[Debug] Configuration Loaded:")
     for k, v in config.items():
         if k == 'system_prompt':
             print(f"{k}={'[REDACTED]'}")  # Hide system_prompt in debug
-        elif k == 'script_uuid':
-            print(f"{k}={v}")  # Display script_uuid
         else:
             print(f"{k}={v}")
+
     return config
 
-# Function to write configuration to file
+# Function to write configuration to a JSON file
 def write_config(config_to_write=None):
     config_to_write = config_to_write or config
     print(f"Writing configuration to {CONFIG_FILE}")
     with config_lock:
         with open(CONFIG_FILE, 'w') as f:
-            for key, value in config_to_write.items():
-                value = str(value)  # Ensure all values are strings
-                if any(c in value for c in ' \n"\\'):
-                    # If value contains special characters, enclose it in quotes and escape
-                    escaped_value = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                    f.write(f'{key}="{escaped_value}"\n')
-                else:
-                    f.write(f"{key}={value}\n")
+            json.dump(config_to_write, f, indent=4)
 
-# Function to parse command-line arguments
+# Function to parse command-line arguments and update config
 def parse_args():
     parser = argparse.ArgumentParser(description='SUM Engine Peripheral')
     parser.add_argument('--port-range', type=str, help='Port range to use for connections')
     parser.add_argument('--orchestrator-host', type=str, help='Orchestrator host address')
-    parser.add_argument('--orchestrator-ports', type=str, help='Comma-separated list or range of orchestrator command ports (e.g., 6000,6001,6002 or 6000-6005)')
+    parser.add_argument('--orchestrator-ports', type=str, help='Comma-separated list or range of orchestrator command ports')
     parser.add_argument('--model-name', type=str, help='Name of the language model to use')
     parser.add_argument('--system-prompt', type=str, help='System prompt for the model')
-    parser.add_argument('--temperature', type=str, help='Model parameter: temperature')
-    parser.add_argument('--top_p', type=str, help='Model parameter: top_p')
-    parser.add_argument('--max_tokens', type=str, help='Model parameter: max tokens')
-    parser.add_argument('--repeat_penalty', type=str, help='Model parameter: repeat penalty')
-    parser.add_argument('--inference_timeout', type=str, help='Timeout in seconds for inference')
+    parser.add_argument('--temperature', type=float, help='Model parameter: temperature')
+    parser.add_argument('--top_p', type=float, help='Model parameter: top_p')
+    parser.add_argument('--max_tokens', type=int, help='Model parameter: max tokens')
+    parser.add_argument('--repeat_penalty', type=float, help='Model parameter: repeat penalty')
+    parser.add_argument('--inference_timeout', type=int, help='Timeout in seconds for inference')
+    parser.add_argument('--api-endpoint', type=str, choices=['generate', 'chat'], help='API endpoint to use: generate or chat')
+
     args = parser.parse_args()
 
     # Update config with command-line arguments
@@ -144,16 +120,18 @@ def parse_args():
         config['model_name'] = args.model_name
     if args.system_prompt:
         config['system_prompt'] = args.system_prompt
-    if args.temperature:
+    if args.temperature is not None:
         config['temperature'] = args.temperature
-    if args.top_p:
+    if args.top_p is not None:
         config['top_p'] = args.top_p
-    if args.max_tokens:
+    if args.max_tokens is not None:
         config['max_tokens'] = args.max_tokens
-    if args.repeat_penalty:
+    if args.repeat_penalty is not None:
         config['repeat_penalty'] = args.repeat_penalty
-    if args.inference_timeout:
+    if args.inference_timeout is not None:
         config['inference_timeout'] = args.inference_timeout
+    if args.api_endpoint:
+        config['api_endpoint'] = args.api_endpoint
 
     write_config()
     return args
@@ -238,78 +216,54 @@ def register_with_orchestrator(port):
                     if data:
                         ack_message = data.decode().strip()
                         print(f"[Info] Received acknowledgment: {ack_message}")
-                        if isinstance(ack_message, str) and ack_message.startswith('/ack'):
-                            tokens = ack_message.split()
-                            if len(tokens) == 2 and tokens[0] == '/ack':
-                                try:
-                                    data_port = tokens[1]  # Keep as string
-                                    config['data_port'] = data_port
-                                    write_config(config)
-                                    print(f"[Info] Registered successfully. Data port: {data_port}")
-                                    registered = True
-                                    return True
-                                except ValueError:
-                                    print(f"[Error] Invalid data port received in acknowledgment: {tokens[1]}")
-                            else:
-                                print(f"[Error] Unexpected acknowledgment format: {ack_message}")
-                        else:
-                            print(f"[Error] Invalid acknowledgment type: {type(ack_message)}")
+                        if ack_message.startswith('/ack'):
+                            config['data_port'] = ack_message.split()[1]
+                            write_config(config)
+                            registered = True
+                            return True
                     else:
                         print(f"[Warning] No acknowledgment received from orchestrator at {host}:{orch_port}.")
-            except socket.timeout:
-                print(f"[Error] Connection to orchestrator at {host}:{orch_port} timed out.")
-            except ConnectionRefusedError:
-                print(f"[Error] Connection refused by orchestrator at {host}:{orch_port}.")
+            except (socket.timeout, ConnectionRefusedError) as e:
+                print(f"[Error] Connection to orchestrator at {host}:{orch_port} failed: {e}")
             except Exception as e:
-                print(f"[Error] Exception during registration with orchestrator at {host}:{orch_port}: {e}")
+                print(f"[Error] Unexpected error during registration: {e}")
                 traceback.print_exc()
         print(f"Retrying registration in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
         time.sleep(retry_delay)
         retry_delay *= 2  # Exponential backoff
 
     print("[Error] Max retries reached. Could not register with orchestrator.")
-    if config['input_mode'] == 'terminal':
-        print("Failed to register with the orchestrator after multiple attempts. Entering terminal mode.")
-        return False  # Allow fallback to terminal mode
-    else:
-        print("Failed to register with the orchestrator after multiple attempts. Exiting...")
-        cancel_event.set()
-        exit(1)  # Exit the script as registration is critical
+    cancel_event.set()
+    exit(1)  # Exit the script if registration fails
+
 
 # Start server to handle incoming connections
 def start_server():
     host = '0.0.0.0'
-    port_range = config.get('port_range', '6200-6300')
-    port_list = parse_port_range(port_range)
-    server_socket = None
-
-    for port in port_list:
-        try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.bind((host, port))
-            print(f"[Info] SUM Engine listening on port {port}...")
-            config['port'] = str(port)  # Update the port in the config
-            write_config(config)
-            break
-        except OSError:
-            print(f"[Warning] Port {port} is unavailable, trying next port...")
-            if server_socket:
-                server_socket.close()
-            server_socket = None
-
-    if not server_socket:
-        print("[Error] Failed to bind to any port in the specified range.")
+    port_list = parse_port_range(config.get('port_range', '6200-6300'))  # Parse port range from config
+    
+    try:
+        # Dynamically find an available port in the specified range
+        available_port = find_available_port(port_list)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.bind((host, available_port))
+        print(f"[Info] SUM Engine listening on port {available_port}...")
+        config['port'] = str(available_port)  # Update the port in the config
+        write_config(config)  # Save the updated configuration with the selected port
+    except Exception as e:
+        print(f"[Error] Could not bind to any available port: {e}")
+        cancel_event.set()  # Ensure the script shuts down gracefully
         return
 
-    # Register with orchestrator
-    registration_successful = register_with_orchestrator(port)
+    # Register with the orchestrator
+    registration_successful = register_with_orchestrator(available_port)
 
     if not registration_successful and config['input_mode'] == 'terminal':
-        # Fallback to terminal mode
+        # Fallback to terminal mode if orchestrator registration fails
         terminal_input()
         return
     elif not registration_successful:
-        # If not in terminal mode, exit
+        # Exit if not in terminal mode and registration fails
         return
 
     server_socket.listen(5)
@@ -317,12 +271,12 @@ def start_server():
 
     while not cancel_event.is_set():
         try:
-            server_socket.settimeout(1.0)
+            server_socket.settimeout(1.0)  # Set a timeout to handle periodic cancellation
             client_socket, addr = server_socket.accept()
             print(f"[Connection] Connection from {addr}")
             threading.Thread(target=handle_client_socket, args=(client_socket,), daemon=True).start()
         except socket.timeout:
-            continue
+            continue  # Continue looping until a client connects or cancel_event is set
         except Exception as e:
             if not cancel_event.is_set():
                 print(f"[Error] Error accepting connections: {e}")
@@ -330,6 +284,22 @@ def start_server():
 
     server_socket.close()
     print("[Info] Server shut down.")
+
+
+# Function to find an available port within the specified range
+def find_available_port(port_range):
+    """
+    Scans the provided port range and returns the first available port.
+    Raises an exception if no available ports are found.
+    """
+    for port in port_range:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            result = sock.connect_ex(('localhost', port))
+            if result != 0:  # Port is available (no connection)
+                return port
+    raise Exception("No available ports found in range.")
+
+
 
 # Handle incoming connections
 def handle_client_socket(client_socket):
@@ -436,103 +406,120 @@ def send_exit(client_socket):
         print(f"[Error] Failed to send exit acknowledgment to {client_socket.getpeername()}: {e}")
         traceback.print_exc()
 
+# Lock for controlling concurrency of inference requests
+inference_lock = threading.Lock()
+
 # Function to perform inference using Ollama API
 def perform_inference(user_input):
-    model_name = config.get('model_name', 'llama3.2:1b')
-    system_prompt = config.get('system_prompt', '')
-    json_filtering = config.get('json_filtering', 'true').lower() == 'true'  # Enable JSON filtering based on config
+    with inference_lock:  # Ensure only one inference happens at a time
+        model_name = config.get('model_name', 'llama3.2:1b')
+        system_prompt = config.get('system_prompt', '')
+        json_filtering = config.get('json_filtering', True)  # Use it as a boolean
+        api_endpoint = config.get('api_endpoint', 'generate')
 
-    # Model parameters
-    try:
-        temperature = float(config.get('temperature', '0.7'))
-        top_p = float(config.get('top_p', '0.9'))
-        max_tokens = int(config.get('max_tokens', '150'))  # Set to 150 as per requirement
-        repeat_penalty = float(config.get('repeat_penalty', '1.0'))
-    except ValueError as ve:
-        print(f"[Error] Invalid model parameter in config: {ve}")
-        send_error_response(f"Error: Invalid model parameter in config: {ve}")
-        return
+        # Model parameters
+        try:
+            temperature = float(config.get('temperature', 0.7))
+            top_p = float(config.get('top_p', 0.9))
+            max_tokens = int(config.get('max_tokens', 150))
+            repeat_penalty = float(config.get('repeat_penalty', 1.0))
+        except ValueError as ve:
+            print(f"[Error] Invalid model parameter in config: {ve}")
+            send_error_response(f"Error: Invalid model parameter in config: {ve}")
+            return
 
-    if not system_prompt:
-        print("❌ System prompt is not configured.")
-        send_error_response("Error: System prompt is not configured.")
-        return
+        if not system_prompt:
+            print("❌ System prompt is not configured.")
+            send_error_response("Error: System prompt is not configured.")
+            return
 
-    # Build the prompt
-    prompt = f"{system_prompt}\n\nUser Input: {user_input}\nOutput:"
+        # Build the prompt
+        prompt = f"{system_prompt}\n\nUser Input: {user_input}\nOutput:"
 
-    # Set format to "json" if json_filtering is enabled, otherwise no specific format
-    payload = {
-        "model": model_name,
-        "prompt": prompt,
-        "temperature": temperature,
-        "top_p": top_p,
-        "repeat_penalty": repeat_penalty,
-        "max_tokens": max_tokens,
-        "format": "json" if json_filtering else "",
-        "stream": False  # Disable streaming for simplified handling
-    }
+        # Set format to "json" if json_filtering is enabled, otherwise no specific format
+        payload = {
+            "model": model_name,
+            "prompt": prompt,
+            "temperature": temperature,
+            "top_p": top_p,
+            "repeat_penalty": repeat_penalty,
+            "max_tokens": max_tokens,
+            "format": "json" if json_filtering else "",  # Handle JSON filtering as a boolean
+            "stream": False
+        }
 
-    headers = {
-        "Content-Type": "application/json"
-    }
+        headers = {
+            "Content-Type": "application/json"
+        }
 
-    # Check if Ollama API is up before making the request
-    if not check_ollama_api():
-        send_error_response("Error: Ollama API is not available.")
-        return
+        # Check if Ollama API is up before making the request
+        if not check_ollama_api():
+            send_error_response("Error: Ollama API is not available.")
+            return
 
-    try:
-        print(f"[Performing Inference] Sending request to Ollama API with payload: {json.dumps(payload, indent=2)}")
-        response = requests.post(OLLAMA_URL, json=payload, headers=headers, timeout=60)
-        print(f"[Ollama API Response Status] {response.status_code}")
-        
-        if response.status_code == 200:
-            response_json = response.json()
-            model_response = response_json.get("response", "")
-
-            if not model_response:
-                send_error_response("Error: Empty response from model.")
-                return
+        try:
+            api_url = f"{OLLAMA_URL}{api_endpoint}"
+            print(f"[Performing Inference] Sending request to Ollama API at {api_url} with payload: {json.dumps(payload, indent=2)}")
+            response = requests.post(api_url, json=payload, headers=headers, timeout=60)
+            print(f"[Ollama API Response Status] {response.status_code}")
             
-            # Apply JSON filtering only if json_filtering is enabled
-            if json_filtering:
-                try:
-                    parsed_json = json.loads(model_response)
+            if response.status_code == 200:
+                response_json = response.json()
+                model_response = response_json.get("response", "")
 
-                    # Extract only the values from the JSON object
-                    def extract_values(data):
-                        if isinstance(data, dict):
-                            return ' '.join(extract_values(v) for v in data.values())
-                        elif isinstance(data, list):
-                            return ' '.join(extract_values(v) for v in data)
-                        else:
-                            return str(data)
+                if not model_response:
+                    send_error_response("Error: Empty response from model.")
+                    return
 
-                    filtered_response = extract_values(parsed_json)
-                    print(f"[Inference Complete] Model Output (Filtered):\n{filtered_response}\n")
-                    send_response(filtered_response)
-                except json.JSONDecodeError as e:
-                    print(f"[Error] Parsing model response failed: {e}")
-                    send_error_response(f"Error parsing model response: {e}\nResponse Content: {model_response}")
+                # Apply JSON filtering only if json_filtering is enabled
+                if json_filtering:
+                    try:
+                        parsed_json = json.loads(model_response)
+                        filtered_response = extract_values(parsed_json)
+                        print(f"[Inference Complete] Model Output (Filtered):\n{filtered_response}\n")
+                        send_response(filtered_response)
+                    except json.JSONDecodeError as e:
+                        print(f"[Error] Parsing model response failed: {e}")
+                        send_error_response(f"Error parsing model response: {e}\nResponse Content: {model_response}")
+                else:
+                    # Send raw response if JSON filtering is disabled
+                    print(f"[Inference Complete] Model Output (Raw):\n{model_response}\n")
+                    send_response(model_response)
+
             else:
-                # If json_filtering is disabled, send raw response
-                print(f"[Inference Complete] Model Output (Raw):\n{model_response}\n")
-                send_response(model_response)
+                print(f"[Error] Ollama API responded with status code: {response.status_code}")
+                send_error_response(f"Error: {response.status_code} - {response.text}")
+        except requests.exceptions.Timeout:
+            print("[Error] Request to Ollama API timed out.")
+            send_error_response("Error: Request to Ollama API timed out.")
+        except requests.exceptions.ConnectionError:
+            print("[Error] Connection error occurred while contacting Ollama API.")
+            send_error_response("Error: Connection error with Ollama API.")
+        except Exception as e:
+            print(f"[Error] Exception during model inference: {e}")
+            traceback.print_exc()
+            send_error_response(f"Error during model inference: {e}")
 
-        else:
-            print(f"[Error] Ollama API responded with status code: {response.status_code}")
-            send_error_response(f"Error: {response.status_code} - {response.text}")
-    except requests.exceptions.Timeout:
-        print("[Error] Request to Ollama API timed out.")
-        send_error_response("Error: Request to Ollama API timed out.")
-    except requests.exceptions.ConnectionError:
-        print("[Error] Connection error occurred while contacting Ollama API.")
-        send_error_response("Error: Connection error with Ollama API.")
-    except Exception as e:
-        print(f"[Error] Exception during model inference: {e}")
-        traceback.print_exc()
-        send_error_response(f"Error during model inference: {e}")
+
+def extract_values(obj, key=None):
+    """Recursively extract values from JSON object."""
+    values = []
+
+    def extract(obj, values, key):
+        """Recursively search for values of key in JSON tree."""
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == key or key is None:
+                    values.append(v)
+                if isinstance(v, (dict, list)):
+                    extract(v, values, key)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract(item, values, key)
+        return values
+
+    return extract(obj, values, key)
+
 
 # Function to send response back to orchestrator
 def send_response(output_data):
@@ -562,6 +549,7 @@ def send_response(output_data):
         print(f"[Error] Failed to send output to orchestrator: {e}")
         traceback.print_exc()
 
+
 # Function to send error response back to orchestrator
 def send_error_response(error_message):
     error_json = {
@@ -571,6 +559,8 @@ def send_error_response(error_message):
     print(f"[Error Response] {formatted_error}")
     send_response(formatted_error)
 
+
+# Main function
 def main():
     # Read configuration from file
     global config
@@ -585,8 +575,6 @@ def main():
     # Check if Ollama API is up before starting
     if not check_ollama_api():
         print("🛑 Ollama is not running. Please start the Ollama API and try again.")
-        # Optionally, you can retry or exit
-        # Here, we'll proceed to allow the user to handle it
     else:
         print("[Info] Ollama API is available.")
 

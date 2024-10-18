@@ -45,40 +45,35 @@ config_lock = threading.Lock()
 def read_config():
     global config, script_uuid
     config = default_config.copy()
+    
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if '=' in line and not line.startswith('#'):
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    if key in config:
-                        config[key] = value
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config.update(json.load(f))  # Load the JSON file and update config
+        except json.JSONDecodeError:
+            print(f"[Error] Could not parse {CONFIG_FILE}. Using default configuration.")
     else:
         # If CONFIG_FILE does not exist, generate a new UUID and create the config file
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid  # Add UUID to config
-        write_config()
+        write_config()  # Write the initial config with the new UUID
         print(f"[Info] Generated new UUID: {script_uuid} and created {CONFIG_FILE}")
     
-    # After reading config, check for 'script_uuid'
+    # Ensure UUID is handled
     if 'script_uuid' in config and config['script_uuid']:
         script_uuid = config['script_uuid']
     else:
-        # If 'script_uuid' is missing or empty, generate it and update config
+        # Generate and update UUID if missing
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config()
         print(f"[Info] Generated new UUID: {script_uuid} and updated {CONFIG_FILE}")
     
-    # Debug: Print configuration after reading
+    # Debug: Print the loaded configuration
     print("[Debug] Configuration Loaded:")
     for k, v in config.items():
         if k == 'system_prompt':
             print(f"{k}={'[REDACTED]'}")  # Hide system_prompt in debug
-        elif k == 'script_uuid':
-            print(f"{k}={v}")  # Display script_uuid
         else:
             print(f"{k}={v}")
     return config
@@ -86,15 +81,9 @@ def read_config():
 def write_config():
     with config_lock:
         with open(CONFIG_FILE, 'w') as f:
-            for key, value in config.items():
-                value = str(value)  # Ensure all values are strings
-                if any(c in value for c in ' \n"\\'):
-                    # If value contains special characters, enclose it in quotes and escape
-                    escaped_value = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-                    f.write(f'{key}="{escaped_value}"\n')
-                else:
-                    f.write(f"{key}={value}\n")
-
+            json.dump(config, f, indent=4)  # Write the configuration as JSON
+        print(f"[Info] Configuration written to {CONFIG_FILE}")
+        
 def parse_args():
     parser = argparse.ArgumentParser(
         description="ASR Engine",

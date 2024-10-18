@@ -8,8 +8,8 @@
     "orchestrator_host": "localhost",
     "orchestrator_ports": "6000-6010",
     "route": "/sum",
-    "script_uuid": "cb7505b4-1758-4ee4-b9e9-fb1d4f0f1f0b",
-    "system_prompt": "You summarize what you recieve and perform additional analysis",
+    "script_uuid": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
+    "system_prompt": "You Respond Conversationally",
     "temperature": 0.7,
     "top_p": 0.9,
     "max_tokens": 150,
@@ -17,6 +17,6 @@
     "inference_timeout": 5,
     "json_filtering": false,
     "api_endpoint": "generate",
-    "port": "6203",
-    "data_port": "6005"
+    "port": "6202",
+    "data_port": "6006"
 }

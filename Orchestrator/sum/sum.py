@@ -24,7 +24,7 @@ default_config = {
     'orchestrator_ports': '6000-6010',  # Updated to handle multiple ports
     'route': '/sum',
     'script_uuid': '',              # Initialize as empty; will be set in read_config()
-    'system_prompt': "You summarize what you recieve and perform additional analysis",
+    'system_prompt': "You Respond Conversationally",
     'temperature': 0.7,             # Model parameter: temperature
     'top_p': 0.9,                   # Model parameter: top_p
     'max_tokens': 150,              # Model parameter: max tokens
@@ -179,11 +179,12 @@ def register_with_orchestrator(port):
     if registered:
         print("[Info] Already registered with the orchestrator. Skipping registration.")
         return True
+
     host = config.get('orchestrator_host', 'localhost')
     orchestrator_ports_str = config.get('orchestrator_ports', '6000-6005')
     orchestrator_command_ports = []
 
-    # Parse orchestrator_ports which can be a range like '6000-6005' or a list '6000,6001,6002'
+    # Parse orchestrator_ports (e.g., '6000-6005' or '6000,6001,6002')
     for port_entry in orchestrator_ports_str.split(','):
         port_entry = port_entry.strip()
         if '-' in port_entry:
@@ -191,50 +192,85 @@ def register_with_orchestrator(port):
                 start_port, end_port = map(int, port_entry.split('-'))
                 orchestrator_command_ports.extend(range(start_port, end_port + 1))
             except ValueError:
-                print(f"Invalid orchestrator port range: {port_entry}")
+                print(f"[Error] Invalid orchestrator port range: {port_entry}")
         elif port_entry.isdigit():
             orchestrator_command_ports.append(int(port_entry))
         else:
-            print(f"Invalid orchestrator port entry: {port_entry}")
+            print(f"[Error] Invalid orchestrator port entry: {port_entry}")
 
     if not orchestrator_command_ports:
         print("[Error] No valid orchestrator command ports found.")
         return False
 
+    # Simplified registration message
     message = f"/register {script_name} {script_uuid} {port}\n"
     max_retries = 5
-    retry_delay = 1
+    retry_delay = 1  # Start with 1 second delay for retries
+    backoff_factor = 2  # Exponential backoff factor
+
     for attempt in range(max_retries):
         for orch_port in orchestrator_command_ports:
             try:
                 print(f"[Attempt {attempt + 1}] Registering with orchestrator at {host}:{orch_port}...")
+                
+                # Open a connection to the orchestrator
                 with socket.create_connection((host, orch_port), timeout=5) as s:
                     s.sendall(message.encode())
                     print(f"[Info] Sent registration message: {message.strip()}")
+
                     # Receive acknowledgment
                     data = s.recv(1024)
                     if data:
                         ack_message = data.decode().strip()
                         print(f"[Info] Received acknowledgment: {ack_message}")
+                        
+                        # Check if the acknowledgment is valid
                         if ack_message.startswith('/ack'):
                             config['data_port'] = ack_message.split()[1]
-                            write_config(config)
+                            write_config(config)  # Save updated config with assigned data_port
                             registered = True
+                            print(f"[Success] Registered with orchestrator on port {orch_port}.")
                             return True
                     else:
                         print(f"[Warning] No acknowledgment received from orchestrator at {host}:{orch_port}.")
-            except (socket.timeout, ConnectionRefusedError) as e:
-                print(f"[Error] Connection to orchestrator at {host}:{orch_port} failed: {e}")
+            
+            except socket.timeout:
+                print(f"[Error] Timeout while connecting to orchestrator at {host}:{orch_port}.")
+            except ConnectionRefusedError:
+                print(f"[Error] Connection refused by orchestrator at {host}:{orch_port}.")
             except Exception as e:
                 print(f"[Error] Unexpected error during registration: {e}")
                 traceback.print_exc()
+
+        # Retry with exponential backoff
         print(f"Retrying registration in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
         time.sleep(retry_delay)
-        retry_delay *= 2  # Exponential backoff
+        retry_delay *= backoff_factor  # Exponential backoff
 
+    # If all attempts failed
     print("[Error] Max retries reached. Could not register with orchestrator.")
     cancel_event.set()
     exit(1)  # Exit the script if registration fails
+
+
+
+# Function to send the full configuration to the orchestrator
+def send_full_config_to_orchestrator(host, port):
+    try:
+        message = f"/config {script_uuid}\n{json.dumps(config, indent=2)}"
+        print(f"[Info] Sending full configuration to orchestrator at {host}:{port}...")
+
+        with socket.create_connection((host, port), timeout=5) as s:
+            s.sendall(message.encode())
+            print(f"[Info] Full configuration sent to orchestrator.")
+
+    except socket.timeout:
+        print(f"[Error] Timeout while sending configuration to orchestrator at {host}:{port}.")
+    except ConnectionRefusedError:
+        print(f"[Error] Connection refused by orchestrator at {host}:{port}.")
+    except Exception as e:
+        print(f"[Error] Unexpected error while sending configuration: {e}")
+        traceback.print_exc()
 
 
 # Start server to handle incoming connections
@@ -372,6 +408,7 @@ def handle_client_socket(client_socket):
 def handle_command(command, client_socket):
     addr = client_socket.getpeername()
     print(f"[Command Received] {command} from {addr}")
+    
     if command.startswith('/info'):
         send_info(client_socket)
     elif command.startswith('/exit'):
@@ -382,14 +419,12 @@ def handle_command(command, client_socket):
 # Send configuration info to the orchestrator over the existing socket
 def send_info(client_socket):
     try:
-        response = {
-            "script_name": script_name,
-            "script_uuid": script_uuid,
-            "configuration": config
-        }
-        response_json = json.dumps(response, indent=2)
-        response_message = f"{response_json}\n"
-        client_socket.sendall(response_message.encode())
+        response = f"{script_name}\n{script_uuid}\n"
+        with config_lock:
+            for key, value in config.items():
+                response += f"{key}={value}\n"
+        response += 'EOF\n'  # End the response with EOF to signal completion
+        client_socket.sendall(response.encode())
         print(f"[Info] Sent configuration info to {client_socket.getpeername()}")
     except Exception as e:
         print(f"[Error] Failed to send info to {client_socket.getpeername()}: {e}")
@@ -405,6 +440,7 @@ def send_exit(client_socket):
     except Exception as e:
         print(f"[Error] Failed to send exit acknowledgment to {client_socket.getpeername()}: {e}")
         traceback.print_exc()
+
 
 # Lock for controlling concurrency of inference requests
 inference_lock = threading.Lock()

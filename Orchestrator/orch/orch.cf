@@ -5,45 +5,45 @@
     "data_port_range": "6001-6010",
     "peripherals": [
         {
-            "name": "LLM_Engine",
-            "uuid": "6df74b76-8ae4-41bd-aed4-c5451656b823",
-            "config": "",
-            "port": 6200,
-            "last_seen": 1729281224.0324183,
-            "data_port": 6001
-        },
-        {
-            "name": "SLM_Engine",
-            "uuid": "65b121e3-050d-47d1-992d-13e230bc7863",
-            "config": "",
-            "port": 6201,
-            "last_seen": 1729281224.1161788,
-            "data_port": 6002
-        },
-        {
-            "name": "TTS_Engine",
-            "uuid": "3d8a8924-fe44-48e6-ab80-5fcd1be3710e",
-            "config": "input_mode=port\ninput_format=chunk\noutput_mode=speaker\nport=6100\nroute=/tts_route\nvoice=GLaDOS\nscript_uuid=3d8a8924-fe44-48e6-ab80-5fcd1be3710e\norchestrator_host=localhost\norchestrator_ports=6000-6005\ndata_port=6006\nEOF",
-            "port": 6100,
-            "last_seen": 1729281442.2137651,
+            "name": "ASR_Engine",
+            "uuid": "2e3cf303-5df6-44bc-b3ff-1425e243745e",
+            "config": "port=6203\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_port=6000\nlanguage_code=en-US\nuse_ssl=False\nssl_cert=\nserver=localhost:50051\ninput_device=\nsample_rate=16000\nchunk_size=1600\nscript_uuid=2e3cf303-5df6-44bc-b3ff-1425e243745e\nEOF",
+            "port": 6203,
+            "last_seen": 1729292750.1435654,
             "data_port": 6006
         },
         {
-            "name": "ASR_Engine",
-            "uuid": "e8868ec1-83f4-485c-8e55-8d582cea49f5",
-            "config": "port=6202\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_port=6000\nlanguage_code=en-US\nuse_ssl=False\nssl_cert=\nserver=localhost:50051\ninput_device=\nsample_rate=16000\nchunk_size=1600\nscript_uuid=e8868ec1-83f4-485c-8e55-8d582cea49f5\nEOF",
-            "port": 6202,
-            "last_seen": 1729281452.2478366,
+            "name": "LLM_Engine",
+            "uuid": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
+            "config": "model_name=llama3.2:3b\ninput_mode=port\noutput_mode=port\ninput_format=chunk\noutput_format=chunk\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_ports=6000-6010\nroute=/llm\nscript_uuid=8f27f986-a213-4bfd-87c4-72dbffedf9e8\nsystem_prompt=You Respond Conversationally\ntemperature=0.7\ntop_p=0.9\nmax_tokens=150\nrepeat_penalty=1.0\ninference_timeout=5\njson_filtering=False\napi_endpoint=generate\nport=6200\ndata_port=6006\nEOF",
+            "port": 6200,
+            "last_seen": 1729292750.1386113,
+            "data_port": 6006
+        },
+        {
+            "name": "SLM_Engine",
+            "uuid": "55959318-a9bb-4c0e-8196-39b47eff38df",
+            "config": "model_name=llama3.2:1b\ninput_mode=port\noutput_mode=port\ninput_format=chunk\noutput_format=chunk\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_ports=6000-6010\nroute=/slm\nscript_uuid=55959318-a9bb-4c0e-8196-39b47eff38df\nsystem_prompt=You take what you receive and do a deep internal meta-analysis, as you are the little voice in the ear of a LLM. Do so to the following incoming information, you can also output empty responses if you dont deem meta-analysis necessary for the following incoming information : \ntemperature=0.7\ntop_p=0.9\nmax_tokens=150\nrepeat_penalty=1.0\ninference_timeout=5\njson_filtering=False\napi_endpoint=generate\nport=6201\ndata_port=6006\nEOF",
+            "port": 6201,
+            "last_seen": 1729292750.140576,
             "data_port": 6006
         },
         {
             "name": "SUM_Engine",
-            "uuid": "cb7505b4-1758-4ee4-b9e9-fb1d4f0f1f0b",
-            "config": "",
-            "port": 6203,
-            "last_seen": 1729281224.3348756,
-            "data_port": 6005
+            "uuid": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
+            "config": "model_name=llama3.2:1b\ninput_mode=port\noutput_mode=port\ninput_format=chunk\noutput_format=chunk\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_ports=6000-6010\nroute=/sum\nscript_uuid=87f77c55-857d-4d3a-878e-a3fa7f198b85\nsystem_prompt=You Respond Conversationally\ntemperature=0.7\ntop_p=0.9\nmax_tokens=150\nrepeat_penalty=1.0\ninference_timeout=5\njson_filtering=False\napi_endpoint=generate\nport=6202\ndata_port=6006\nEOF",
+            "port": 6202,
+            "last_seen": 1729292750.1422935,
+            "data_port": 6006
+        },
+        {
+            "name": "TTS_Engine",
+            "uuid": "37d46837-f12a-4215-bd74-8d123bdb6a3d",
+            "config": "input_mode=port\ninput_format=chunk\noutput_mode=speaker\nport=6100\nroute=/tts_route\nvoice=GLaDOS\nscript_uuid=37d46837-f12a-4215-bd74-8d123bdb6a3d\norchestrator_host=localhost\norchestrator_ports=6000-6005\ndata_port=6006\nEOF",
+            "port": 6100,
+            "last_seen": 1729292750.1154191,
+            "data_port": 6006
         }
     ],
-    "script_uuid": "54cc4b56-81eb-4f50-a744-0cdd3526fe0f"
+    "script_uuid": "a957aae6-da94-4322-bf00-4b3f3520ffec"
 }

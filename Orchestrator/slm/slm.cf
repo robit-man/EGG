@@ -8,8 +8,8 @@
     "orchestrator_host": "localhost",
     "orchestrator_ports": "6000-6010",
     "route": "/slm",
-    "script_uuid": "65b121e3-050d-47d1-992d-13e230bc7863",
-    "system_prompt": "You Respond Critically, and present the output as an explicit analysis of the following: ",
+    "script_uuid": "55959318-a9bb-4c0e-8196-39b47eff38df",
+    "system_prompt": "You take what you receive and do a deep internal meta-analysis, as you are the little voice in the ear of a LLM. Do so to the following incoming information, you can also output empty responses if you dont deem meta-analysis necessary for the following incoming information : ",
     "temperature": 0.7,
     "top_p": 0.9,
     "max_tokens": 150,
@@ -18,5 +18,5 @@
     "json_filtering": false,
     "api_endpoint": "generate",
     "port": "6201",
-    "data_port": "6002"
+    "data_port": "6006"
 }

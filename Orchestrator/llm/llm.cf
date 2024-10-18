@@ -1,19 +1,22 @@
-model_name=llama3.2:3b
-input_mode=port
-output_mode=port
-input_format=streaming
-output_format=streaming
-port_range=6200-6300
-orchestrator_host=localhost
-orchestrator_ports=6000-6005
-route=/slm
-script_uuid=e090914e-a22e-4a36-80ce-fa7cb0b2e239
-system_prompt="You will receive a description from an analysis agent, the agent will provide both the original user message it received, along with analysis, you must come up with an appropriate response that takes into account a meta-analysis of the overall message as well as the user input, and provide a comprehensive appropriate response to be sent to the next agent, as well as a clearly provided original message from the user in quotes seperate from the agent provided analysis in the stack. The following content is from the first agent in the stack: "
-temperature=0.7
-top_p=0.9
-max_tokens=2048
-repeat_penalty=1.0
-inference_timeout=5
-json_filtering=false
-port=6200
-data_port=6001
+{
+    "model_name": "llama3.2:1b",
+    "input_mode": "port",
+    "output_mode": "port",
+    "input_format": "chunk",
+    "output_format": "chunk",
+    "port_range": "6200-6300",
+    "orchestrator_host": "localhost",
+    "orchestrator_ports": "6000-6010",
+    "route": "/llm",
+    "script_uuid": "6df74b76-8ae4-41bd-aed4-c5451656b823",
+    "system_prompt": "You Respond Conversationally",
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "max_tokens": 150,
+    "repeat_penalty": 1.0,
+    "inference_timeout": 5,
+    "json_filtering": false,
+    "api_endpoint": "generate",
+    "port": "6200",
+    "data_port": "6001"
+}

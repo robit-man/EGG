@@ -1,0 +1,19 @@
+{
+    "model_name": "nomic-embed-text",
+    "input_mode": "port",
+    "output_mode": "port",
+    "input_format": "chunk",
+    "output_format": "chunk",
+    "port_range": "6200-6300",
+    "orchestrator_host": "localhost",
+    "orchestrator_ports": "6000-6010",
+    "route": "/embedding",
+    "script_uuid": "68e60596-a570-4b4e-b9fa-f59c5ea13e8b",
+    "system_prompt": "",
+    "inference_timeout": 5,
+    "json_filtering": false,
+    "api_endpoint": "embeddings",
+    "database_path": "embeddings.db",
+    "port": "6204",
+    "data_port": "6007"
+}

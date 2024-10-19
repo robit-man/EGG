@@ -303,10 +303,39 @@ def clear_queue(q):
         q.queue.clear()
     logger.info("TTS queue has been cleared.")
 
-# Function to split text into manageable chunks
-def split_text_into_chunks(text, max_chunk_size=200):
-    # Use textwrap to split text at word boundaries
-    return textwrap.wrap(text, width=max_chunk_size, break_long_words=False)
+# Function to split text into manageable chunks based on character limit
+def split_text_into_chunks(text, max_chunk_size=400):
+    """
+    Splits text into chunks not exceeding max_chunk_size characters.
+    Attempts to split at sentence boundaries or word boundaries.
+    """
+    chunks = []
+    current_chunk = ""
+
+    for sentence in split_text_into_sentences(text):
+        if len(sentence) > max_chunk_size:
+            # Split long sentences into smaller chunks
+            smaller_chunks = textwrap.wrap(sentence, width=max_chunk_size, break_long_words=False)
+            for chunk in smaller_chunks:
+                if len(current_chunk) + len(chunk) + 1 <= max_chunk_size:
+                    current_chunk += " " + chunk if current_chunk else chunk
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                    current_chunk = chunk
+        else:
+            if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
+                current_chunk += " " + sentence if current_chunk else sentence
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = sentence
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
 
 # Get Available TTS Voices
 def get_available_voices(tts_stub):
@@ -540,7 +569,7 @@ def unmute_microphone():
         logger.error(f"Failed to unmute the microphone: {e}")
 
 # Function to generate TTS and playback in batches with microphone muting
-def tts_generation_and_playback(tts_stub, selected_voice, batch_size=4, batch_delay=0.1):
+def tts_generation_and_playback(tts_stub, selected_voice, max_batch_char=400, batch_delay=0.1):
     output_mode = config['output_mode']
     output_file = None  # Initialize output_file to None
 
@@ -571,7 +600,7 @@ def tts_generation_and_playback(tts_stub, selected_voice, batch_size=4, batch_de
             logger.error(f"Failed to open output file: {e}")
             return
 
-    batch = []
+    current_batch = ""
 
     # Process TTS requests from the queue
     while not cancel_event.is_set():
@@ -584,22 +613,29 @@ def tts_generation_and_playback(tts_stub, selected_voice, batch_size=4, batch_de
             logger.info(f"Original text: {text}")
             # Process the text for TTS
             processed_text = replace_special_characters_and_numbers(text)
-            sentences = split_text_into_sentences(processed_text)
+            chunks = split_text_into_chunks(processed_text, max_chunk_size=max_batch_char)
 
-            for sentence in sentences:
-                if len(sentence) > 400:
-                    text_chunks = split_text_into_chunks(sentence, max_chunk_size=200)
+            for chunk in chunks:
+                if len(current_batch) + len(chunk) + 1 <= max_batch_char:
+                    current_batch += " " + chunk if current_batch else chunk
                 else:
-                    text_chunks = [sentence]
-
-                # Process each sentence chunk one at a time
-                for chunk in text_chunks:
-                    batch.append(chunk)
-
-                    if len(batch) >= batch_size:
-                        process_batch(tts_stub, selected_voice, batch, output_mode, stream, output_file)
-                        batch = []  # Reset batch after processing
+                    if current_batch:
+                        # Add the accumulated batch to the processing queue
+                        process_batch(tts_stub, selected_voice, [current_batch], output_mode, stream, output_file)
+                        logger.info(f"Processed batch: {current_batch}")
+                        current_batch = chunk
                         time.sleep(batch_delay)  # Throttle requests minimally
+                    else:
+                        # Single chunk exceeds max_batch_char, process it alone
+                        process_batch(tts_stub, selected_voice, [chunk], output_mode, stream, output_file)
+                        logger.info(f"Processed single large chunk: {chunk}")
+                        current_batch = ""
+                        time.sleep(batch_delay)  # Throttle requests minimally
+
+    # After exiting the loop, process any remaining text in the current_batch
+    if current_batch:
+        process_batch(tts_stub, selected_voice, [current_batch], output_mode, stream, output_file)
+        logger.info(f"Processed final batch: {current_batch}")
 
     # Cleanup resources after completion
     if output_mode == 'speaker':
@@ -633,7 +669,7 @@ def process_batch(tts_stub, selected_voice, batch, output_mode, stream, output_f
     logger.info(f"Processing batch of size {len(batch)}")
     mute_microphone()  # Mute the microphone during playback
 
-    for chunk in batch:
+    for text in batch:
         retries = 2
         attempt = 0
         while attempt < retries:
@@ -646,7 +682,7 @@ def process_batch(tts_stub, selected_voice, batch, output_mode, stream, output_f
                         continue
 
                     req = riva_tts_pb2.SynthesizeSpeechRequest(
-                        text=chunk,
+                        text=text,
                         language_code=selected_voice['language'],
                         encoding=riva.client.AudioEncoding.LINEAR_PCM,
                         sample_rate_hz=sample_rate,
@@ -663,7 +699,7 @@ def process_batch(tts_stub, selected_voice, batch, output_mode, stream, output_f
                     elif output_mode == 'file':
                         output_file.write(resp.audio)
 
-                    logger.info(f"Successfully processed chunk: {chunk}")
+                    logger.info(f"Successfully processed text: {text}")
                     break  # Exit retry loop if successful
 
                 except grpc.RpcError as e:
@@ -705,6 +741,7 @@ def add_text_to_queue(text):
         logger.info(f"Queued text for TTS: {text}")
     else:
         logger.warning(f"Queue is full. Skipping text: {text}")
+
 
 # Example usage in a handler
 def handle_port_client(client_socket, addr):

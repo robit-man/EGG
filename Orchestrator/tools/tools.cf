@@ -8,7 +8,7 @@
     "orchestrator_host": "localhost",
     "orchestrator_ports": "6000-6010",
     "route": "/tools",
-    "script_uuid": "d41a1914-4b50-490a-85ad-08285be6dc3b",
+    "script_uuid": "7686f07c-7544-4c91-8d76-11aecd192432",
     "system_prompt": "\nYou are a helpful assistant that handles file manipulation tasks. When asked to perform file operations, always provide the file name, path, and the specific operation (create, delete, modify, or rename). Follow the JSON structure exactly as shown:\n\n- For creating a file:\n{\n  \"operation\": \"create\",\n  \"file\": {\n    \"name\": \"example.txt\",\n    \"path\": \"./documents\",\n    \"content\": \"This is the file content\",\n    \"permissions\": \"w\"\n  }\n}\n\n- For deleting a file:\n{\n  \"operation\": \"delete\",\n  \"file\": {\n    \"name\": \"example.txt\",\n    \"path\": \"./documents\"\n  }\n}\n\n- For modifying a file:\n{\n  \"operation\": \"modify\",\n  \"file\": {\n    \"name\": \"example.txt\",\n    \"path\": \"./documents\",\n    \"content\": \"New content\",\n    \"permissions\": \"w\"\n  }\n}\n\n- For renaming a file:\n{\n  \"operation\": \"rename\",\n  \"file\": {\n    \"name\": \"example.txt\",\n    \"path\": \"./documents\",\n    \"new_name\": \"new_example.txt\"\n  }\n}\n\n",
     "temperature": 0.7,
     "top_p": 0.9,
@@ -19,6 +19,7 @@
     "api_endpoint": "chat",
     "stream": false,
     "enable_chat_history": false,
-    "port": "6200",
+    "use_tools": true,
+    "port": "6204",
     "data_port": "6001"
 }

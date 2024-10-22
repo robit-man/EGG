@@ -35,47 +35,6 @@ BASE_SYSTEM_PROMPT = (
 '''
 You are a helpful assistant that handles file manipulation tasks. When asked to perform file operations, always provide the file name, path, and the specific operation (create, delete, modify, or rename). Follow the JSON structure exactly as shown:
 
-- For creating a file:
-{
-  "operation": "create",
-  "file": {
-    "name": "example.txt",
-    "path": "./documents",
-    "content": "This is the file content",
-    "permissions": "w"
-  }
-}
-
-- For deleting a file:
-{
-  "operation": "delete",
-  "file": {
-    "name": "example.txt",
-    "path": "./documents"
-  }
-}
-
-- For modifying a file:
-{
-  "operation": "modify",
-  "file": {
-    "name": "example.txt",
-    "path": "./documents",
-    "content": "New content",
-    "permissions": "w"
-  }
-}
-
-- For renaming a file:
-{
-  "operation": "rename",
-  "file": {
-    "name": "example.txt",
-    "path": "./documents",
-    "new_name": "new_example.txt"
-  }
-}
-
 ''')
 
 # Default configuration
@@ -98,7 +57,9 @@ default_config = {
     'inference_timeout': 15,        # Timeout in seconds for inference
     'json_filtering': False,        # Use JSON filtering by default
     'api_endpoint': 'chat',         # Options: 'generate', 'chat'
-    'stream': False                  # Assuming 'stream' is a valid config key
+    'stream': False,                # Assuming 'stream' is a valid config key
+    'enable_chat_history': False,
+    'use_tools': True
 }
 
 config = {}
@@ -162,6 +123,10 @@ def write_config(config_to_write=None):
 
 # Chat history management functions
 def load_chat_history():
+    if not config.get('enable_chat_history', True):
+        print(f"{COLOR_YELLOW}[Info]{COLOR_RESET} Chat history is disabled.")
+        return []
+    
     if os.path.exists(CHAT_HISTORY_FILE):
         print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Reading chat history from {CHAT_HISTORY_FILE}")
         try:
@@ -173,14 +138,23 @@ def load_chat_history():
     return []
 
 def save_chat_history(history):
+    if not config.get('enable_chat_history', True):
+        print(f"{COLOR_YELLOW}[Info]{COLOR_RESET} Chat history saving is disabled.")
+        return
+    
     print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Saving chat history to {CHAT_HISTORY_FILE}")
     with open(CHAT_HISTORY_FILE, 'w') as f:
         json.dump(history, f, indent=4)
 
 def append_to_chat_history(message):
+    if not config.get('enable_chat_history', True):
+        print(f"{COLOR_YELLOW}[Info]{COLOR_RESET} Chat history is disabled. Not appending message.")
+        return
+
     chat_history = load_chat_history()
     chat_history.append(message)
     save_chat_history(chat_history)
+
 
 def get_recent_chat_history(limit=5):
     chat_history = load_chat_history()
@@ -253,6 +227,39 @@ def call_tool(name, data):
     else:
         print(f"{COLOR_RED}[Error]{COLOR_RESET} Tool '{name}' not found in tools list.")
         return f"Error: Tool '{name}' not found."
+
+def handle_result(result):
+    """
+    Process the result returned by the tool function.
+    Depending on the type of result, return a string or a formatted output.
+
+    Args:
+        result (Any): The result returned by the tool function.
+
+    Returns:
+        str: The processed output to be sent back to the orchestrator or displayed.
+    """
+    # If the result is a string, return it directly
+    if isinstance(result, str):
+        return result
+
+    # If the result is a dictionary, format it as a pretty-printed JSON
+    elif isinstance(result, dict):
+        try:
+            return json.dumps(result, indent=2)
+        except (TypeError, ValueError):
+            return f"Error: Unable to format dictionary result: {result}"
+
+    # If the result is a list, convert it into a human-readable format
+    elif isinstance(result, list):
+        try:
+            return "\n".join(map(str, result))
+        except Exception as e:
+            return f"Error: Unable to format list result: {e}"
+
+    # If the result is of any other type, convert it to string
+    else:
+        return str(result)
 
 
 def save_tools(tools):
@@ -651,25 +658,25 @@ def perform_inference(user_input):
         json_filtering = config.get('json_filtering', False)
         api_endpoint = config.get('api_endpoint', 'chat')
         stream = config.get('stream', False)
+        use_tools = config.get('use_tools', True)  # Read the use_tools flag from the config
 
-        # Prepare system prompt with tools
-        tools = list_tools()
+        # Prepare system prompt with tools if use_tools is enabled
         tools_definitions = []
-        for tool in tools:
-            tool_info = {
-                "type": "function",
-                "function": {
-                    "name": tool,
-                    "description": f"Function to execute {tool.replace('_', ' ').title()}",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {}
+        if use_tools:
+            tools = list_tools()
+            for tool in tools:
+                tool_info = {
+                    "type": "function",
+                    "function": {
+                        "name": tool,
+                        "description": f"Function to execute {tool.replace('_', ' ').title()}",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {}
+                        }
                     }
                 }
-            }
-           
-            # Add more tool-specific parameter adjustments as needed
-            tools_definitions.append(tool_info)
+                tools_definitions.append(tool_info)
 
         # Model parameters
         try:
@@ -697,13 +704,16 @@ def perform_inference(user_input):
         payload = {
             "model": model_name,
             "messages": messages,
-            "tools": tools_definitions,
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
             "repeat_penalty": repeat_penalty,
             "stream": stream
         }
+
+        # Only include tools if the use_tools flag is enabled
+        if use_tools:
+            payload["tools"] = tools_definitions
 
         headers = {
             "Content-Type": "application/json"
@@ -724,20 +734,28 @@ def perform_inference(user_input):
             if response.status_code == 200:
                 response_json = response.json()
                 
-                # Check for tool calls in the response
-                tool_calls = response_json.get("message", {}).get("tool_calls", [])
-                if tool_calls:
-                    # Flag to check if at least one tool call was successfully handled
-                    tool_call_success = False
-                    for tool_call in tool_calls:
-                        tool_response = handle_tool_call(tool_call)
-                        if tool_response and not tool_response.startswith("Error:"):
-                            send_tool_response(tool_response, response_json.get("context", []))
-                            tool_call_success = True
-                        else:
-                            print(f"{COLOR_RED}[Error]{COLOR_RESET} Tool call failed or was invalid: {tool_response}")
-                    if not tool_call_success:
-                        # If all tool calls failed, proceed with model response
+                # Handle tool calls if the tools were included
+                if use_tools and "tool_calls" in response_json.get("message", {}):
+                    tool_calls = response_json.get("message", {}).get("tool_calls", [])
+                    if tool_calls:
+                        tool_call_success = False
+                        for tool_call in tool_calls:
+                            tool_response = handle_tool_call(tool_call)
+                            if tool_response and not tool_response.startswith("Error:"):
+                                send_tool_response(tool_response, response_json.get("context", []))
+                                tool_call_success = True
+                            else:
+                                print(f"{COLOR_RED}[Error]{COLOR_RESET} Tool call failed or was invalid: {tool_response}")
+                        if not tool_call_success:
+                            model_response = response_json.get("message", {}).get("content", "")
+                            if not model_response:
+                                send_error_response("Error: Empty response from model.")
+                                return
+                            print(f"{COLOR_GREEN}[Model Output]{COLOR_RESET}\n{model_response}\n")
+                            append_to_chat_history({"user_input": user_input, "response": model_response})
+                            send_response(model_response)
+                    else:
+                        # No tool calls, regular response
                         model_response = response_json.get("message", {}).get("content", "")
                         if not model_response:
                             send_error_response("Error: Empty response from model.")
@@ -746,13 +764,11 @@ def perform_inference(user_input):
                         append_to_chat_history({"user_input": user_input, "response": model_response})
                         send_response(model_response)
                 else:
-                    # Regular model response
+                    # Regular model response when tools are disabled
                     model_response = response_json.get("message", {}).get("content", "")
-
                     if not model_response:
                         send_error_response("Error: Empty response from model.")
                         return
-
                     print(f"{COLOR_GREEN}[Model Output]{COLOR_RESET}\n{model_response}\n")
                     append_to_chat_history({"user_input": user_input, "response": model_response})
                     send_response(model_response)
@@ -770,6 +786,7 @@ def perform_inference(user_input):
             print(f"{COLOR_RED}[Error]{COLOR_RESET} Exception during model inference: {e}")
             traceback.print_exc()
             send_error_response(f"Error during model inference: {e}")
+
 
 def process_arguments(arguments):
     """

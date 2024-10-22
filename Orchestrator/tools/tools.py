@@ -188,152 +188,23 @@ def get_recent_chat_history(limit=5):
 
 # Function to load functions module
 def load_functions():
-    functions_file = "model.functions.py"
-    default_functions = '''
-import os
-
-def create_file(args):
-    """
-    Create a file with the specified name, path, content, and permissions.
-    """
-    try:
-        path = args.get("path", ".")
-        name = args.get("name")
-        content = args.get("content", "")
-        permissions = args.get("permissions", "w")
-        
-        if not name:
-            return "Error: 'name' is required to create a file."
-        
-        full_path = os.path.join(path, name)
-        with open(full_path, 'w') as f:
-            f.write(content)
-        
-        # Set file permissions if specified
-        if permissions:
-            os.chmod(full_path, getattr(os, f"S_{permissions.upper()}", 0o644))
-        
-        return f"File '{full_path}' created successfully."
-    except Exception as e:
-        return f"Error creating file: {e}"
-
-def delete_file(args):
-    """
-    Delete the specified file.
-    """
-    try:
-        path = args.get("path", ".")
-        name = args.get("name")
-        
-        if not name:
-            return "Error: 'name' is required to delete a file."
-        
-        full_path = os.path.join(path, name)
-        os.remove(full_path)
-        
-        return f"File '{full_path}' deleted successfully."
-    except FileNotFoundError:
-        return f"Error: File '{full_path}' does not exist."
-    except Exception as e:
-        return f"Error deleting file: {e}"
-
-def modify_file(args):
-    """
-    Modify the specified file with new content.
-    """
-    try:
-        path = args.get("path", ".")
-        name = args.get("name")
-        content = args.get("content", "")
-        permissions = args.get("permissions", "w")
-        
-        if not name:
-            return "Error: 'name' is required to modify a file."
-        
-        full_path = os.path.join(path, name)
-        if not os.path.exists(full_path):
-            return f"Error: File '{full_path}' does not exist."
-        
-        with open(full_path, 'w') as f:
-            f.write(content)
-        
-        # Set file permissions if specified
-        if permissions:
-            os.chmod(full_path, getattr(os, f"S_{permissions.upper()}", 0o644))
-        
-        return f"File '{full_path}' modified successfully."
-    except Exception as e:
-        return f"Error modifying file: {e}"
-
-def rename_file(args):
-    """
-    Rename the specified file to a new name.
-    """
-    try:
-        path = args.get("path", ".")
-        name = args.get("name")
-        new_name = args.get("new_name")
-        
-        if not name or not new_name:
-            return "Error: Both 'name' and 'new_name' are required to rename a file."
-        
-        old_full_path = os.path.join(path, name)
-        new_full_path = os.path.join(path, new_name)
-        
-        if not os.path.exists(old_full_path):
-            return f"Error: File '{old_full_path}' does not exist."
-        
-        os.rename(old_full_path, new_full_path)
-        
-        return f"File '{old_full_path}' renamed to '{new_full_path}' successfully."
-    except Exception as e:
-        return f"Error renaming file: {e}"
-    '''
-
-    if not os.path.exists(functions_file):
-        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} '{functions_file}' not found. Creating default functions module.")
-        try:
-            with open(functions_file, 'w') as f:
-                f.write(default_functions.strip())
-            print(f"{COLOR_GREEN}[Success]{COLOR_RESET} Created '{functions_file}' with default function implementations.")
-        except Exception as e:
-            print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to create '{functions_file}': {e}")
-            return None
-    
     try:
         # Load `model.functions.py`
-        spec = importlib.util.spec_from_file_location("model_functions", functions_file)
+        spec = importlib.util.spec_from_file_location("model_functions", "model.functions.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
     except FileNotFoundError:
-        print(f"{COLOR_RED}[Error]{COLOR_RESET} '{functions_file}' not found after creation attempt.")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} 'model.functions.py' not found.")
         return None
     except Exception as e:
-        print(f"{COLOR_RED}[Error]{COLOR_RESET} Error loading '{functions_file}': {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Error loading 'model.functions.py': {e}")
         traceback.print_exc()
         return None
 
 # Function to load tools from model.tools.json
 def load_tools():
     tools_file = TOOLS_FILE
-    default_tools = {
-        "create_file": "create_file",
-        "delete_file": "delete_file",
-        "modify_file": "modify_file",
-        "rename_file": "rename_file"
-    }
-    
-    if not os.path.exists(tools_file):
-        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} '{tools_file}' not found. Creating default tools configuration.")
-        try:
-            with open(tools_file, 'w') as f:
-                json.dump(default_tools, f, indent=4)
-            print(f"{COLOR_GREEN}[Success]{COLOR_RESET} Created '{tools_file}' with default tool mappings.")
-        except Exception as e:
-            print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to create '{tools_file}': {e}")
-            return {}
-    
     try:
         with open(tools_file, 'r') as f:
             tools = json.load(f)
@@ -365,21 +236,14 @@ def call_tool(name, data):
             function_to_call = getattr(functions, function_name)
             try:
                 print(f"{COLOR_CYAN}[Tool Execution]{COLOR_RESET} Calling function '{function_name}' with data: {data}.")
-
+                
+                # **Print the structured data (arguments)**:
+                print(f"Arguments passed to the tool: {json.dumps(data, indent=2)}")
+                
                 # Call the function and ensure synchronous processing
                 result = function_to_call(data)
 
-                # Handle and print different result types
-                if isinstance(result, str):
-                    print(f"{COLOR_GREEN}[Result]{COLOR_RESET} Result (String): {result}")
-                    return result  # Return the string result of the function call
-                elif isinstance(result, (dict, list)):
-                    print(f"{COLOR_GREEN}[Result]{COLOR_RESET} Result (JSON): {json.dumps(result, indent=2)}")
-                    return json.dumps(result)  # Convert dict/list result to JSON string
-                else:
-                    print(f"{COLOR_GREEN}[Result]{COLOR_RESET} Result (Other): {str(result)}")
-                    return str(result)  # Fallback for any other return type
-
+                return handle_result(result)  # Handle the result based on the type (string, dict, etc.)
             except Exception as e:
                 print(f"{COLOR_RED}[Error]{COLOR_RESET} Error while calling function '{function_name}': {e}")
                 return f"Error: {e}"
@@ -389,6 +253,7 @@ def call_tool(name, data):
     else:
         print(f"{COLOR_RED}[Error]{COLOR_RESET} Tool '{name}' not found in tools list.")
         return f"Error: Tool '{name}' not found."
+
 
 def save_tools(tools):
     print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Saving tools to {TOOLS_FILE}")
@@ -802,127 +667,7 @@ def perform_inference(user_input):
                     }
                 }
             }
-            # Modify tool definitions based on function requirements
-            if tool == "create_file":
-                tool_info["function"]["parameters"] = {
-                    "type": "object",
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["create"]
-                        },
-                        "file": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Name of the file to create, e.g., 'example.txt'"
-                                },
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path where the file should be created, e.g., './documents'"
-                                },
-                                "content": {
-                                    "type": "string",
-                                    "description": "Content to write into the file"
-                                },
-                                "permissions": {
-                                    "type": "string",
-                                    "description": "File permissions, e.g., 'w'"
-                                }
-                            },
-                            "required": ["name", "path", "content", "permissions"]
-                        }
-                    },
-                    "required": ["operation", "file"]
-                }
-            elif tool == "delete_file":
-                tool_info["function"]["parameters"] = {
-                    "type": "object",
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["delete"]
-                        },
-                        "file": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Name of the file to delete, e.g., 'example.txt'"
-                                },
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path where the file is located, e.g., './documents'"
-                                }
-                            },
-                            "required": ["name", "path"]
-                        }
-                    },
-                    "required": ["operation", "file"]
-                }
-            elif tool == "modify_file":
-                tool_info["function"]["parameters"] = {
-                    "type": "object",
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["modify"]
-                        },
-                        "file": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Name of the file to modify, e.g., 'example.txt'"
-                                },
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path where the file is located, e.g., './documents'"
-                                },
-                                "content": {
-                                    "type": "string",
-                                    "description": "New content to write into the file"
-                                },
-                                "permissions": {
-                                    "type": "string",
-                                    "description": "File permissions, e.g., 'w'"
-                                }
-                            },
-                            "required": ["name", "path", "content", "permissions"]
-                        }
-                    },
-                    "required": ["operation", "file"]
-                }
-            elif tool == "rename_file":
-                tool_info["function"]["parameters"] = {
-                    "type": "object",
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["rename"]
-                        },
-                        "file": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string",
-                                    "description": "Current name of the file, e.g., 'example.txt'"
-                                },
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path where the file is located, e.g., './documents'"
-                                },
-                                "new_name": {
-                                    "type": "string",
-                                    "description": "New name for the file, e.g., 'new_example.txt'"
-                                }
-                            },
-                            "required": ["name", "path", "new_name"]
-                        }
-                    },
-                    "required": ["operation", "file"]
-                }
+           
             # Add more tool-specific parameter adjustments as needed
             tools_definitions.append(tool_info)
 
@@ -952,12 +697,11 @@ def perform_inference(user_input):
         payload = {
             "model": model_name,
             "messages": messages,
-            "functions": tools_definitions,  # Updated key to 'functions' as per standard OpenAI API
+            "tools": tools_definitions,
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
-            "presence_penalty": 0,  # Optional: Adjust as needed
-            "frequency_penalty": 0,  # Optional: Adjust as needed
+            "repeat_penalty": repeat_penalty,
             "stream": stream
         }
 
@@ -979,35 +723,28 @@ def perform_inference(user_input):
 
             if response.status_code == 200:
                 response_json = response.json()
-
+                
                 # Check for tool calls in the response
-                # Assuming the model uses 'function_call' as per OpenAI API
-                function_call = response_json.get("message", {}).get("function_call", None)
-                if function_call:
-                    tool_name = function_call.get("name")
-                    arguments = json.loads(function_call.get("arguments", "{}"))
-                    print(f"{COLOR_YELLOW}[Tool Call]{COLOR_RESET} Detected tool call: {tool_name} with arguments: {arguments}")
-
-                    if not tool_name:
-                        # No function name provided; proceed with normal inference
-                        error_msg = "Error: No function name provided in tool call."
-                        print(f"{COLOR_RED}[Tool Call Error]{COLOR_RESET} {error_msg}")
-                        send_error_response(error_msg)
-                        return
-
-                    # Execute the tool
-                    tool_response = call_tool(tool_name, arguments)
-                    if tool_response.startswith("Error:"):
-                        # Tool execution failed; proceed with normal inference
-                        print(f"{COLOR_RED}[Tool Execution Error]{COLOR_RESET} {tool_response}")
-                        send_error_response(tool_response)
-                        return
-
-                    # Append tool response to chat history
-                    append_to_chat_history({"user_input": user_input, "response": tool_response})
-
-                    # Send the tool response back to the user
-                    send_response(tool_response)
+                tool_calls = response_json.get("message", {}).get("tool_calls", [])
+                if tool_calls:
+                    # Flag to check if at least one tool call was successfully handled
+                    tool_call_success = False
+                    for tool_call in tool_calls:
+                        tool_response = handle_tool_call(tool_call)
+                        if tool_response and not tool_response.startswith("Error:"):
+                            send_tool_response(tool_response, response_json.get("context", []))
+                            tool_call_success = True
+                        else:
+                            print(f"{COLOR_RED}[Error]{COLOR_RESET} Tool call failed or was invalid: {tool_response}")
+                    if not tool_call_success:
+                        # If all tool calls failed, proceed with model response
+                        model_response = response_json.get("message", {}).get("content", "")
+                        if not model_response:
+                            send_error_response("Error: Empty response from model.")
+                            return
+                        print(f"{COLOR_GREEN}[Model Output]{COLOR_RESET}\n{model_response}\n")
+                        append_to_chat_history({"user_input": user_input, "response": model_response})
+                        send_response(model_response)
                 else:
                     # Regular model response
                     model_response = response_json.get("message", {}).get("content", "")
@@ -1034,7 +771,25 @@ def perform_inference(user_input):
             traceback.print_exc()
             send_error_response(f"Error during model inference: {e}")
 
-# Function to handle tool calls from API responses
+def process_arguments(arguments):
+    """
+    Recursively process and clean tool arguments, ensuring all values are valid.
+    Args:
+        arguments (dict): Arguments passed to the tool function.
+
+    Returns:
+        dict: Cleaned arguments.
+    """
+    if isinstance(arguments, dict):
+        processed_args = {}
+        for key, value in arguments.items():
+            if isinstance(value, dict):
+                processed_args[key] = process_arguments(value)  # Recursive processing for nested dicts
+            else:
+                processed_args[key] = value  # Add value as it is if not a dict
+        return processed_args
+    return arguments
+
 def handle_tool_call(tool_call):
     """
     Execute the tool function and return its response.
@@ -1046,30 +801,38 @@ def handle_tool_call(tool_call):
         str: Response from the tool function or error message.
     """
     try:
-        function_info = tool_call.get("function", {})
+        # Store the incoming tool_call for reference
+        tool_call_data = tool_call
+
+        # Extract the function information and the arguments from the tool call
+        function_info = tool_call_data.get("function", {})
         function_name = function_info.get("name")
-        arguments = tool_call.get("arguments", {})
 
-        # Check if function name is provided
+        # Debugging: Print the incoming tool_call to see what is being passed
+        print(f"[Debug] Tool call received: {json.dumps(tool_call_data, indent=2)}")
+        print(f"[Debug] Extracted function name: {function_name}")
+
+        # Ensure the function name is present
         if not function_name:
-            error_msg = "Error: No function name provided in tool call."
-            print(f"{COLOR_RED}[Tool Call Error]{COLOR_RESET} {error_msg}")
-            return error_msg
+            return "Error: No function name provided in tool call."
 
-        # Fetch the corresponding function from model.functions.py
+        # Pass the entire tool_call_data to the function in model.functions
         if hasattr(functions, function_name):
             func = getattr(functions, function_name)
-            response = func(arguments)  # Pass arguments as a dictionary
+            print(f"[Tool Execution] Executing '{function_name}' with raw tool call data")
+            
+            # Execute the corresponding function in model.functions with the full JSON object
+            response = func(tool_call_data)
+            
+            # Return the response from the function
             return response
         else:
-            error_msg = f"Error: Function '{function_name}' not found."
-            print(f"{COLOR_RED}[Tool Call Error]{COLOR_RESET} {error_msg}")
-            return error_msg
+            return f"Error: Function '{function_name}' not found."
 
     except Exception as e:
-        error_msg = f"Error executing tool '{function_name}': {e}"
-        print(f"{COLOR_RED}[Tool Call Error]{COLOR_RESET} {error_msg}")
-        return error_msg
+        return f"Error executing tool '{function_name}': {e}"
+
+
 
 # Function to send a tool's response back to the API
 def send_tool_response(tool_response, context):

@@ -1,0 +1,123 @@
+{
+    "get_voltage": "get_voltage",
+    "get_current_time": "get_current_time",
+    "get_current_weather": "get_current_weather",
+    "get_current_location": "get_current_location",
+    "get_system_info": "get_system_info",
+    "get_battery_status": "get_battery_status",
+    "play_sound": "play_sound",
+    "stop_sound": "stop_sound",
+    "get_cpu_usage": "get_cpu_usage",
+    "get_memory_info": "get_memory_info",
+    "get_gpu_usage": "get_gpu_usage",
+    "get_disk_usage": "get_disk_usage",
+    "get_network_info": "get_network_info",
+    "get_system_uptime": "get_system_uptime",
+    "get_temperature_sensors": "get_temperature_sensors",
+    "get_usb_devices": "get_usb_devices",
+    "get_pci_devices": "get_pci_devices",
+    "get_bluetooth_devices": "get_bluetooth_devices",
+    "get_audio_devices": "get_audio_devices",
+    "get_camera_info": "get_camera_info",
+    "create_file": {
+        "description": "Create a new file. Extract the file name and path from user input. Extract file content if mentioned.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the file to be created. Extract from user input.",
+                    "required": true
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The location where the file will be created. Extract from user input.",
+                    "required": true
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The content to write into the file, if mentioned by the user.",
+                    "required": false
+                },
+                "permissions": {
+                    "type": "string",
+                    "description": "The file writing mode, e.g., 'w' for overwrite or 'a' for append",
+                    "default": "w"
+                }
+            },
+            "required": ["name", "path"]
+        }
+    },
+    "delete_file": {
+        "description": "Delete a file at the specified path.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the file to be deleted",
+                    "required": true
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The directory path where the file is located",
+                    "required": true
+                }
+            },
+            "required": ["name", "path"]
+        }
+    },
+    "modify_file": {
+        "description": "Modify an existing file by writing new content to it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the file to be modified",
+                    "required": true
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The directory path where the file is located",
+                    "required": true
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The new content to write into the file",
+                    "required": true
+                },
+                "permissions": {
+                    "type": "string",
+                    "description": "The file writing mode, e.g., 'w' for overwrite or 'a' for append",
+                    "default": "w"
+                }
+            },
+            "required": ["name", "path", "content"]
+        }
+    },
+    "rename_file": {
+        "description": "Rename a file at the specified path.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The current name of the file to be renamed",
+                    "required": true
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The directory path where the file is located",
+                    "required": true
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "The new name for the file",
+                    "required": true
+                }
+            },
+            "required": ["name", "path", "new_name"]
+        }
+    }
+}

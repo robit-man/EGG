@@ -18,6 +18,7 @@
     "json_filtering": false,
     "api_endpoint": "chat",
     "stream": false,
+    "enable_chat_history": false,
     "port": "6200",
     "data_port": "6001"
 }

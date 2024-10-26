@@ -3,6 +3,8 @@ import json
 import uuid
 import os
 import threading
+import random
+import traceback
 
 # Configuration
 CONFIG_FILE = 'plug.cf'
@@ -12,12 +14,16 @@ config = {
     'orchestrator_ports': '6000-6010',
     'port_range': '6200-6300',
     'script_uuid': str(uuid.uuid4()),
-    'script_name': 'PLUG',
-    'data_port': None
+    'script_name': 'PLUG_Engine',
+    'data_port': None,
+    'forward': True
 }
 
+script_uuid = None
+script_name = 'PLUG_Engine'
 registered = False
 cancel_event = threading.Event()
+config_lock = threading.Lock()
 
 def read_config():
     global config
@@ -25,10 +31,13 @@ def read_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 config.update(json.load(f))
+            print(f"[Info] Loaded configuration from {CONFIG_FILE}.")
         except Exception as e:
             print(f"[Error] Could not read {CONFIG_FILE}: {e}")
+    # Save the current config to ensure any defaults are written if not present
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
+
 
 def parse_port_range(port_range_str):
     ports = []
@@ -40,25 +49,45 @@ def parse_port_range(port_range_str):
             ports.append(int(part))
     return ports
 
-def find_available_port(port_range):
-    for port in port_range:
+def find_available_port(port_range, preferred_port=None):
+    # Try the preferred (stored) port first if provided
+    if preferred_port:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            result = sock.connect_ex(('localhost', preferred_port))
+            if result != 0:  # Port is available
+                return preferred_port
+    
+    # If the preferred port is unavailable, pick a random available port from the range
+    tried_ports = set()
+    while len(tried_ports) < len(port_range):
+        port = random.choice(port_range)
+        if port in tried_ports:
+            continue
+        tried_ports.add(port)
+        
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             result = sock.connect_ex(('localhost', port))
             if result != 0:
                 return port
+
     raise Exception("No available ports found in range.")
 
 def register_with_orchestrator():
     host = config['orchestrator_host']
     orch_ports = parse_port_range(config['orchestrator_ports'])
     port_range = parse_port_range(config['port_range'])
-
+    
+    # First, try to use the stored data_port from the config if it exists
+    preferred_port = config.get('data_port')
+    
     for port in orch_ports:
         try:
             print(f"Attempting registration on {host}:{port}...")
             with socket.create_connection((host, port), timeout=5) as s:
-                assigned_data_port = find_available_port(port_range)
-                config['data_port'] = assigned_data_port
+                # Use the stored port as the preferred port, only finding a new one if necessary
+                assigned_data_port = find_available_port(port_range, preferred_port=preferred_port)
+                config['data_port'] = assigned_data_port  # Update config with the confirmed data port
+                
                 message = f"/register {config['script_name']} {config['script_uuid']} {assigned_data_port}\n"
                 s.sendall(message.encode())
                 
@@ -67,6 +96,7 @@ def register_with_orchestrator():
                 print(f"[Orchestrator Response] {ack_data}")
                 if ack_data.startswith('/ack'):
                     print(f"[Success] Registered with orchestrator. Confirmed data port: {assigned_data_port}")
+                    update_config()  # Save the selected port to the config file
                     return True
         except Exception as e:
             print(f"[Error] Registration failed on port {port}: {e}")
@@ -105,14 +135,22 @@ def start_data_listener():
                 except OSError as e:
                     if "Address already in use" in str(e):
                         print(f"[Warning] Port {data_port} already in use. Selecting a new port...")
-                        data_port = find_available_port(port_range)
+                        data_port = find_available_port(port_range, preferred_port=None)  # Skip the preferred port
                         config['data_port'] = data_port
+                        update_config()  # Save new port to config
                         update_orchestrator_data_port(data_port)
                     else:
                         print(f"[Error] Could not start data listener on port {data_port}: {e}")
                         break
         except Exception as e:
             print(f"[Error] Unexpected error in data listener setup: {e}")
+
+def update_config():
+    """Updates the config file with the current data port."""
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"[Info] Configuration updated with new data port: {config['data_port']}")
+
 
 def update_orchestrator_data_port(new_data_port):
     """Informs the orchestrator of the new data port if the old one was in use."""
@@ -141,20 +179,29 @@ def handle_client_connection(client_socket):
                 send_info(client_socket)
             elif not data.startswith("Acknowledged:"):
                 print(f"[Data Received] {data}")
-                response = f"{data}"
-                send_data_to_orchestrator(response)  # Send acknowledgment
+                # This following action forwards data this module receives, on to the orchestrator, to be routed to the next module.
+                forwarding = config['forward']
+                if not forwarding:
+                    print("Forwarding Disabled")
+                else:
+                    response = f"{data}"
+                    send_data_to_orchestrator(response)  # Send acknowledgment
             else:
                 print(f"[Info] Received acknowledgment message: {data}")
 
 def send_info(client_socket):
-    info = {
-        "script_name": config['script_name'],
-        "script_uuid": config['script_uuid'],
-        "data_port": config['data_port']
-    }
-    info_message = json.dumps(info)
-    client_socket.sendall(info_message.encode())
-    print(f"[Info Sent] Configuration info sent to orchestrator.")
+    try:
+        response = f"{script_name}\n{script_uuid}\n"
+        with config_lock:
+            for key, value in config.items():
+                response += f"{key}={value}\n"
+        response += 'EOF\n'  # End the response with EOF to signal completion
+        client_socket.sendall(response.encode())
+        print(f"[Info] Sent configuration info to {client_socket.getpeername()}")
+    except Exception as e:
+        print(f"[Error] Failed to send info to {client_socket.getpeername()}: {e}")
+        traceback.print_exc()
+
 
 def send_data_to_orchestrator(data):
     host = config.get('orchestrator_host', 'localhost')

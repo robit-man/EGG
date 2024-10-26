@@ -9,23 +9,28 @@ import traceback
 # Configuration
 CONFIG_FILE = 'plug.cf'
 
+# Initial configuration dictionary with default values for the script
 config = {
-    'orchestrator_host': 'localhost',
-    'orchestrator_ports': '6000-6010',
-    'port_range': '6200-6300',
-    'script_uuid': str(uuid.uuid4()),
-    'script_name': 'PLUG_Engine',
-    'data_port': None,
-    'forward': True
+    'orchestrator_host': 'localhost',          # Host address of the orchestrator
+    'orchestrator_ports': '6000-6010',         # Range of ports for orchestrator connection attempts
+    'port_range': '6200-6300',                 # Range of ports to try for the data listener
+    'script_uuid': str(uuid.uuid4()),          # Unique identifier for this script instance
+    'script_name': 'PLUG_Engine',              # Name of the script
+    'data_port': None,                         # Port for data communication; assigned dynamically
+    'forward': True                            # Determines if data should be forwarded
 }
 
-script_uuid = None
-script_name = 'PLUG_Engine'
-registered = False
-cancel_event = threading.Event()
-config_lock = threading.Lock()
+script_uuid = None            # Global variable for the script's unique identifier
+script_name = 'PLUG_Engine'   # Global variable for the script's name
+registered = False            # Tracks registration status with the orchestrator
+cancel_event = threading.Event()  # Event to signal thread termination
+config_lock = threading.Lock()    # Lock to ensure thread-safe access to config
 
 def read_config():
+    """
+    Reads configuration from the config file if it exists, updating the global config dictionary.
+    If the config file does not exist, writes the current config dictionary to the file.
+    """
     global config
     if os.path.exists(CONFIG_FILE):
         try:
@@ -40,6 +45,10 @@ def read_config():
 
 
 def parse_port_range(port_range_str):
+    """
+    Parses a port range string and returns a list of ports.
+    Supports single ports and ranges (e.g., '6000-6010').
+    """
     ports = []
     for part in port_range_str.split(','):
         if '-' in part:
@@ -50,6 +59,11 @@ def parse_port_range(port_range_str):
     return ports
 
 def find_available_port(port_range, preferred_port=None):
+    """
+    Attempts to find an available port for the data listener.
+    Tries the preferred port first, if specified; otherwise, picks a random port from the range.
+    Raises an exception if no available port is found.
+    """
     # Try the preferred (stored) port first if provided
     if preferred_port:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -73,6 +87,10 @@ def find_available_port(port_range, preferred_port=None):
     raise Exception("No available ports found in range.")
 
 def register_with_orchestrator():
+    """
+    Attempts to register with the orchestrator by connecting to each port in the orchestrator range.
+    If successful, assigns a confirmed data port and updates the config file with this information.
+    """
     host = config['orchestrator_host']
     orch_ports = parse_port_range(config['orchestrator_ports'])
     port_range = parse_port_range(config['port_range'])
@@ -104,6 +122,10 @@ def register_with_orchestrator():
     return False
 
 def start_data_listener():
+    """
+    Starts a data listener on the assigned port to handle incoming data connections.
+    Automatically attempts to rebind on a new port if the current port is in use.
+    """
     host = '0.0.0.0'
     port_range = parse_port_range(config['port_range'])
     data_port = config.get('data_port')
@@ -168,6 +190,10 @@ def update_orchestrator_data_port(new_data_port):
             print(f"[Error] Could not notify orchestrator of new data port on port {port}: {e}")
 
 def handle_client_connection(client_socket):
+    """
+    Handles each incoming client connection, responding to '/info' requests
+    and forwarding other data as required by the forward setting.
+    """
     with client_socket:
         while not cancel_event.is_set():
             data = client_socket.recv(1024).decode().strip()
@@ -190,6 +216,10 @@ def handle_client_connection(client_socket):
                 print(f"[Info] Received acknowledgment message: {data}")
 
 def send_info(client_socket):
+    """
+    Sends configuration and script information to the client socket in a specific format,
+    ending with 'EOF' to signal completion.
+    """
     try:
         response = f"{script_name}\n{script_uuid}\n"
         with config_lock:
@@ -204,6 +234,10 @@ def send_info(client_socket):
 
 
 def send_data_to_orchestrator(data):
+    """
+    Forwards data to the orchestrator, iterating through orchestrator ports until a connection succeeds.
+    Retries are attempted in case of connection refusal.
+    """
     host = config.get('orchestrator_host', 'localhost')
     orch_ports = parse_port_range(config['orchestrator_ports'])
     message = f"/data {config['script_uuid']} {data}\n"
@@ -225,6 +259,10 @@ def send_data_to_orchestrator(data):
 
 
 def handle_user_input():
+    """
+    Continuously reads user input from the terminal, forwarding each message to the orchestrator.
+    Terminates if 'exit' is entered.
+    """
     while not cancel_event.is_set():
         user_input = input("Enter message for orchestrator: ")
         if user_input.lower() == 'exit':
@@ -232,6 +270,7 @@ def handle_user_input():
             break
         send_data_to_orchestrator(user_input)
 
+# Main script execution: Reads config, registers with orchestrator, starts data listener, and handles user input
 if __name__ == '__main__':
     read_config()
 

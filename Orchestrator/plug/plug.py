@@ -219,18 +219,27 @@ def send_info(client_socket):
     """
     Sends configuration and script information to the client socket in a specific format,
     ending with 'EOF' to signal completion.
+    Ensures that both the UUID and the complete config are present before sending.
     """
     try:
-        response = f"{script_name}\n{script_uuid}\n"
-        with config_lock:
-            for key, value in config.items():
-                response += f"{key}={value}\n"
-        response += 'EOF\n'  # End the response with EOF to signal completion
+        # Check if UUID and essential config data are set
+        if not config['script_uuid']:
+            print("[Error] UUID is missing; cannot send info.")
+            return
+        config_string = "\n".join(f"{key}={value}" for key, value in config.items() if value is not None)
+        if not config_string:
+            print("[Error] Configuration is incomplete; cannot send info.")
+            return
+
+        # Build the response to include the script name, UUID, full config, and EOF
+        response = f"{config['script_name']}\n{config['script_uuid']}\n{config_string}\nEOF\n"
         client_socket.sendall(response.encode())
         print(f"[Info] Sent configuration info to {client_socket.getpeername()}")
+
     except Exception as e:
         print(f"[Error] Failed to send info to {client_socket.getpeername()}: {e}")
         traceback.print_exc()
+
 
 
 def send_data_to_orchestrator(data):

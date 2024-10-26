@@ -17,6 +17,7 @@ To install and run the Orchestrator, simply copy and paste the following command
 curl -O https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh && chmod +x install_and_run_orchestrator.sh && ./install_and_run_orchestrator.sh
 
 ```
+Bonus: For a quick look at a generic peripheral component that has baseline functionality and can be adapted for your particular usecase in the ecosystem, [look at the Plug](https://github.com/robit-man/EGG/blob/main/Orchestrator/plug/plug.py)!
 
 ## Overview
 

@@ -12,7 +12,7 @@ config = {
     'orchestrator_ports': '6000-6010',
     'port_range': '6200-6300',
     'script_uuid': str(uuid.uuid4()),
-    'script_name': 'PLUG_Engine',
+    'script_name': 'PLUG',
     'data_port': None
 }
 
@@ -141,7 +141,7 @@ def handle_client_connection(client_socket):
                 send_info(client_socket)
             elif not data.startswith("Acknowledged:"):
                 print(f"[Data Received] {data}")
-                response = f"Acknowledged: {data}"
+                response = f"{data}"
                 send_data_to_orchestrator(response)  # Send acknowledgment
             else:
                 print(f"[Info] Received acknowledgment message: {data}")

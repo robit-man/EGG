@@ -40,7 +40,7 @@ config = {
     'data_port': None,
     'output_mode': 'speaker',
     'server': 'localhost:50051',
-    'voice': GLaDOS,  # Voice will be selected upon startup
+    'voice': 'GLaDOS',  # Voice will be selected upon startup
     'language_code': 'en-US'  # Default language code
 }
 

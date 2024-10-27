@@ -227,21 +227,56 @@ def asr_processing():
 def send_text_to_orchestrator(response_generator):
     host = config.get('orchestrator_host', 'localhost')
     port = int(config.get('orchestrator_port', '6000'))
+    
+    # Buffer to hold interim results for accumulating words
+    sentence_buffer = []
+    
     for response in response_generator:
         for result in response.results:
             if result.is_final:
+                # Clear the buffer if we receive a final result
                 recognized_text = result.alternatives[0].transcript
-                print(f"Recognized (final): {recognized_text}")
-                # Send recognized text to orchestrator
-                message = f"/data {script_uuid} {recognized_text}\n"
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.connect((host, port))
-                    s.sendall(message.encode())
-                    s.close()
-                except Exception as e:
-                    print(f"Failed to send text to orchestrator at {host}:{port}: {e}")
-                    # Optionally retry or handle the error
+                sentence_buffer.append(recognized_text)
+
+                # Combine buffered words into a full sentence
+                final_sentence = ' '.join(sentence_buffer).strip()
+                if final_sentence:
+                    print(f"Recognized (final): {final_sentence}")
+                    
+                    # Send recognized text to orchestrator
+                    message = f"/data {script_uuid} {final_sentence}\n"
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.connect((host, port))
+                            s.sendall(message.encode())
+                    except Exception as e:
+                        print(f"Failed to send text to orchestrator at {host}:{port}: {e}")
+                    
+                    # Clear buffer after sending
+                    sentence_buffer.clear()
+            else:
+                # If result is interim, accumulate words
+                interim_text = result.alternatives[0].transcript
+                sentence_buffer.append(interim_text)
+
+                # Check for punctuation or indicators of sentence end
+                if interim_text and interim_text[-1] in ".!?":
+                    # Send the interim sentence immediately if punctuated
+                    combined_text = ' '.join(sentence_buffer).strip()
+                    print(f"Recognized (interim punctuated): {combined_text}")
+                    
+                    # Send recognized text to orchestrator
+                    message = f"/data {script_uuid} {combined_text}\n"
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.connect((host, port))
+                            s.sendall(message.encode())
+                    except Exception as e:
+                        print(f"Failed to send text to orchestrator at {host}:{port}: {e}")
+
+                    # Clear buffer after sending
+                    sentence_buffer.clear()
+
 
 def start_server():
     host = '0.0.0.0'

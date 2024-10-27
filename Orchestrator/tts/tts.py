@@ -16,7 +16,7 @@ import re
 import textwrap
 from num2words import num2words
 import subprocess  # For calling pactl to mute/unmute mic
-
+import requests
 
 # Configuration and Constants
 CONFIG_FILE = 'tts.cf'
@@ -40,7 +40,7 @@ config = {
     'data_port': None,
     'output_mode': 'speaker',
     'server': 'localhost:50051',
-    'voice': 'GLaDOS',  # Voice will be selected upon startup
+    'voice': None,  # Voice will be selected upon startup
     'language_code': 'en-US'  # Default language code
 }
 
@@ -230,36 +230,75 @@ def update_orchestrator_data_port(new_data_port):
         except Exception as e:
             logger.warning(f"Could not update orchestrator on port {port} - {e}")
 
-# TTS Synthesis and Playback
+
+# TTS Synthesis and Playback with Rapid Failure Recovery
 def synthesize_and_play(tts_stub):
+    server_health_url = "http://localhost:8000/v2/health/ready"
+    max_retries = 2  # Quick retries before skipping chunk
+    failure_count = 0  # Track consecutive failures for adaptive handling
+
     while not cancel_event.is_set():
+        # Step 1: Check Triton server health but don't block on failure
         try:
-            text = tts_queue.get(timeout=1)
+            server_response = requests.get(server_health_url, timeout=1)
+            if server_response.status_code == 200 and server_response.text.lower() == 'true':
+                logger.info("Triton server is healthy.")
+                failure_count = 0  # Reset failure count if healthy
+            else:
+                logger.warning("Triton server health check failed. Proceeding with TTS synthesis.")
+        except requests.RequestException as e:
+            logger.warning(f"Health check failed: {e}. Proceeding with TTS regardless.")
+
+        # Step 2: Retrieve text and process for TTS synthesis
+        try:
+            text = tts_queue.get(timeout=0.5)  # Shorter timeout for responsiveness
             chunks = textwrap.wrap(text, width=400)
-            mute_microphone()  # Mute the microphone during playback
+            mute_microphone()
 
             for chunk in chunks:
-                req = riva_tts_pb2.SynthesizeSpeechRequest(
-                    text=chunk,
-                    language_code=config['language_code'],
-                    encoding=riva.client.AudioEncoding.LINEAR_PCM,
-                    sample_rate_hz=sample_rate,
-                    voice_name=selected_voice[0]
-                )
-                resp = tts_stub.Synthesize(req)
-                audio_data = np.frombuffer(resp.audio, dtype=np.int16)
-                stream.write(audio_data.tobytes())
-                logger.info(f"Played synthesized speech for text: '{chunk}'")
-            unmute_microphone()  # Mute the microphone during playback
+                success = False
+                for attempt in range(max_retries):
+                    try:
+                        req = riva_tts_pb2.SynthesizeSpeechRequest(
+                            text=chunk,
+                            language_code=config['language_code'],
+                            encoding=riva.client.AudioEncoding.LINEAR_PCM,
+                            sample_rate_hz=sample_rate,
+                            voice_name=selected_voice[0]
+                        )
+                        resp = tts_stub.Synthesize(req)
+                        audio_data = np.frombuffer(resp.audio, dtype=np.int16)
+                        stream.write(audio_data.tobytes())
+                        logger.info(f"Successfully played synthesized speech for text: '{chunk}'")
+                        success = True
+                        failure_count = 0  # Reset on success
+                        break
+                    except grpc.RpcError as e:
+                        logger.error(f"Synthesis failed on attempt {attempt + 1}: {e.details()}")
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)  # Short delay before retrying
+                        else:
+                            logger.warning("Skipping this chunk after max retries.")
+                    except Exception as e:
+                        logger.error(f"Unexpected error: {e}")
+                        break
+
+                if not success:
+                    failure_count += 1
+                    if failure_count > 3:
+                        logger.warning("Multiple consecutive failures, increasing delay.")
+                        time.sleep(1)  # Pause if persistent failures occur
+
+            unmute_microphone()
+
         except queue.Empty:
-            continue
-            unmute_microphone()  # Mute the microphone during playback
-        except grpc.RpcError as e:
-            logger.error(f"TTS synthesis failed: {e.details()}")
-            unmute_microphone()  # Mute the microphone during playback
+            unmute_microphone()
+            continue  # Continue loop if no text in queue
+
         except Exception as e:
-            logger.error(f"Unexpected error in TTS synthesis and playback: {e}")
-            unmute_microphone()  # Mute the microphone during playback
+            logger.error(f"Unexpected error in main loop: {e}")
+            unmute_microphone()
+            time.sleep(1)  # Short delay on unexpected error
 
 # Function to mute the microphone
 def mute_microphone():

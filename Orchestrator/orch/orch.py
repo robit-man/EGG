@@ -17,7 +17,7 @@ default_config = {
     'known_ports': '2000-8000',  # Scan ports from 2000 to 8000
     'scan_interval': 5,          # Time interval in seconds to scan for peripherals (changed to integer)
     'command_port': 6000,        # Port to listen for commands and data (changed to integer)
-    'data_port_range': '6001-6099',  # Range of ports to receive data from peripherals
+    'data_port_range': '6000-6099',  # Range of ports to receive data from peripherals
     'peripherals': [],           # List of known peripherals (stored as an empty list)
     'script_uuid': str(uuid.uuid4()),  # Generate a unique UUID string for the script
 }
@@ -119,7 +119,7 @@ def write_routes():
 
 def parse_port_range(port_range_str):
     """
-    Parse a port range string (e.g., '6001-6099') into a list of ports.
+    Parse a port range string (e.g., '6000-6099') into a list of ports.
     """
     ports = []
     for part in port_range_str.split(','):
@@ -377,7 +377,7 @@ def register_peripheral(name, peripheral_uuid, port, conn):
         }
 
         # Dynamically assign a data port from the available range
-        available_data_ports = parse_port_range(config.get('data_port_range', '6001-6099'))
+        available_data_ports = parse_port_range(config.get('data_port_range', '6000-6099'))
         assigned_data_port = available_data_ports[len(config['peripherals']) % len(available_data_ports)]  # Rotate through the data ports
 
         peripheral['data_port'] = assigned_data_port  # Assign the unique data port to the peripheral
@@ -586,6 +586,57 @@ def handle_incoming_data(peripheral_uuid, data):
             log_message(f"Error forwarding data on route '{route['name']}': {e}")
 
 
+# Function to synchronize ports based on UUIDs in orch.cf and routes.cf
+def port_sync():
+    while True:
+        try:
+            with config_lock, routes_lock:
+                # Read orch.cf to get the current port configuration
+                if os.path.exists(CONFIG_FILE):
+                    with open(CONFIG_FILE, 'r') as f:
+                        orch_data = json.load(f)
+                else:
+                    orch_data = {}
+
+                # Read routes.cf to get current routing information
+                if os.path.exists(ROUTES_FILE):
+                    with open(ROUTES_FILE, 'r') as f:
+                        routes_data = json.load(f)
+                else:
+                    routes_data = []
+
+                # Update ports in routes based on UUIDs in orch
+                uuid_to_port = {p['uuid']: p.get('port') for p in orch_data.get('peripherals', [])}
+                updated = False
+
+                for route in routes_data:
+                    incoming_uuid = route.get('incoming')
+                    outgoing_uuid = route.get('outgoing')
+
+                    # Synchronize ports if they are different
+                    if incoming_uuid in uuid_to_port and route.get('incoming_port') != uuid_to_port[incoming_uuid]:
+                        route['incoming_port'] = uuid_to_port[incoming_uuid]
+                        updated = True
+                    if outgoing_uuid in uuid_to_port and route.get('outgoing_port') != uuid_to_port[outgoing_uuid]:
+                        route['outgoing_port'] = uuid_to_port[outgoing_uuid]
+                        updated = True
+
+                # Write back to routes.cf if any updates were made
+                if updated:
+                    with open(ROUTES_FILE, 'w') as f:
+                        json.dump(routes_data, f, indent=4)
+                    log_message("Ports synchronized between orch.cf and routes.cf.")
+
+        except Exception as e:
+            log_message(f"Error in port_sync: {e}\n{traceback.format_exc()}")
+
+        # Run the sync every few seconds
+        time.sleep(5)
+
+# Start port_sync in a dedicated thread
+threading.Thread(target=port_sync, daemon=True).start()
+
+
 def command_listener():
     command_ports = [6000, 6001, 6002, 6003, 6004, 6005]  # Define your port range here
     host = '0.0.0.0'
@@ -617,7 +668,7 @@ def command_listener():
 
 
 def data_listener():
-    data_port_range = config.get('data_port_range', '6001-6099')
+    data_port_range = config.get('data_port_range', '6000-6099')
     data_ports = parse_port_range(data_port_range)  # Dynamically parse the port range
     host = '0.0.0.0'
     

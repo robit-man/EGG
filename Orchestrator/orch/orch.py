@@ -17,7 +17,7 @@ default_config = {
     'known_ports': '2000-8000',  # Scan ports from 2000 to 8000
     'scan_interval': 5,          # Time interval in seconds to scan for peripherals (changed to integer)
     'command_port': 6000,        # Port to listen for commands and data (changed to integer)
-    'data_port_range': '6000-6099',  # Range of ports to receive data from peripherals
+    'data_port_range': '6001-6099',  # Range of ports to receive data from peripherals
     'peripherals': [],           # List of known peripherals (stored as an empty list)
     'script_uuid': str(uuid.uuid4()),  # Generate a unique UUID string for the script
 }

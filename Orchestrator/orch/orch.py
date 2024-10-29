@@ -562,28 +562,31 @@ def get_peripheral_by_port(port):
 
 
 def handle_incoming_data(peripheral_uuid, data):
-    # Find routes where this peripheral is the incoming peripheral
+    # Re-read the routes to ensure up-to-date data for each incoming request
+    global routes
     with routes_lock:
-        matching_routes = [route for route in routes if route['incoming'] == peripheral_uuid]
+        read_routes()  # Load the latest routes from routes.cf
+
+    # Find routes where this peripheral is the incoming peripheral
+    matching_routes = [route for route in routes if route['incoming'] == peripheral_uuid]
     if not matching_routes:
         log_message(f"No routes found for peripheral UUID {peripheral_uuid}")
         return
+
     for route in matching_routes:
         # Forward data to the outgoing peripheral
         outgoing_port = int(route['outgoing_port'])
         try:
             with socket.create_connection(('localhost', outgoing_port), timeout=5) as s_out:
-                # Assuming data should be sent as plain text with newline
                 s_out.sendall((data + "\n").encode())
-                # Update last used timestamp
                 route['last_used'] = time.time()
                 write_routes()
-                # Log activity
                 incoming_name = get_peripheral_name_by_uuid(route['incoming'])
                 outgoing_name = get_peripheral_name_by_uuid(route['outgoing'])
                 log_message(f"{incoming_name} sent data to {outgoing_name} via route '{route['name']}'")
         except Exception as e:
             log_message(f"Error forwarding data on route '{route['name']}': {e}")
+
 
 
 # Function to synchronize ports based on UUIDs in orch.cf and routes.cf

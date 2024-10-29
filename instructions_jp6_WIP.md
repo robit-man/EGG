@@ -359,6 +359,14 @@ If NoMachine interferes with audio device settings, create a script to enforce d
      /home/$(whoami)/reset_pulseaudio.sh
      ```
 
+### 7.4. Modify System Audio Device Permissions
+
+Some scripts will need to access the re-speaker device by product ID and receive data for determining Direction Of Arrival and other perameters
+
+```
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="2886", ATTR{idProduct}=="0018", MODE="0666"' | sudo tee /etc/udev/rules.d/99-usb-device.rules > /dev/null && sudo usermod -aG plugdev $USER && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
 ---
 
 ## 8. Download and Install GLaDOS TTS

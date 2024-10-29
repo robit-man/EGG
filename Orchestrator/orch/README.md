@@ -632,4 +632,5 @@ If the orchestrator becomes unresponsive or behaves unexpectedly, you can reset 
 
 ---
 
-Take it eassssss
+Take it eassssss ![Lip-Bite-Emoji-PNG-File-2665378866](https://github.com/user-attachments/assets/90cc5c98-ba90-4e2a-a0d3-e7ad471e86c0)
+

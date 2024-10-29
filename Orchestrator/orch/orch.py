@@ -17,7 +17,7 @@ default_config = {
     'known_ports': '2000-8000',  # Scan ports from 2000 to 8000
     'scan_interval': 5,          # Time interval in seconds to scan for peripherals (changed to integer)
     'command_port': 6000,        # Port to listen for commands and data (changed to integer)
-    'data_port_range': '6001-6010',  # Range of ports to receive data from peripherals
+    'data_port_range': '6001-6099',  # Range of ports to receive data from peripherals
     'peripherals': [],           # List of known peripherals (stored as an empty list)
     'script_uuid': str(uuid.uuid4()),  # Generate a unique UUID string for the script
 }
@@ -119,7 +119,7 @@ def write_routes():
 
 def parse_port_range(port_range_str):
     """
-    Parse a port range string (e.g., '6001-6010') into a list of ports.
+    Parse a port range string (e.g., '6001-6099') into a list of ports.
     """
     ports = []
     for part in port_range_str.split(','):
@@ -179,20 +179,28 @@ def check_port(port):
             peripheral_info = f"Unknown Peripheral on Port {port}"
         log_message(f"Error connecting to port {port} for {peripheral_info}: {e}")
 
-
 def process_response(response, port):
     # Optional logging
     lines = response.strip().split('\n')
+    
+    # Check if the response has the expected format: at least 3 lines (name, uuid, config)
     if len(lines) < 3:
         log_message(f"Incomplete response from port {port}. Expected at least 3 lines.")
         return
 
+    # Validate UUID format (basic check for valid UUID)
+    uuid_pattern = re.compile(r'^[a-fA-F0-9-]{36}$')
     name = lines[0].strip()
     peripheral_uuid = lines[1].strip()
+
+    if not uuid_pattern.match(peripheral_uuid):
+        log_message(f"Invalid UUID format from response on port {port}. Ignoring response.")
+        return
+
     config_lines = lines[2:]
     peripheral_config = '\n'.join(config_lines)
 
-    # Update peripherals list
+    # Lock to update peripherals list
     with peripherals_lock:
         peripheral = {
             'name': name,
@@ -205,21 +213,27 @@ def process_response(response, port):
         # Check for existing peripheral by UUID
         existing = next((p for p in config['peripherals'] if p['uuid'] == peripheral_uuid), None)
         if existing:
-            # Update existing peripheral's last_seen and other info
             existing.update(peripheral)
             log_message(f"Updated existing peripheral: {existing['name']} on port {port}")
         else:
-            # Handle multiple instances of the same peripheral
+            # Ensure unique name
             same_name_count = sum(1 for p in config['peripherals'] if p['name'] == name or p['name'].startswith(f"{name}_"))
             if same_name_count > 0:
                 peripheral['name'] = f"{name}_{same_name_count + 1}"
-            config['peripherals'].append(peripheral)  # Ensure peripherals is a list
+            config['peripherals'].append(peripheral)
             log_message(f"Discovered new peripheral: {peripheral['name']} on port {port}")
 
     write_config()
     assign_colors_to_peripherals()
     if not in_command_mode.is_set():
+        update_event.set()
+
+
+    write_config()  # Save updated configuration
+    assign_colors_to_peripherals()
+    if not in_command_mode.is_set():
         update_event.set()  # Signal to update the display
+
 
 
 
@@ -363,7 +377,7 @@ def register_peripheral(name, peripheral_uuid, port, conn):
         }
 
         # Dynamically assign a data port from the available range
-        available_data_ports = parse_port_range(config.get('data_port_range', '6001-6010'))
+        available_data_ports = parse_port_range(config.get('data_port_range', '6001-6099'))
         assigned_data_port = available_data_ports[len(config['peripherals']) % len(available_data_ports)]  # Rotate through the data ports
 
         peripheral['data_port'] = assigned_data_port  # Assign the unique data port to the peripheral
@@ -603,7 +617,7 @@ def command_listener():
 
 
 def data_listener():
-    data_port_range = config.get('data_port_range', '6001-6010')
+    data_port_range = config.get('data_port_range', '6001-6099')
     data_ports = parse_port_range(data_port_range)  # Dynamically parse the port range
     host = '0.0.0.0'
     
@@ -951,35 +965,44 @@ def remove_peripheral_menu():
                 log_message("No peripherals to remove.")
                 return
 
-            # List the available peripherals
-            peripheral_names = [p['name'] for p in config['peripherals']]
+            # List the available peripherals with names and UUIDs
+            peripheral_info = [f"{p['name']} (UUID: {p['uuid']})" for p in config['peripherals']]
+            peripheral_uuids = {p['uuid']: p['name'] for p in config['peripherals']}
         
         log_message("Peripherals fetched successfully.")
 
-        # Ask the user to select a peripheral to remove
-        selected_peripheral = select_item("Select Peripheral to Remove (press Enter to remove, ESC to cancel):", peripheral_names)
+        # Ask the user to select a peripheral UUID to remove
+        selected_peripheral_info = select_item("Select Peripheral to Remove (press Enter to remove, ESC to cancel):", peripheral_info)
         
         # Handle ESC key or cancellation by user
-        if not selected_peripheral:
+        if not selected_peripheral_info:
             log_message("Remove Peripheral canceled by user during selection.")
             return  # Properly exit if no peripheral is selected (ESC was pressed)
         
-        log_message(f"User selected peripheral: {selected_peripheral}")
+        # Extract UUID from selected information
+        selected_uuid = next((uuid for uuid, name in peripheral_uuids.items() if name in selected_peripheral_info), None)
+        
+        if selected_uuid is None:
+            log_message(f"No matching UUID found for selected peripheral: {selected_peripheral_info}")
+            display_message("Remove Peripheral", "Failed to locate the selected peripheral.")
+            return
+        
+        log_message(f"User selected peripheral with UUID: {selected_uuid}")
 
         # Confirm removal
-        confirmation = prompt_user(f"Are you sure you want to remove the peripheral '{selected_peripheral}'? (y/n or press ESC to cancel): ")
+        confirmation = prompt_user(f"Are you sure you want to remove the peripheral with UUID '{selected_uuid}'? (y/n or press ESC to cancel): ")
         if confirmation is None or confirmation.lower() != 'y':
-            log_message(f"Remove Peripheral for '{selected_peripheral}' canceled by user.")
+            log_message(f"Remove Peripheral for UUID '{selected_uuid}' canceled by user.")
             return
 
-        # Proceed with peripheral removal
+        # Proceed with peripheral removal by UUID
         with peripherals_lock:
-            config['peripherals'] = [p for p in config['peripherals'] if p['name'] != selected_peripheral]
+            config['peripherals'] = [p for p in config['peripherals'] if p['uuid'] != selected_uuid]
         
         write_config()  # Update the config file after removal
         
-        display_message("Remove Peripheral", f"Peripheral '{selected_peripheral}' removed successfully.")
-        log_message(f"Peripheral '{selected_peripheral}' removed successfully.")
+        display_message("Remove Peripheral", f"Peripheral with UUID '{selected_uuid}' removed successfully.")
+        log_message(f"Peripheral with UUID '{selected_uuid}' removed successfully.")
     
     except Exception as e:
         # Log the error with traceback

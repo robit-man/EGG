@@ -12,6 +12,9 @@ import sounddevice as sd
 import riva.client
 from copy import deepcopy
 from riva.client.argparse_utils import add_connection_argparse_parameters
+from tuning import PARAMETERS, Tuning  # Import Tuning and PARAMETERS from tuning.py
+import usb.core
+import usb.util
 
 # Global Variables
 CONFIG_FILE = 'asr.cf'
@@ -142,13 +145,30 @@ def parse_args():
             config[key] = str(arg_value)
     write_config()
     return args
-
 def asr_processing():
     # Load configuration
     sample_rate = int(config.get('sample_rate', '16000'))
     chunk_size = int(config.get('chunk_size', '1600'))  # 100ms chunks at 16kHz
     input_device = config.get('input_device', None)
     language_code = config.get('language_code', 'en-US')
+
+    # Initialize USB device for tuning adjustments
+    dev = usb.core.find(idVendor=0x2886, idProduct=0x0018)
+    if dev is None:
+        print("USB device for tuning not found.")
+        return
+    mic_tuning = Tuning(dev)
+
+    # Adjust tuning parameters
+    try:
+        if mic_tuning.read("AGCONOFF") == 1:
+            mic_tuning.write("AGCONOFF", 0)
+            print("AGCONOFF set to 0.")
+        mic_tuning.write("AGCGAIN", 750)
+        print("AGCGAIN set to 750.")
+    except Exception as e:
+        print(f"Error adjusting tuning parameters: {e}")
+        return
 
     # Initialize Riva ASR service
     use_ssl = config.get('use_ssl', 'False') == 'True'
@@ -172,16 +192,15 @@ def asr_processing():
         encoding=riva.client.AudioEncoding.LINEAR_PCM,
         sample_rate_hertz=sample_rate,
         max_alternatives=3,
-        enable_automatic_punctuation=True,  # Ensure punctuation is automatically added
-        verbatim_transcripts=True,          # Ensure transcripts reflect exactly what's said
+        enable_automatic_punctuation=True,
+        verbatim_transcripts=True,
         language_code=language_code
     )
 
-    # Simplified StreamingRecognitionConfig without manual endpointing
+    # Streaming configuration with interim results enabled
     streaming_config = riva.client.StreamingRecognitionConfig(
         config=deepcopy(offline_config),
-        interim_results=False               # Only deliver final results
-        # We rely on Riva's default endpointing behavior to handle sentence completion
+        interim_results=True  # Enable interim results for real-time feedback
     )
 
     # Set up audio input stream
@@ -223,12 +242,11 @@ def asr_processing():
         print(f"Error during ASR streaming: {e}")
 
 
-
 def send_text_to_orchestrator(response_generator):
     host = config.get('orchestrator_host', 'localhost')
     port = int(config.get('orchestrator_port', '6000'))
     
-    # Buffer to hold interim results for accumulating words
+    # Buffer to hold interim and final results for accumulating words
     sentence_buffer = []
     
     for response in response_generator:
@@ -255,27 +273,10 @@ def send_text_to_orchestrator(response_generator):
                     # Clear buffer after sending
                     sentence_buffer.clear()
             else:
-                # If result is interim, accumulate words
+                # Display interim results but don't store them for final consolidation
                 interim_text = result.alternatives[0].transcript
-                sentence_buffer.append(interim_text)
+                print(f"Interim ASR Output: {interim_text}")
 
-                # Check for punctuation or indicators of sentence end
-                if interim_text and interim_text[-1] in ".!?":
-                    # Send the interim sentence immediately if punctuated
-                    combined_text = ' '.join(sentence_buffer).strip()
-                    print(f"Recognized (interim punctuated): {combined_text}")
-                    
-                    # Send recognized text to orchestrator
-                    message = f"/data {script_uuid} {combined_text}\n"
-                    try:
-                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                            s.connect((host, port))
-                            s.sendall(message.encode())
-                    except Exception as e:
-                        print(f"Failed to send text to orchestrator at {host}:{port}: {e}")
-
-                    # Clear buffer after sending
-                    sentence_buffer.clear()
 
 
 def start_server():

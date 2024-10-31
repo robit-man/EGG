@@ -1,11 +1,13 @@
 # EGG Orchestrator System Overview
 
-![image](https://github.com/user-attachments/assets/b1b9effe-ff7c-4855-8ef0-b385c06e6a3f)
+![image](https://github.com/user-attachments/assets/ffa45c56-b5f2-459d-9e2f-37b7a0c058c7)
 
 
 ## Introduction
 
 The **EGG Orchestrator** system is a comprehensive framework designed to facilitate seamless communication and data processing between various peripherals within a networked environment. It leverages modular components to handle specific tasks such as speech recognition, text-to-speech synthesis, and data routing. The core components of the EGG system include the **Orchestrator**, **ASR Engine**, **TTS Engine**, and **SLM Engine**. Each component is designed to operate independently while interacting cohesively to provide a robust and scalable solution for real-time data processing and peripheral management.
+
+![image](https://github.com/user-attachments/assets/d0afe152-8721-4242-95fa-ae26f1d6f5c5)
 
 This overview provides a high-level understanding of each component, their functionalities, and how they interconnect within the EGG system. For detailed information on each component, refer to their respective README files.
 

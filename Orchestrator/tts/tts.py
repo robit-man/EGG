@@ -17,6 +17,7 @@ import textwrap
 from num2words import num2words
 import subprocess  # For calling pactl to mute/unmute mic
 import requests
+import hashlib
 
 # Configuration and Constants
 CONFIG_FILE = 'tts.cf'
@@ -197,6 +198,50 @@ def fetch_and_set_voice(tts_stub):
         logger.error(f"Failed to retrieve voices: {e.details()}")
         exit(1)
 
+
+# Maintain recent audio patterns to track potential repetition
+recent_audio_patterns = []
+
+def calculate_hash(audio_data):
+    """Calculate a hash for a segment of audio data to detect repeats."""
+    return hashlib.md5(audio_data).hexdigest()
+
+def detect_playback_error(audio_data, recent_audio_patterns):
+    """Detects repeated patterns in audio data to identify playback errors."""
+    current_hash = calculate_hash(audio_data[:1024])  # Hash of the first segment for comparison
+
+    # Check if the new audio pattern is similar to any recent patterns
+    for previous_hash in recent_audio_patterns:
+        if current_hash == previous_hash:
+            return True  # Repeated pattern detected, likely a playback error
+
+    # Append the new hash to recent patterns and limit size of history
+    recent_audio_patterns.append(current_hash)
+    if len(recent_audio_patterns) > 5:  # Limit history to 5 segments
+        recent_audio_patterns.pop(0)
+        
+    return False
+
+
+def reset_playback():
+    """Resets the playback stream to handle potential underrun or looping errors."""
+    global stream  # Ensure stream is recognized as a global variable
+    if stream and stream.is_active():
+        fade_out_audio()  # Smoothly reduce volume if currently playing
+        stream.stop_stream()
+        stream.close()
+    
+    # Reopen the stream to reset it
+    stream = pyaudio_instance.open(
+        format=pyaudio.paInt16,
+        channels=output_channels,
+        rate=sample_rate,
+        output=True,
+        frames_per_buffer=1024
+    )
+    logger.info("Playback stream reset to handle error.")
+
+
 # Process Incoming Text
 def handle_client_connection(client_socket):
     with client_socket:
@@ -309,11 +354,36 @@ def synthesize_and_play(tts_stub):
                 unmute_microphone()
             time.sleep(1)
 
+def detect_internal_repetition(audio_data, segment_size=256, repetition_threshold=3):
+    """Detects internal repetition in audio data by checking for repeating segments."""
+    segment_hashes = []
+    repeated_segments = 0
+
+    # Process the audio data in segments
+    for i in range(0, len(audio_data) - segment_size, segment_size):
+        segment = audio_data[i:i + segment_size]
+        segment_hash = calculate_hash(segment)
+
+        # Check for a repeating pattern in recent segments
+        if segment_hash in segment_hashes:
+            repeated_segments += 1
+            if repeated_segments >= repetition_threshold:
+                return True  # Repetition threshold exceeded, indicating looping
+        else:
+            repeated_segments = 0  # Reset if no repetition in this segment
+
+        segment_hashes.append(segment_hash)
+
+        # Limit segment history to avoid excessive memory usage
+        if len(segment_hashes) > 10:
+            segment_hashes.pop(0)
+
+    return False
+
 def process_chunk(chunk, tts_stub, max_retries):
-    global tts_state
+    global tts_state, recent_audio_patterns
     tts_state = "INFERENCE"
     success = False
-    recent_audio_patterns = []
 
     for attempt in range(max_retries):
         if cancel_event.is_set():
@@ -331,7 +401,8 @@ def process_chunk(chunk, tts_stub, max_retries):
             audio_data = np.frombuffer(resp.audio, dtype=np.int16)
 
             # Detect playback errors (e.g., repeated audio patterns)
-            if detect_playback_error(audio_data, recent_audio_patterns):
+            if detect_playback_error(audio_data.tobytes(), recent_audio_patterns) or \
+               detect_internal_repetition(audio_data):
                 logger.warning("Playback error detected (repeated audio or underrun). Resetting playback.")
                 reset_playback()
                 break
@@ -342,9 +413,6 @@ def process_chunk(chunk, tts_stub, max_retries):
                 stream.write(audio_data.tobytes())
                 logger.info(f"Played synthesized speech for chunk: '{chunk}'")
                 success = True
-                recent_audio_patterns.append(audio_data[:100])  # Store start of audio for pattern detection
-                if len(recent_audio_patterns) > 3:
-                    recent_audio_patterns.pop(0)  # Maintain recent history for error detection
             break
         except grpc.RpcError as e:
             logger.error(f"Synthesis failed on attempt {attempt + 1}: {e.details()}")
@@ -356,6 +424,7 @@ def process_chunk(chunk, tts_stub, max_retries):
 
     tts_state = "IDLE"
     return success
+
 
 def detect_playback_error(audio_data, recent_audio_patterns):
     """Detects repeated patterns in audio data to identify playback errors."""

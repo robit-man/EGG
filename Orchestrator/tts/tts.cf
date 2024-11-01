@@ -2,14 +2,15 @@
   "orchestrator_host": "localhost",
   "orchestrator_ports": "6000-6005",
   "port_range": "6200-6300",
-  "data_port": 6239,
+  "data_port": 6237,
   "output_mode": "speaker",
   "server": "localhost:50051",
+  "mute_during_playback": false,
   "voice": "GLaDOS",
   "language_code": "en-US",
   "input_mode": "port",
   "port": "6100",
   "script_uuid": "37d46837-f12a-4215-bd74-8d123bdb6a3d",
-  "input_format": "chunk",
+  "input_format": "stream",
   "route": "/tts_route"
 }

@@ -35,6 +35,8 @@ asr_muted = False  # Flag to mute ASR during playback
 tts_state = "IDLE"  # Can be RECEIVING, CHUNKING, INFERENCE, PLAYBACK
 is_muted = False  # Track if the microphone is currently muted
 
+recent_audio_patterns = []
+
 # Constants
 MAX_SENTENCES = 5
 MAX_CHARACTERS = 350
@@ -198,10 +200,6 @@ def fetch_and_set_voice(tts_stub):
         logger.error(f"Failed to retrieve voices: {e.details()}")
         exit(1)
 
-
-# Maintain recent audio patterns to track potential repetition
-recent_audio_patterns = []
-
 def calculate_hash(audio_data):
     """Calculate a hash for a segment of audio data to detect repeats."""
     return hashlib.md5(audio_data).hexdigest()
@@ -221,7 +219,6 @@ def detect_playback_error(audio_data, recent_audio_patterns):
         recent_audio_patterns.pop(0)
         
     return False
-
 
 def reset_playback():
     """Resets the playback stream to handle potential underrun or looping errors."""
@@ -368,6 +365,7 @@ def detect_internal_repetition(audio_data, segment_size=256, repetition_threshol
         if segment_hash in segment_hashes:
             repeated_segments += 1
             if repeated_segments >= repetition_threshold:
+                logger.warning("Internal repetition detected in synthesized audio. Requesting re-synthesis.")
                 return True  # Repetition threshold exceeded, indicating looping
         else:
             repeated_segments = 0  # Reset if no repetition in this segment
@@ -379,6 +377,7 @@ def detect_internal_repetition(audio_data, segment_size=256, repetition_threshol
             segment_hashes.pop(0)
 
     return False
+
 
 def process_chunk(chunk, tts_stub, max_retries):
     global tts_state, recent_audio_patterns
@@ -433,24 +432,12 @@ def detect_playback_error(audio_data, recent_audio_patterns):
             return True  # Repeated pattern detected, likely a playback error
     return False
 
+
 def reset_playback():
     """Resets the playback stream to handle potential underrun or looping errors."""
     global stream  # Ensure stream is recognized as a global variable
     if stream and stream.is_active():
-        fade_out_audio()  # Smoothly reduce volume if currently playing
-        stream.stop_stream()
-        stream.close()
-    
-    # Reopen the stream to reset it
-    stream = pyaudio_instance.open(
-        format=pyaudio.paInt16,
-        channels=output_channels,
-        rate=sample_rate,
-        output=True,
-        frames_per_buffer=1024
-    )
-    logger.info("Playback stream reset to handle error.")
-
+        fade_out_audio() 
 
 
 def cancel_current_tts():

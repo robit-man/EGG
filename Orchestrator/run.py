@@ -77,7 +77,7 @@ def get_script_folders(parent_dir):
                 folders.append(item)
     return folders
 
-def create_tmuxp_config(scripts, session_name='scripts_session', panes_per_window=4):
+def create_tmuxp_config(scripts, session_name='scripts_session', panes_per_window=16):
     """
     Creates a tmuxp configuration dictionary.
     Organizes scripts into a single window with a specified number of panes.

@@ -378,11 +378,11 @@ def detect_internal_repetition(audio_data, segment_size=256, repetition_threshol
 
     return False
 
-
 def process_chunk(chunk, tts_stub, max_retries):
     global tts_state, recent_audio_patterns
     tts_state = "INFERENCE"
     success = False
+    failure_count = 0
 
     for attempt in range(max_retries):
         if cancel_event.is_set():
@@ -397,32 +397,51 @@ def process_chunk(chunk, tts_stub, max_retries):
                 voice_name=selected_voice[0]
             )
             resp = tts_stub.Synthesize(req)
+
+            # Check if response audio is empty or invalid, indicating a failed inference
+            if not resp.audio:
+                failure_count += 1
+                logger.warning(f"Synthesis attempt {attempt + 1} failed: Empty or invalid response.")
+                if failure_count >= max_retries:
+                    logger.error("Max retries reached. Skipping this chunk.")
+                    break
+                continue  # Retry immediately
+
             audio_data = np.frombuffer(resp.audio, dtype=np.int16)
 
-            # Detect playback errors (e.g., repeated audio patterns)
-            if detect_playback_error(audio_data.tobytes(), recent_audio_patterns) or \
-               detect_internal_repetition(audio_data):
-                logger.warning("Playback error detected (repeated audio or underrun). Resetting playback.")
+            # Detect internal repetition and playback errors (e.g., repeated audio patterns)
+            if detect_internal_repetition(audio_data) or \
+               detect_playback_error(audio_data.tobytes(), recent_audio_patterns):
+                logger.warning("Playback error detected (repeated audio or invalid synthesis). Resetting playback.")
                 reset_playback()
-                break
+                failure_count += 1
+                if failure_count >= max_retries:
+                    logger.error("Max retries reached due to repeated or erroneous audio. Skipping this chunk.")
+                    break
+                continue  # Retry with next attempt
 
-            # Check again before playback
+            # Proceed to playback only if synthesis was successful and audio is valid
             if not cancel_event.is_set():
                 tts_state = "PLAYBACK"
                 stream.write(audio_data.tobytes())
                 logger.info(f"Played synthesized speech for chunk: '{chunk}'")
                 success = True
-            break
+            break  # Exit loop on success
         except grpc.RpcError as e:
             logger.error(f"Synthesis failed on attempt {attempt + 1}: {e.details()}")
-            if attempt < max_retries - 1:
-                time.sleep(0.5)
+            failure_count += 1
+            if failure_count >= max_retries:
+                logger.error("Max retries reached. Skipping this chunk.")
+                break
+            time.sleep(0.5)  # Wait before retrying
         except Exception as e:
             logger.error(f"Unexpected error during playback: {e}")
             break
 
     tts_state = "IDLE"
     return success
+
+
 
 
 def detect_playback_error(audio_data, recent_audio_patterns):

@@ -1,37 +1,70 @@
+# orchestrator_script.py
+
 import threading
-import time
 import socket
 import json
 import uuid
 import os
 import re
 import argparse
+import importlib.util
 import requests
 import traceback
+import subprocess
+import time
+from datetime import datetime
+
+# ANSI color codes for terminal output
+COLOR_RESET = "\033[0m"
+COLOR_BLUE = "\033[34m"
+COLOR_GREEN = "\033[32m"
+COLOR_YELLOW = "\033[33m"
+COLOR_CYAN = "\033[36m"
+COLOR_RED = "\033[31m"
+COLOR_MAGENTA = "\033[35m"
 
 # Configuration file name
 CONFIG_FILE = 'llm.cf'
 
+# Chat history and tools files
+CHAT_HISTORY_FILE = 'chat.hst'
+TOOLS_FILE = 'model.tools.json'
+FUNCTIONS_FILE = 'model.functions.py'
+
+# Base system prompt to guide the model's behavior
+BASE_SYSTEM_PROMPT = (
+'''
+Convert logical natural human language into a symbolic representation in python code from the following: 
+''')
+
+# URLs for the files in your GitHub repository
+TOOLS_FILE_URL = 'https://raw.githubusercontent.com/robit-man/EGG/main/Orchestrator/tools/model.tools.json'
+FUNCTIONS_FILE_URL = 'https://raw.githubusercontent.com/robit-man/EGG/main/Orchestrator/tools/model.functions.py'
+
+
 # Default configuration
 default_config = {
-    'model_name': 'llama3.2:3b',
+    'model_name': 'llama:3.2:3b',
     'input_mode': 'port',           # Options: 'port', 'terminal', 'route'
     'output_mode': 'port',          # Options: 'port', 'terminal', 'route'
     'input_format': 'chunk',        # Options: 'streaming', 'chunk'
     'output_format': 'chunk',       # Options: 'streaming', 'chunk'
     'port_range': '6200-6300',
     'orchestrator_host': 'localhost',
-    'orchestrator_ports': '6000-6010',  # Updated to handle multiple ports
+    'orchestrator_ports': '6000-6099',  # Updated to handle multiple ports
     'route': '/llm',
     'script_uuid': '',              # Initialize as empty; will be set in read_config()
-    'system_prompt': "You Respond Conversationally",
+    'system_prompt': BASE_SYSTEM_PROMPT,
     'temperature': 0.7,             # Model parameter: temperature
     'top_p': 0.9,                   # Model parameter: top_p
     'max_tokens': 150,              # Model parameter: max tokens
     'repeat_penalty': 1.0,          # Model parameter: repeat penalty
-    'inference_timeout': 5,         # Timeout in seconds for inference
+    'inference_timeout': 15,        # Timeout in seconds for inference
     'json_filtering': False,        # Use JSON filtering by default
-    'api_endpoint': 'generate'      # New option: 'generate' or 'chat'
+    'api_endpoint': 'chat',         # Options: 'generate', 'chat'
+    'stream': False,                # Assuming 'stream' is a valid config key
+    'enable_chat_history': True,
+    'use_tools': False
 }
 
 config = {}
@@ -59,23 +92,36 @@ def read_config():
 
     # Read from JSON file if it exists
     if os.path.exists(CONFIG_FILE):
-        print(f"Reading configuration from {CONFIG_FILE}")
+        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Reading configuration from {CONFIG_FILE}")
         try:
             with open(CONFIG_FILE, 'r') as f:
-                config.update(json.load(f))  # Update default config with the values from the file
+                loaded_config = json.load(f)
+                config.update(loaded_config)  # Update default config with the values from the file
         except (json.JSONDecodeError, FileNotFoundError):
-            print(f"[Error] Could not read {CONFIG_FILE}. Using default configuration.")
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Could not read {CONFIG_FILE}. Using default configuration.")
 
     # Ensure script_uuid is set
     if 'script_uuid' in config and config['script_uuid']:
         script_uuid = config['script_uuid']
+    # Ensure script_uuid is set
+    
     else:
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config()  # Save updated config with the new UUID
 
+    if config['use_tools'] is True:
+        ensure_required_files()
+
+        # Initialize global functions module
+        functions = load_functions()
+        if not functions:
+            exit(1)  # Exit if functions module couldn't be loaded
+
+        # Initialize tools mapping
+        setup_tools()
     # Debug: Print the loaded configuration
-    print("[Debug] Configuration Loaded:")
+    print(f"{COLOR_GREEN}[Debug]{COLOR_RESET} Configuration Loaded:")
     for k, v in config.items():
         if k == 'system_prompt':
             print(f"{k}={'[REDACTED]'}")  # Hide system_prompt in debug
@@ -84,13 +130,189 @@ def read_config():
 
     return config
 
+
+def download_file(url, file_path):
+    """
+    Downloads a file from the given URL and saves it to the specified path.
+    """
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise an error for bad status codes
+        with open(file_path, 'w') as file:
+            file.write(response.text)
+        print(f"Downloaded and saved: {file_path}")
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading {file_path} from {url}: {e}")
+
+def ensure_required_files():
+    # Check for and create 'model.tools.json' if it does not exist
+    if not os.path.exists(TOOLS_FILE):
+        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} '{TOOLS_FILE}' not found. Downloading from {TOOLS_FILE_URL}.")
+        download_file(TOOLS_FILE_URL, TOOLS_FILE)
+
+    # Check for and create 'model.functions.py' if it does not exist
+    if not os.path.exists(FUNCTIONS_FILE):
+        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} '{FUNCTIONS_FILE}' not found. Downloading from {FUNCTIONS_FILE_URL}.")
+        download_file(FUNCTIONS_FILE_URL, FUNCTIONS_FILE)
+
+
 # Function to write configuration to a JSON file
 def write_config(config_to_write=None):
     config_to_write = config_to_write or config
-    print(f"Writing configuration to {CONFIG_FILE}")
+    print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Writing configuration to {CONFIG_FILE}")
     with config_lock:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config_to_write, f, indent=4)
+
+# Chat history management functions
+def load_chat_history():
+    if not config.get('enable_chat_history', True):
+        print(f"{COLOR_YELLOW}[Info]{COLOR_RESET} Chat history is disabled.")
+        return []
+    
+    if os.path.exists(CHAT_HISTORY_FILE):
+        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Reading chat history from {CHAT_HISTORY_FILE}")
+        try:
+            with open(CHAT_HISTORY_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Could not read {CHAT_HISTORY_FILE}. Starting with empty chat history.")
+            return []
+    return []
+
+def save_chat_history(history):
+    if not config.get('enable_chat_history', True):
+        print(f"{COLOR_YELLOW}[Info]{COLOR_RESET} Chat history saving is disabled.")
+        return
+    
+    print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Saving chat history to {CHAT_HISTORY_FILE}")
+    with open(CHAT_HISTORY_FILE, 'w') as f:
+        json.dump(history, f, indent=4)
+
+def append_to_chat_history(message):
+    if not config.get('enable_chat_history', True):
+        print(f"{COLOR_YELLOW}[Info]{COLOR_RESET} Chat history is disabled. Not appending message.")
+        return
+
+    chat_history = load_chat_history()
+    chat_history.append(message)
+    save_chat_history(chat_history)
+
+
+def get_recent_chat_history(limit=5):
+    chat_history = load_chat_history()
+    return chat_history[-limit:] if len(chat_history) > limit else chat_history
+
+# Function to load functions module
+def load_functions():
+    try:
+        # Load `model.functions.py`
+        spec = importlib.util.spec_from_file_location("model_functions", "model.functions.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except FileNotFoundError:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} 'model.functions.py' not found.")
+        return None
+    except Exception as e:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Error loading 'model.functions.py': {e}")
+        traceback.print_exc()
+        return None
+
+# Function to load tools from model.tools.json
+def load_tools():
+    tools_file = TOOLS_FILE
+    try:
+        with open(tools_file, 'r') as f:
+            tools = json.load(f)
+            if not isinstance(tools, dict):
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} '{tools_file}' should contain a JSON object mapping tool names to function names.")
+                return {}
+            return tools
+    except (json.JSONDecodeError, FileNotFoundError):
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Could not read '{tools_file}'. Returning empty tools list.")
+        return {}
+
+# Function to call the appropriate tool
+def call_tool(name, data):
+    tools = load_tools()  # Load tools mapping
+    functions = load_functions()  # Load functions module
+
+    # Ensure tools were loaded correctly
+    if not tools or not isinstance(tools, dict):
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} No tools found or invalid tools format in '{TOOLS_FILE}' file.")
+        return "Error: No tools available."
+
+    # Check if the tool exists in the tools list
+    if name in tools:
+        function_name = tools[name]
+        print(f"{COLOR_CYAN}[Tool Match Found]{COLOR_RESET} Tool '{name}' corresponds to function '{function_name}'.")
+
+        # Check if the function exists in model.functions
+        if functions and hasattr(functions, function_name):
+            function_to_call = getattr(functions, function_name)
+            try:
+                print(f"{COLOR_CYAN}[Tool Execution]{COLOR_RESET} Calling function '{function_name}' with data: {data}.")
+                
+                # **Print the structured data (arguments)**:
+                print(f"Arguments passed to the tool: {json.dumps(data, indent=2)}")
+                
+                # Call the function and ensure synchronous processing
+                result = function_to_call(data)
+
+                return handle_result(result)  # Handle the result based on the type (string, dict, etc.)
+            except Exception as e:
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Error while calling function '{function_name}': {e}")
+                return f"Error: {e}"
+        else:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Function '{function_name}' not found in 'model.functions.py'.")
+            return f"Error: Function '{function_name}' not found."
+    else:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Tool '{name}' not found in tools list.")
+        return f"Error: Tool '{name}' not found."
+
+def handle_result(result):
+    """
+    Process the result returned by the tool function.
+    Depending on the type of result, return a string or a formatted output.
+
+    Args:
+        result (Any): The result returned by the tool function.
+
+    Returns:
+        str: The processed output to be sent back to the orchestrator or displayed.
+    """
+    # If the result is a string, return it directly
+    if isinstance(result, str):
+        return result
+
+    # If the result is a dictionary, format it as a pretty-printed JSON
+    elif isinstance(result, dict):
+        try:
+            return json.dumps(result, indent=2)
+        except (TypeError, ValueError):
+            return f"Error: Unable to format dictionary result: {result}"
+
+    # If the result is a list, convert it into a human-readable format
+    elif isinstance(result, list):
+        try:
+            return "\n".join(map(str, result))
+        except Exception as e:
+            return f"Error: Unable to format list result: {e}"
+
+    # If the result is of any other type, convert it to string
+    else:
+        return str(result)
+
+
+def save_tools(tools):
+    print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Saving tools to {TOOLS_FILE}")
+    with open(TOOLS_FILE, 'w') as f:
+        json.dump(tools, f, indent=4)
+
+def list_tools():
+    tools = load_tools()
+    return list(tools.keys())
 
 # Function to parse command-line arguments and update config
 def parse_args():
@@ -140,48 +362,49 @@ def parse_args():
 def parse_port_range(port_range_str):
     ports = []
     for part in port_range_str.split(','):
+        part = part.strip()
         if '-' in part:
             try:
                 start, end = map(int, part.split('-'))
                 ports.extend(range(start, end + 1))
             except ValueError:
-                print(f"[Warning] Invalid port range format: {part}")
+                print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} Invalid port range format: {part}")
         else:
             try:
                 ports.append(int(part))
             except ValueError:
-                print(f"[Warning] Invalid port number: {part}")
+                print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} Invalid port number: {part}")
     return ports
 
 # Function to check if Ollama API is up
 def check_ollama_api():
     try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        response = requests.get(f"{OLLAMA_URL}tags", timeout=5)
         if response.status_code == 200:
-            print("[Info] Ollama API is up and running.")
+            print(f"{COLOR_GREEN}[Info]{COLOR_RESET} Ollama API is up and running.")
             return True
         else:
-            print(f"[Warning] Ollama API responded with status code: {response.status_code}")
+            print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} Ollama API responded with status code: {response.status_code}")
             return False
     except requests.exceptions.ConnectionError:
-        print("❌ Unable to connect to Ollama API.")
+        print(f"{COLOR_RED}❌ Unable to connect to Ollama API.{COLOR_RESET}")
         return False
     except requests.exceptions.Timeout:
-        print("⏰ Ollama API connection timed out.")
+        print(f"{COLOR_YELLOW}⏰ Ollama API connection timed out.{COLOR_RESET}")
         return False
     except Exception as e:
-        print(f"[Error] Unexpected error while checking Ollama API: {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Unexpected error while checking Ollama API: {e}")
         return False
 
 # Function to register with the orchestrator
 def register_with_orchestrator(port):
     global registered
     if registered:
-        print("[Info] Already registered with the orchestrator. Skipping registration.")
+        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Already registered with the orchestrator. Skipping registration.")
         return True
 
     host = config.get('orchestrator_host', 'localhost')
-    orchestrator_ports_str = config.get('orchestrator_ports', '6000-6005')
+    orchestrator_ports_str = config.get('orchestrator_ports', '6000-6099')
     orchestrator_command_ports = []
 
     # Parse orchestrator_ports (e.g., '6000-6005' or '6000,6001,6002')
@@ -192,17 +415,17 @@ def register_with_orchestrator(port):
                 start_port, end_port = map(int, port_entry.split('-'))
                 orchestrator_command_ports.extend(range(start_port, end_port + 1))
             except ValueError:
-                print(f"[Error] Invalid orchestrator port range: {port_entry}")
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Invalid orchestrator port range: {port_entry}")
         elif port_entry.isdigit():
             orchestrator_command_ports.append(int(port_entry))
         else:
-            print(f"[Error] Invalid orchestrator port entry: {port_entry}")
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Invalid orchestrator port entry: {port_entry}")
 
     if not orchestrator_command_ports:
-        print("[Error] No valid orchestrator command ports found.")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} No valid orchestrator command ports found.")
         return False
 
-    # Simplified registration message
+    # Registration message
     message = f"/register {script_name} {script_uuid} {port}\n"
     max_retries = 5
     retry_delay = 1  # Start with 1 second delay for retries
@@ -211,83 +434,86 @@ def register_with_orchestrator(port):
     for attempt in range(max_retries):
         for orch_port in orchestrator_command_ports:
             try:
-                print(f"[Attempt {attempt + 1}] Registering with orchestrator at {host}:{orch_port}...")
-                
+                print(f"{COLOR_YELLOW}[Attempt {attempt + 1}]{COLOR_RESET} Registering with orchestrator at {host}:{orch_port}...")
+
                 # Open a connection to the orchestrator
                 with socket.create_connection((host, orch_port), timeout=5) as s:
                     s.sendall(message.encode())
-                    print(f"[Info] Sent registration message: {message.strip()}")
+                    print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Sent registration message: {message.strip()}")
 
                     # Receive acknowledgment
                     data = s.recv(1024)
                     if data:
                         ack_message = data.decode().strip()
-                        print(f"[Info] Received acknowledgment: {ack_message}")
-                        
+                        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Received acknowledgment: {ack_message}")
+
                         # Check if the acknowledgment is valid
                         if ack_message.startswith('/ack'):
-                            config['data_port'] = ack_message.split()[1]
-                            write_config(config)  # Save updated config with assigned data_port
-                            registered = True
-                            print(f"[Success] Registered with orchestrator on port {orch_port}.")
-                            return True
+                            parts = ack_message.split()
+                            if len(parts) >= 2:
+                                config['data_port'] = parts[1]
+                                write_config(config)  # Save updated config with assigned data_port
+                                registered = True
+                                print(f"{COLOR_GREEN}[Success]{COLOR_RESET} Registered with orchestrator on port {orch_port}.")
+                                return True
+                            else:
+                                print(f"{COLOR_RED}[Error]{COLOR_RESET} Invalid acknowledgment format from orchestrator: {ack_message}")
+                        else:
+                            print(f"{COLOR_RED}[Error]{COLOR_RESET} Unexpected acknowledgment message: {ack_message}")
                     else:
-                        print(f"[Warning] No acknowledgment received from orchestrator at {host}:{orch_port}.")
-            
+                        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} No acknowledgment received from orchestrator at {host}:{orch_port}.")
+
             except socket.timeout:
-                print(f"[Error] Timeout while connecting to orchestrator at {host}:{orch_port}.")
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Timeout while connecting to orchestrator at {host}:{orch_port}.")
             except ConnectionRefusedError:
-                print(f"[Error] Connection refused by orchestrator at {host}:{orch_port}.")
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection refused by orchestrator at {host}:{orch_port}.")
             except Exception as e:
-                print(f"[Error] Unexpected error during registration: {e}")
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Unexpected error during registration: {e}")
                 traceback.print_exc()
 
         # Retry with exponential backoff
-        print(f"Retrying registration in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+        print(f"{COLOR_YELLOW}Retrying registration in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries}){COLOR_RESET}")
         time.sleep(retry_delay)
         retry_delay *= backoff_factor  # Exponential backoff
 
     # If all attempts failed
-    print("[Error] Max retries reached. Could not register with orchestrator.")
+    print(f"{COLOR_RED}[Error]{COLOR_RESET} Max retries reached. Could not register with orchestrator.")
     cancel_event.set()
     exit(1)  # Exit the script if registration fails
-
-
 
 # Function to send the full configuration to the orchestrator
 def send_full_config_to_orchestrator(host, port):
     try:
-        message = f"/config {script_uuid}\n{json.dumps(config, indent=2)}"
-        print(f"[Info] Sending full configuration to orchestrator at {host}:{port}...")
+        message = f"/config {script_uuid}\n{json.dumps(config, indent=2)}\nEOF\n"
+        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Sending full configuration to orchestrator at {host}:{port}...")
 
         with socket.create_connection((host, port), timeout=5) as s:
             s.sendall(message.encode())
-            print(f"[Info] Full configuration sent to orchestrator.")
+            print(f"{COLOR_GREEN}[Success]{COLOR_RESET} Full configuration sent to orchestrator.")
 
     except socket.timeout:
-        print(f"[Error] Timeout while sending configuration to orchestrator at {host}:{port}.")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Timeout while sending configuration to orchestrator at {host}:{port}.")
     except ConnectionRefusedError:
-        print(f"[Error] Connection refused by orchestrator at {host}:{port}.")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection refused by orchestrator at {host}:{port}.")
     except Exception as e:
-        print(f"[Error] Unexpected error while sending configuration: {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Unexpected error while sending configuration: {e}")
         traceback.print_exc()
-
 
 # Start server to handle incoming connections
 def start_server():
     host = '0.0.0.0'
     port_list = parse_port_range(config.get('port_range', '6200-6300'))  # Parse port range from config
-    
+
     try:
         # Dynamically find an available port in the specified range
         available_port = find_available_port(port_list)
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.bind((host, available_port))
-        print(f"[Info] LLM Engine listening on port {available_port}...")
+        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} LLM Engine listening on port {available_port}...")
         config['port'] = str(available_port)  # Update the port in the config
         write_config(config)  # Save the updated configuration with the selected port
     except Exception as e:
-        print(f"[Error] Could not bind to any available port: {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Could not bind to any available port: {e}")
         cancel_event.set()  # Ensure the script shuts down gracefully
         return
 
@@ -303,24 +529,23 @@ def start_server():
         return
 
     server_socket.listen(5)
-    print(f"[Info] Server started on port {config['port']}. Waiting for connections...")
+    print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Server started on port {config['port']}. Waiting for connections...")
 
     while not cancel_event.is_set():
         try:
             server_socket.settimeout(1.0)  # Set a timeout to handle periodic cancellation
             client_socket, addr = server_socket.accept()
-            print(f"[Connection] Connection from {addr}")
+            print(f"{COLOR_GREEN}[Connection]{COLOR_RESET} Accepted connection from {addr}")
             threading.Thread(target=handle_client_socket, args=(client_socket,), daemon=True).start()
         except socket.timeout:
             continue  # Continue looping until a client connects or cancel_event is set
         except Exception as e:
             if not cancel_event.is_set():
-                print(f"[Error] Error accepting connections: {e}")
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Error accepting connections: {e}")
                 traceback.print_exc()
 
     server_socket.close()
-    print("[Info] Server shut down.")
-
+    print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Server shut down.")
 
 # Function to find an available port within the specified range
 def find_available_port(port_range):
@@ -335,14 +560,12 @@ def find_available_port(port_range):
                 return port
     raise Exception("No available ports found in range.")
 
-
-
 # Handle incoming connections
 def handle_client_socket(client_socket):
     with client_socket:
         client_socket.settimeout(1.0)  # Set lower timeout for data reception
         addr = client_socket.getpeername()
-        print(f"[Connection] Handling data from {addr}")
+        print(f"{COLOR_BLUE}[Connection]{COLOR_RESET} Handling data from {addr}")
 
         # Initialize timer variables
         data_lock = threading.Lock()
@@ -355,7 +578,7 @@ def handle_client_socket(client_socket):
                 if data_buffer:
                     user_input = ' '.join(data_buffer).strip()
                     if user_input:
-                        print(f"[Inference] Timeout reached. Triggering inference for accumulated input: {user_input}")
+                        print(f"{COLOR_YELLOW}[Inference]{COLOR_RESET} Timeout reached. Triggering inference for accumulated input: {user_input}")
                         # Run perform_inference in a separate thread
                         threading.Thread(target=perform_inference, args=(user_input,), daemon=True).start()
                         data_buffer.clear()
@@ -365,10 +588,10 @@ def handle_client_socket(client_socket):
             try:
                 data = client_socket.recv(1024)
                 if not data:
-                    print(f"[Connection] No data received. Closing connection from {addr}.")
+                    print(f"{COLOR_YELLOW}[Connection]{COLOR_RESET} No data received. Closing connection from {addr}.")
                     break
                 incoming = data.decode().strip()
-                print(f"[Data Received Raw] {incoming}")  # Log raw data
+                print(f"{COLOR_CYAN}[Data Received Raw]{COLOR_RESET} {incoming}")  # Log raw data
 
                 # Check if the incoming data is a command
                 if incoming.startswith('/'):
@@ -379,15 +602,15 @@ def handle_client_socket(client_socket):
                         # Reset the timer
                         if timer:
                             timer.cancel()
-                            print("[Timer] Existing timer canceled.")
-                        timeout_seconds = float(config.get('inference_timeout', '5'))
+                            print(f"{COLOR_YELLOW}[Timer]{COLOR_RESET} Existing timer canceled.")
+                        timeout_seconds = float(config.get('inference_timeout', '15'))
                         timer = threading.Timer(timeout_seconds, inference_trigger)
                         timer.start()
-                        print(f"[Timeout] Inference will be triggered in {timeout_seconds} seconds if no more data is received.")
+                        print(f"{COLOR_YELLOW}[Timeout]{COLOR_RESET} Inference will be triggered in {timeout_seconds} seconds if no more data is received.")
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"[Error] Error in handle_client_socket: {e}")
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Error in handle_client_socket: {e}")
                 traceback.print_exc()
                 break
 
@@ -395,28 +618,58 @@ def handle_client_socket(client_socket):
         with data_lock:
             if timer:
                 timer.cancel()
-                print("[Timer] Existing timer canceled during cleanup.")
+                print(f"{COLOR_YELLOW}[Timer]{COLOR_RESET} Existing timer canceled during cleanup.")
             if data_buffer:
-                print(f"[Inference] Connection closing. Triggering final inference for remaining input.")
+                print(f"{COLOR_YELLOW}[Inference]{COLOR_RESET} Connection closing. Triggering final inference for remaining input.")
                 # Run perform_inference in a separate thread
                 threading.Thread(target=perform_inference, args=(' '.join(data_buffer).strip(),), daemon=True).start()
                 data_buffer.clear()
 
-        print(f"[Connection] Closing connection from {addr}")
+        print(f"{COLOR_YELLOW}[Connection]{COLOR_RESET} Closing connection from {addr}")
 
-# Handle special commands like /info and /exit
+# Function to handle commands from the client
 def handle_command(command, client_socket):
     addr = client_socket.getpeername()
-    print(f"[Command Received] {command} from {addr}")
-    
-    if command.startswith('/info'):
+    print(f"{COLOR_MAGENTA}[Command Received]{COLOR_RESET} {command} from {addr}")
+
+    # List all available tools
+    tools = list_tools()
+
+    # Check if the command matches any tool name (starting with '/')
+    if command.startswith('/') and command[1:] in tools:
+        tool_name = command[1:]  # Extract the tool name without the leading '/'
+        print(f"{COLOR_CYAN}[Tool Call Initiated]{COLOR_RESET} Calling tool '{tool_name}'")
+
+        # Call the tool and capture its response
+        response = call_tool(tool_name, {})
+
+        # Print the tool response in green if successful
+        if "Error" not in response:
+            print(f"{COLOR_GREEN}[Tool Response]{COLOR_RESET} {response}")
+        else:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} {response}")
+
+        # Send the tool response to the client
+        try:
+            client_socket.sendall(f"{response}\n".encode())
+            print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Sent tool response to {addr}")
+        except Exception as e:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send tool response to {addr}: {e}")
+            traceback.print_exc()
+    elif command.startswith('/info'):
         send_info(client_socket)
     elif command.startswith('/exit'):
         send_exit(client_socket)
     else:
-        print(f"[Warning] Unknown command received: {command}")
+        error_msg = f"Unknown command received: {command}\n"
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} {error_msg.strip()}")
+        try:
+            client_socket.sendall(error_msg.encode())
+        except Exception as e:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send error message to {addr}: {e}")
+            traceback.print_exc()
 
-# Send configuration info to the orchestrator over the existing socket
+# Function to send configuration info to the orchestrator over the existing socket
 def send_info(client_socket):
     try:
         response = f"{script_name}\n{script_uuid}\n"
@@ -425,33 +678,53 @@ def send_info(client_socket):
                 response += f"{key}={value}\n"
         response += 'EOF\n'  # End the response with EOF to signal completion
         client_socket.sendall(response.encode())
-        print(f"[Info] Sent configuration info to {client_socket.getpeername()}")
+        print(f"{COLOR_GREEN}[Info]{COLOR_RESET} Sent configuration info to {client_socket.getpeername()}")
     except Exception as e:
-        print(f"[Error] Failed to send info to {client_socket.getpeername()}: {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send info to {client_socket.getpeername()}: {e}")
         traceback.print_exc()
 
-# Send exit acknowledgment and shutdown
+# Function to send exit acknowledgment and shutdown
 def send_exit(client_socket):
     try:
         exit_message = "Exiting LLM Engine.\n"
         client_socket.sendall(exit_message.encode())
-        print(f"[Shutdown] Received /exit command from {client_socket.getpeername()}. Shutting down.")
+        print(f"{COLOR_YELLOW}[Shutdown]{COLOR_RESET} Received /exit command from {client_socket.getpeername()}. Shutting down.")
         cancel_event.set()
     except Exception as e:
-        print(f"[Error] Failed to send exit acknowledgment to {client_socket.getpeername()}: {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send exit acknowledgment to {client_socket.getpeername()}: {e}")
         traceback.print_exc()
 
+# Function to perform inference by sending a request to the Ollama API
+import requests
+import json
+import threading
 
-# Lock for controlling concurrency of inference requests
-inference_lock = threading.Lock()
-
-# Function to perform inference using Ollama API
+# Function to perform inference by sending a request to the Ollama API
 def perform_inference(user_input):
-    with inference_lock:  # Ensure only one inference happens at a time
-        model_name = config.get('model_name', 'llama3.2:1b')
-        system_prompt = config.get('system_prompt', '')
-        json_filtering = config.get('json_filtering', True)  # Use it as a boolean
-        api_endpoint = config.get('api_endpoint', 'generate')
+    with threading.Lock():  # Ensure only one inference happens at a time
+        model_name = config.get('model_name', 'llama3.2:3b')
+        json_filtering = config.get('json_filtering', False)
+        api_endpoint = config.get('api_endpoint', 'chat')
+        stream = config.get('stream', False)
+        use_tools = config.get('use_tools', True)  # Read the use_tools flag from the config
+
+        # Prepare system prompt with tools if use_tools is enabled
+        tools_definitions = []
+        if use_tools:
+            tools = list_tools()
+            for tool in tools:
+                tool_info = {
+                    "type": "function",
+                    "function": {
+                        "name": tool,
+                        "description": f"Function to execute {tool.replace('_', ' ').title()}",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    }
+                }
+                tools_definitions.append(tool_info)
 
         # Model parameters
         try:
@@ -460,29 +733,35 @@ def perform_inference(user_input):
             max_tokens = int(config.get('max_tokens', 150))
             repeat_penalty = float(config.get('repeat_penalty', 1.0))
         except ValueError as ve:
-            print(f"[Error] Invalid model parameter in config: {ve}")
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Invalid model parameter in config: {ve}")
             send_error_response(f"Error: Invalid model parameter in config: {ve}")
             return
 
-        if not system_prompt:
-            print("❌ System prompt is not configured.")
-            send_error_response("Error: System prompt is not configured.")
-            return
+        # Include recent chat history if it's a chat-based interaction
+        chat_history = get_recent_chat_history()
+        messages = [
+            {"role": "system", "content": config.get("system_prompt", BASE_SYSTEM_PROMPT)}
+        ]
+        messages += [
+            {"role": "user", "content": entry['user_input']} if i % 2 == 0 else {"role": "assistant", "content": entry['response']}
+            for i, entry in enumerate(chat_history)
+        ]
+        messages.append({"role": "user", "content": user_input})
 
-        # Build the prompt
-        prompt = f"{system_prompt}\n\nUser Input: {user_input}\nOutput:"
-
-        # Set format to "json" if json_filtering is enabled, otherwise no specific format
+        # Prepare the payload for /api/chat
         payload = {
             "model": model_name,
-            "prompt": prompt,
+            "messages": messages,
             "temperature": temperature,
             "top_p": top_p,
-            "repeat_penalty": repeat_penalty,
             "max_tokens": max_tokens,
-            "format": "json" if json_filtering else "",  # Handle JSON filtering as a boolean
-            "stream": False
+            "repeat_penalty": repeat_penalty,
+            "stream": stream
         }
+
+        # Only include tools if the use_tools flag is enabled
+        if use_tools:
+            payload["tools"] = tools_definitions
 
         headers = {
             "Content-Type": "application/json"
@@ -494,68 +773,151 @@ def perform_inference(user_input):
             return
 
         try:
-            api_url = f"{OLLAMA_URL}{api_endpoint}"
-            print(f"[Performing Inference] Sending request to Ollama API at {api_url} with payload: {json.dumps(payload, indent=2)}")
-            response = requests.post(api_url, json=payload, headers=headers, timeout=60)
-            print(f"[Ollama API Response Status] {response.status_code}")
-            
-            if response.status_code == 200:
-                response_json = response.json()
-                model_response = response_json.get("response", "")
+            api_url = f"http://localhost:11434/api/{api_endpoint}"
+            print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Sending request to Ollama API at {api_url} with payload:")
+            print(json.dumps(payload, indent=2))
 
-                if not model_response:
-                    send_error_response("Error: Empty response from model.")
-                    return
-
-                # Apply JSON filtering only if json_filtering is enabled
-                if json_filtering:
-                    try:
-                        parsed_json = json.loads(model_response)
-                        filtered_response = extract_values(parsed_json)
-                        print(f"[Inference Complete] Model Output (Filtered):\n{filtered_response}\n")
-                        send_response(filtered_response)
-                    except json.JSONDecodeError as e:
-                        print(f"[Error] Parsing model response failed: {e}")
-                        send_error_response(f"Error parsing model response: {e}\nResponse Content: {model_response}")
-                else:
-                    # Send raw response if JSON filtering is disabled
-                    print(f"[Inference Complete] Model Output (Raw):\n{model_response}\n")
-                    send_response(model_response)
+            if stream:
+                # Streaming mode
+                with requests.post(api_url, json=payload, headers=headers, stream=True, timeout=60) as response:
+                    if response.status_code == 200:
+                        for chunk in response.iter_lines():
+                            if chunk:
+                                chunk_data = json.loads(chunk.decode('utf-8'))
+                                content = chunk_data.get('message', {}).get('content', '')
+                                if content:
+                                    send_response(content)
+                                    print(content, end='', flush=True)
+                    else:
+                        send_error_response(f"Error: {response.status_code} - {response.text}")
 
             else:
-                print(f"[Error] Ollama API responded with status code: {response.status_code}")
-                send_error_response(f"Error: {response.status_code} - {response.text}")
+                # Non-streaming mode
+                response = requests.post(api_url, json=payload, headers=headers, timeout=60)
+                if response.status_code == 200:
+                    response_json = response.json()
+                    content = response_json.get('message', {}).get('content', '')
+                    if content:
+                        print(f"{COLOR_GREEN}[Model Output]{COLOR_RESET}\n{content}\n")
+                        append_to_chat_history({"user_input": user_input, "response": content})
+                        send_response(content)
+                else:
+                    print(f"{COLOR_RED}[Error]{COLOR_RESET} Ollama API responded with status code: {response.status_code}")
+                    send_error_response(f"Error: {response.status_code} - {response.text}")
+                    
         except requests.exceptions.Timeout:
-            print("[Error] Request to Ollama API timed out.")
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Request to Ollama API timed out.")
             send_error_response("Error: Request to Ollama API timed out.")
         except requests.exceptions.ConnectionError:
-            print("[Error] Connection error occurred while contacting Ollama API.")
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection error occurred while contacting Ollama API.")
             send_error_response("Error: Connection error with Ollama API.")
         except Exception as e:
-            print(f"[Error] Exception during model inference: {e}")
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Exception during model inference: {e}")
             traceback.print_exc()
             send_error_response(f"Error during model inference: {e}")
 
 
-def extract_values(obj, key=None):
-    """Recursively extract values from JSON object."""
-    values = []
 
-    def extract(obj, values, key):
-        """Recursively search for values of key in JSON tree."""
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if k == key or key is None:
-                    values.append(v)
-                if isinstance(v, (dict, list)):
-                    extract(v, values, key)
-        elif isinstance(obj, list):
-            for item in obj:
-                extract(item, values, key)
-        return values
+def process_arguments(arguments):
+    """
+    Recursively process and clean tool arguments, ensuring all values are valid.
+    Args:
+        arguments (dict): Arguments passed to the tool function.
 
-    return extract(obj, values, key)
+    Returns:
+        dict: Cleaned arguments.
+    """
+    if isinstance(arguments, dict):
+        processed_args = {}
+        for key, value in arguments.items():
+            if isinstance(value, dict):
+                processed_args[key] = process_arguments(value)  # Recursive processing for nested dicts
+            else:
+                processed_args[key] = value  # Add value as it is if not a dict
+        return processed_args
+    return arguments
 
+def handle_tool_call(tool_call):
+    """
+    Execute the tool function and return its response.
+
+    Args:
+        tool_call (dict): Contains 'function' with 'name' and 'arguments'.
+
+    Returns:
+        str: Response from the tool function or error message.
+    """
+    try:
+        # Store the incoming tool_call for reference
+        tool_call_data = tool_call
+
+        # Extract the function information and the arguments from the tool call
+        function_info = tool_call_data.get("function", {})
+        function_name = function_info.get("name")
+
+        # Debugging: Print the incoming tool_call to see what is being passed
+        print(f"[Debug] Tool call received: {json.dumps(tool_call_data, indent=2)}")
+        print(f"[Debug] Extracted function name: {function_name}")
+
+        # Ensure the function name is present
+        if not function_name:
+            return "Error: No function name provided in tool call."
+
+        # Pass the entire tool_call_data to the function in model.functions
+        if hasattr(functions, function_name):
+            func = getattr(functions, function_name)
+            print(f"[Tool Execution] Executing '{function_name}' with raw tool call data")
+            
+            # Execute the corresponding function in model.functions with the full JSON object
+            response = func(tool_call_data)
+            
+            # Return the response from the function
+            return response
+        else:
+            return f"Error: Function '{function_name}' not found."
+
+    except Exception as e:
+        return f"Error executing tool '{function_name}': {e}"
+
+
+
+# Function to send a tool's response back to the API
+def send_tool_response(tool_response, context):
+    """
+    Send the tool's response back to the API to continue the conversation.
+
+    Args:
+        tool_response (str): The response from the executed tool.
+        context (list): The context from the previous API response (if any).
+    """
+    host = config.get('orchestrator_host', 'localhost')
+    data_port = config.get('data_port', '6001')
+
+    # Validate data_port
+    try:
+        data_port = int(data_port)
+    except ValueError:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Invalid data port: {data_port}")
+        return
+
+    try:
+        with socket.create_connection((host, data_port), timeout=5) as s:
+            # Send script UUID first
+            s.sendall(f"{script_uuid}\n".encode())
+            # Send the tool response as a new user message
+            new_message = {
+                "role": "user",
+                "content": tool_response
+            }
+            s.sendall(f"{json.dumps(new_message)}\n".encode())
+            print(f"{COLOR_GREEN}[Sent]{COLOR_RESET} Tool response sent to orchestrator: {tool_response}")
+    except ConnectionRefusedError:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection refused by orchestrator at {host}:{data_port}.")
+    except socket.timeout:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection to orchestrator at {host}:{data_port} timed out.")
+    except Exception as e:
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send tool response to orchestrator: {e}")
+        traceback.print_exc()
 
 # Function to send response back to orchestrator
 def send_response(output_data):
@@ -567,7 +929,7 @@ def send_response(output_data):
     try:
         data_port = int(data_port)
     except ValueError:
-        print(f"[Error] Invalid data port: {data_port}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Invalid data port: {data_port}")
         return
 
     try:
@@ -576,15 +938,14 @@ def send_response(output_data):
             s.sendall(f"{script_uuid}\n".encode())
             # Send the output data
             s.sendall(f"{output_data}\n".encode())
-            print(f"[Sent] Chunk sent to orchestrator: {output_data}")
+            print(f"{COLOR_GREEN}[Sent]{COLOR_RESET} Output sent to orchestrator: {output_data}")
     except ConnectionRefusedError:
-        print(f"[Error] Connection refused by orchestrator at {host}:{data_port}.")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection refused by orchestrator at {host}:{data_port}.")
     except socket.timeout:
-        print(f"[Error] Connection to orchestrator at {host}:{data_port} timed out.")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection to orchestrator at {host}:{data_port} timed out.")
     except Exception as e:
-        print(f"[Error] Failed to send output to orchestrator: {e}")
+        print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send output to orchestrator: {e}")
         traceback.print_exc()
-
 
 # Function to send error response back to orchestrator
 def send_error_response(error_message):
@@ -592,50 +953,75 @@ def send_error_response(error_message):
         "error": error_message
     }
     formatted_error = json.dumps(error_json, indent=2)
-    print(f"[Error Response] {formatted_error}")
+    print(f"{COLOR_RED}[Error Response]{COLOR_RESET} {formatted_error}")
     send_response(formatted_error)
+
+# Optional terminal input fallback
+def terminal_input():
+    print("[Info] Running in terminal input mode. Type your input below:")
+    while not cancel_event.is_set():
+        try:
+            user_input = input(">> ").strip()
+            if user_input.lower() == "/exit":
+                print("Exiting LLM Engine.")
+                cancel_event.set()
+                break
+            elif user_input.startswith("/"):
+                # Handle commands similarly to handle_command
+                fake_socket = FakeSocket()
+                handle_command(user_input, fake_socket)
+            else:
+                perform_inference(user_input)
+        except KeyboardInterrupt:
+            print("\n[Shutdown] LLM Engine terminated by user.")
+            cancel_event.set()
+        except Exception as e:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Unexpected error in terminal_input: {e}")
+            traceback.print_exc()
+
+# Function to load and map tools
+def setup_tools():
+    global tools_mapping
+    tools_mapping = load_tools()
+    if not tools_mapping:
+        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} No tools loaded. Proceeding without tools.")
+    else:
+        print(f"{COLOR_GREEN}[Info]{COLOR_RESET} Loaded tools: {', '.join(tools_mapping.keys())}")
 
 
 # Main function
 def main():
+
     # Read configuration from file
-    global config
-    config = read_config()
+    read_config()
 
     # Parse command-line arguments
     parse_args()
 
-    # Write updated config to file
-    write_config(config)
+    # Write updated config to file (redundant if parse_args already does)
+    # write_config(config)
 
     # Check if Ollama API is up before starting
     if not check_ollama_api():
-        print("🛑 Ollama is not running. Please start the Ollama API and try again.")
+        print(f"{COLOR_RED}🛑 Ollama is not running. Please start the Ollama API and try again.{COLOR_RESET}")
+        exit(1)
     else:
-        print("[Info] Ollama API is available.")
+        print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Ollama API is available.")
 
     # Start the server to handle incoming connections
     start_server()
 
-# Function to list available models (optional utility)
-def list_available_models():
-    try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=5)
-        if response.status_code == 200:
-            models = response.json().get("models", [])
-            print("📦 Available Models:")
-            for model in models:
-                print(f" - {model['name']}")
-        else:
-            print(f"⚠️ Failed to retrieve models. Status Code: {response.status_code}")
-    except Exception as e:
-        print(f"[Error] Could not retrieve models: {e}")
+
+# Fake socket class to mimic sendall behavior for terminal input
+class FakeSocket:
+    def sendall(self, data):
+        print(f"Response: {data.decode()}")
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[Shutdown] LLM Engine terminated by user.")
+        print(f"\n{COLOR_YELLOW}[Shutdown]{COLOR_RESET} LLM Engine terminated by user.")
     except Exception as e:
-        print(f"[Fatal Error] An unexpected error occurred: {e}")
+        print(f"{COLOR_RED}[Fatal Error]{COLOR_RESET} An unexpected error occurred: {e}")
         traceback.print_exc()

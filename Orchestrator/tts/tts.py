@@ -31,15 +31,21 @@ pyaudio_instance = pyaudio.PyAudio()
 stream = None
 selected_voice = None
 asr_muted = False  # Flag to mute ASR during playback
+tts_state = "IDLE"  # Can be RECEIVING, CHUNKING, INFERENCE, PLAYBACK
+is_muted = False  # Track if the microphone is currently muted
 
+# Constants
+MAX_SENTENCES = 5
+MAX_CHARACTERS = 350
 # Configuration defaults
 config = {
     'orchestrator_host': 'localhost',
-    'orchestrator_ports': '6000-6010',
+    'orchestrator_ports': '6000-6099',
     'port_range': '6200-6300',
     'data_port': None,
     'output_mode': 'speaker',
     'server': 'localhost:50051',
+    'mute_during_playback': True,
     'voice': None,  # Voice will be selected upon startup
     'language_code': 'en-US'  # Default language code
 }
@@ -49,8 +55,8 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 logger = logging.getLogger(__name__)
 
 # Regex patterns
-SPECIAL_CHAR_PATTERN = re.compile(r'[!\"#$%&\'()*+,\-./:;<=>?@\[\\\]^_`{|}~]')
-NUMBER_PATTERN = re.compile(r'\b\d+\b')
+SPECIAL_CHAR_PATTERN = re.compile(r'[!"#$%&()*+,\-./:;<=>?@[\\\]^_`{|}~]')
+NUMBER_PATTERN = re.compile(r'-?\d+(?:,\d{3})*(?:\.\d+)?')
 
 # Configuration Load/Save
 def read_config():
@@ -205,9 +211,24 @@ def handle_client_connection(client_socket):
                 tts_queue.put(processed_text)
 
 def preprocess_text(text):
+    # Step 1: Add spaces around non-word or sentence-oriented symbols, but ignore apostrophes
     text = SPECIAL_CHAR_PATTERN.sub(lambda m: ' ' + m.group(0) + ' ', text)
-    text = NUMBER_PATTERN.sub(lambda m: ' ' + num2words(int(m.group(0))) + ' ', text)
-    return text.strip()
+
+    # Step 2: Replace numbers (including negative and decimal) with their word equivalents
+    def replace_number(match):
+        num_str = match.group(0).replace(',', '')  # Remove commas for conversion
+        try:
+            number = float(num_str) if '.' in num_str else int(num_str)
+            # Handle negative numbers and decimals
+            return ' ' + num2words(number) + ' '
+        except ValueError:
+            return num_str  # Return the original string if conversion fails
+
+    # Apply the number replacement
+    text = NUMBER_PATTERN.sub(replace_number, text)
+
+    # Step 3: Return the cleaned-up text
+    return ' '.join(text.split())  # Remove extra spaces
 
 def send_info(client_socket):
     response = f"{script_name}\n{script_uuid}\n"
@@ -232,101 +253,163 @@ def update_orchestrator_data_port(new_data_port):
 
 
 # TTS Synthesis and Playback with Rapid Failure Recovery
+
 def synthesize_and_play(tts_stub):
+    global tts_state
     server_health_url = "http://localhost:8000/v2/health/ready"
-    max_retries = 2  # Quick retries before skipping chunk
-    failure_count = 0  # Track consecutive failures for adaptive handling
+    max_retries = 2
+    failure_count = 0
 
     while not cancel_event.is_set():
-        # Step 1: Check Triton server health but don't block on failure
         try:
-            server_response = requests.get(server_health_url, timeout=1)
-            if server_response.status_code == 200 and server_response.text.lower() == 'true':
-                logger.info("Triton server is healthy.")
-                failure_count = 0  # Reset failure count if healthy
-            else:
-                logger.warning("Triton server health check failed. Proceeding with TTS synthesis.")
-        except requests.RequestException as e:
-            logger.warning(f"Health check failed: {e}. Proceeding with TTS regardless.")
+            # Wait for new text, allowing cancellation mid-processing
+            tts_state = "RECEIVING"
+            text = tts_queue.get(timeout=0.5)
+            
+            # Start chunking text
+            tts_state = "CHUNKING"
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            chunk, sentence_count = "", 0
+            mute_microphone()  # Mute once at the start of playback
 
-        # Step 2: Retrieve text and process for TTS synthesis
-        try:
-            text = tts_queue.get(timeout=0.5)  # Shorter timeout for responsiveness
-            chunks = textwrap.wrap(text, width=400)
-            mute_microphone()
-
-            for chunk in chunks:
-                success = False
-                for attempt in range(max_retries):
-                    try:
-                        req = riva_tts_pb2.SynthesizeSpeechRequest(
-                            text=chunk,
-                            language_code=config['language_code'],
-                            encoding=riva.client.AudioEncoding.LINEAR_PCM,
-                            sample_rate_hz=sample_rate,
-                            voice_name=selected_voice[0]
-                        )
-                        resp = tts_stub.Synthesize(req)
-                        audio_data = np.frombuffer(resp.audio, dtype=np.int16)
-                        stream.write(audio_data.tobytes())
-                        logger.info(f"Successfully played synthesized speech for text: '{chunk}'")
-                        success = True
-                        failure_count = 0  # Reset on success
-                        break
-                    except grpc.RpcError as e:
-                        logger.error(f"Synthesis failed on attempt {attempt + 1}: {e.details()}")
-                        if attempt < max_retries - 1:
-                            time.sleep(0.5)  # Short delay before retrying
+            for sentence in sentences:
+                # Check for cancellation before processing each sentence
+                if cancel_event.is_set():
+                    logger.info("Cancelled during chunking.")
+                    break
+                
+                if sentence_count < MAX_SENTENCES and len(chunk) + len(sentence) <= MAX_CHARACTERS:
+                    chunk += sentence + " "
+                    sentence_count += 1
+                else:
+                    if chunk:
+                        success = process_chunk(chunk.strip(), tts_stub, max_retries)
+                        if not success:
+                            failure_count += 1
+                            if failure_count > 3:
+                                logger.warning("Multiple consecutive failures.")
+                                time.sleep(1)
                         else:
-                            logger.warning("Skipping this chunk after max retries.")
-                    except Exception as e:
-                        logger.error(f"Unexpected error: {e}")
-                        break
+                            failure_count = 0
+                    chunk, sentence_count = sentence + " ", 1
 
-                if not success:
-                    failure_count += 1
-                    if failure_count > 3:
-                        logger.warning("Multiple consecutive failures, increasing delay.")
-                        time.sleep(1)  # Pause if persistent failures occur
+            if chunk.strip() and not cancel_event.is_set():
+                process_chunk(chunk.strip(), tts_stub, max_retries)
 
-            unmute_microphone()
+            unmute_microphone()  # Unmute once at the end of playback
+            tts_state = "IDLE"
 
         except queue.Empty:
-            unmute_microphone()
-            continue  # Continue loop if no text in queue
-
+            if is_muted:
+                unmute_microphone()
+            continue
         except Exception as e:
-            logger.error(f"Unexpected error in main loop: {e}")
-            unmute_microphone()
-            time.sleep(1)  # Short delay on unexpected error
+            logger.error(f"Unexpected error in synthesis loop: {e}")
+            if is_muted:
+                unmute_microphone()
+            time.sleep(1)
+
+def process_chunk(chunk, tts_stub, max_retries):
+    global tts_state
+    tts_state = "INFERENCE"
+    success = False
+
+    for attempt in range(max_retries):
+        if cancel_event.is_set():
+            logger.info("Cancelled during inference.")
+            break
+        try:
+            req = riva_tts_pb2.SynthesizeSpeechRequest(
+                text=chunk,
+                language_code=config['language_code'],
+                encoding=riva.client.AudioEncoding.LINEAR_PCM,
+                sample_rate_hz=sample_rate,
+                voice_name=selected_voice[0]
+            )
+            resp = tts_stub.Synthesize(req)
+            audio_data = np.frombuffer(resp.audio, dtype=np.int16)
+
+            # Check again before playback
+            if not cancel_event.is_set():
+                tts_state = "PLAYBACK"
+                stream.write(audio_data.tobytes())
+                logger.info(f"Played synthesized speech for chunk: '{chunk}'")
+                success = True
+            break
+        except grpc.RpcError as e:
+            logger.error(f"Synthesis failed on attempt {attempt + 1}: {e.details()}")
+            if attempt < max_retries - 1:
+                time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Unexpected error during playback: {e}")
+            break
+
+    tts_state = "IDLE"
+    return success
+
+def cancel_current_tts():
+    global tts_state
+    if tts_state in ["INFERENCE", "PLAYBACK", "CHUNKING"]:
+        cancel_event.set()  # Set the cancel event
+
+        # Fade out and stop stream if playing
+        if stream and stream.is_active():
+            fade_out_audio()
+            stream.stop_stream()
+
+        # Clear any pending chunks in the queue
+        with tts_queue.mutex:
+            tts_queue.queue.clear()
+
+        tts_state = "IDLE"
+        logger.info("Canceled current TTS synthesis and playback with fade-out.")
+        cancel_event.clear()
+
+def fade_out_audio(duration=0.3):
+    """Gradually reduces audio volume to zero over the specified duration (in seconds)."""
+    try:
+        steps = 10
+        step_duration = duration / steps
+        volume_reduction = 0.1  # Each step reduces volume by 10%
+        
+        for _ in range(steps):
+            if stream.is_active():
+                # Reduce the playback volume on each step
+                current_volume = stream._volume - volume_reduction
+                stream._volume = max(0, current_volume)
+                time.sleep(step_duration)
+    except Exception as e:
+        logger.error(f"Failed to fade out audio: {e}")
+
 
 # Function to mute the microphone
 def mute_microphone():
-    try:
-        # Use pactl to get the default input source
-        default_source = subprocess.check_output(
-            ["pactl", "get-default-source"], universal_newlines=True
-        ).strip()
-
-        # Mute the default input source
-        subprocess.run(["pactl", "set-source-mute", default_source, "1"], check=True)
-        logger.info(f"Microphone {default_source} muted.")
-    except Exception as e:
-        logger.error(f"Failed to mute the microphone: {e}")
+    global is_muted
+    if config['mute_during_playback'] and not is_muted:
+        try:
+            default_source = subprocess.check_output(
+                ["pactl", "get-default-source"], universal_newlines=True
+            ).strip()
+            subprocess.run(["pactl", "set-source-mute", default_source, "1"], check=True)
+            is_muted = True
+            logger.info(f"Microphone {default_source} muted.")
+        except Exception as e:
+            logger.error(f"Failed to mute the microphone: {e}")
 
 # Function to unmute the microphone
 def unmute_microphone():
-    try:
-        # Use pactl to get the default input source
-        default_source = subprocess.check_output(
-            ["pactl", "get-default-source"], universal_newlines=True
-        ).strip()
+    global is_muted
+    if is_muted:  # Only unmute if currently muted
+        try:
+            default_source = subprocess.check_output(
+                ["pactl", "get-default-source"], universal_newlines=True
+            ).strip()
+            subprocess.run(["pactl", "set-source-mute", default_source, "0"], check=True)
+            is_muted = False
+            logger.info(f"Microphone {default_source} unmuted.")
+        except Exception as e:
+            logger.error(f"Failed to unmute the microphone: {e}")
 
-        # Unmute the default input source
-        subprocess.run(["pactl", "set-source-mute", default_source, "0"], check=True)
-        logger.info(f"Microphone {default_source} unmuted.")
-    except Exception as e:
-        logger.error(f"Failed to unmute the microphone: {e}")
 
 def start_tts_client():
     global stream

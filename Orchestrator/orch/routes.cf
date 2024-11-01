@@ -1,26 +1,18 @@
 [
     {
-        "name": "asr_sum",
-        "incoming": "2e3cf303-5df6-44bc-b3ff-1425e243745e",
-        "outgoing": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
-        "incoming_port": 6203,
-        "outgoing_port": 6202,
-        "last_used": 1729292666.4903502
-    },
-    {
-        "name": "sum_llm",
-        "incoming": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
-        "outgoing": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
-        "incoming_port": 6202,
-        "outgoing_port": 6200,
-        "last_used": 1729292667.735386
+        "name": "asr_llm",
+        "incoming": "9f6e64a3-031c-40db-9793-cd8076951fd6",
+        "outgoing": "3484b12d-4330-41ce-bf08-9fe42c1f6a01",
+        "incoming_port": 6207,
+        "outgoing_port": 6204,
+        "last_used": 1730496586.1948016
     },
     {
         "name": "llm_tts",
-        "incoming": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
+        "incoming": "3484b12d-4330-41ce-bf08-9fe42c1f6a01",
         "outgoing": "37d46837-f12a-4215-bd74-8d123bdb6a3d",
-        "incoming_port": 6200,
-        "outgoing_port": 6100,
-        "last_used": 1729292670.0468836
+        "incoming_port": 6204,
+        "outgoing_port": 6237,
+        "last_used": 1730496587.7908926
     }
 ]

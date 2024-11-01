@@ -313,6 +313,7 @@ def process_chunk(chunk, tts_stub, max_retries):
     global tts_state
     tts_state = "INFERENCE"
     success = False
+    recent_audio_patterns = []
 
     for attempt in range(max_retries):
         if cancel_event.is_set():
@@ -329,12 +330,21 @@ def process_chunk(chunk, tts_stub, max_retries):
             resp = tts_stub.Synthesize(req)
             audio_data = np.frombuffer(resp.audio, dtype=np.int16)
 
+            # Detect playback errors (e.g., repeated audio patterns)
+            if detect_playback_error(audio_data, recent_audio_patterns):
+                logger.warning("Playback error detected (repeated audio or underrun). Resetting playback.")
+                reset_playback()
+                break
+
             # Check again before playback
             if not cancel_event.is_set():
                 tts_state = "PLAYBACK"
                 stream.write(audio_data.tobytes())
                 logger.info(f"Played synthesized speech for chunk: '{chunk}'")
                 success = True
+                recent_audio_patterns.append(audio_data[:100])  # Store start of audio for pattern detection
+                if len(recent_audio_patterns) > 3:
+                    recent_audio_patterns.pop(0)  # Maintain recent history for error detection
             break
         except grpc.RpcError as e:
             logger.error(f"Synthesis failed on attempt {attempt + 1}: {e.details()}")
@@ -346,6 +356,33 @@ def process_chunk(chunk, tts_stub, max_retries):
 
     tts_state = "IDLE"
     return success
+
+def detect_playback_error(audio_data, recent_audio_patterns):
+    """Detects repeated patterns in audio data to identify playback errors."""
+    for previous_data in recent_audio_patterns:
+        if np.array_equal(audio_data[:100], previous_data):
+            return True  # Repeated pattern detected, likely a playback error
+    return False
+
+def reset_playback():
+    """Resets the playback stream to handle potential underrun or looping errors."""
+    global stream  # Ensure stream is recognized as a global variable
+    if stream and stream.is_active():
+        fade_out_audio()  # Smoothly reduce volume if currently playing
+        stream.stop_stream()
+        stream.close()
+    
+    # Reopen the stream to reset it
+    stream = pyaudio_instance.open(
+        format=pyaudio.paInt16,
+        channels=output_channels,
+        rate=sample_rate,
+        output=True,
+        frames_per_buffer=1024
+    )
+    logger.info("Playback stream reset to handle error.")
+
+
 
 def cancel_current_tts():
     global tts_state

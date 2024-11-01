@@ -2,48 +2,144 @@
     "known_ports": "2000-8000",
     "scan_interval": 5,
     "command_port": 6000,
-    "data_port_range": "6001-6010",
+    "data_port_range": "6001-6099",
     "peripherals": [
         {
-            "name": "ASR_Engine",
-            "uuid": "2e3cf303-5df6-44bc-b3ff-1425e243745e",
-            "config": "port=6203\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_port=6000\nlanguage_code=en-US\nuse_ssl=False\nssl_cert=\nserver=localhost:50051\ninput_device=\nsample_rate=16000\nchunk_size=1600\nscript_uuid=2e3cf303-5df6-44bc-b3ff-1425e243745e\nEOF",
-            "port": 6203,
-            "last_seen": 1729292750.1435654,
-            "data_port": 6006
+            "name": "Selfcheck_Engine",
+            "uuid": "c873877f-1ca7-472b-8fd0-955c35ef4caa",
+            "config": "",
+            "port": 6285,
+            "last_seen": 50.045359776,
+            "data_port": 6018
         },
         {
             "name": "LLM_Engine",
-            "uuid": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
-            "config": "model_name=llama3.2:3b\ninput_mode=port\noutput_mode=port\ninput_format=chunk\noutput_format=chunk\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_ports=6000-6010\nroute=/llm\nscript_uuid=8f27f986-a213-4bfd-87c4-72dbffedf9e8\nsystem_prompt=You Respond Conversationally\ntemperature=0.7\ntop_p=0.9\nmax_tokens=150\nrepeat_penalty=1.0\ninference_timeout=5\njson_filtering=False\napi_endpoint=generate\nport=6200\ndata_port=6006\nEOF",
-            "port": 6200,
-            "last_seen": 1729292750.1386113,
-            "data_port": 6006
+            "uuid": "3484b12d-4330-41ce-bf08-9fe42c1f6a01",
+            "config": "",
+            "port": 6204,
+            "last_seen": 1730493029.609387,
+            "data_port": 6018
         },
         {
-            "name": "SLM_Engine",
-            "uuid": "55959318-a9bb-4c0e-8196-39b47eff38df",
-            "config": "model_name=llama3.2:1b\ninput_mode=port\noutput_mode=port\ninput_format=chunk\noutput_format=chunk\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_ports=6000-6010\nroute=/slm\nscript_uuid=55959318-a9bb-4c0e-8196-39b47eff38df\nsystem_prompt=You take what you receive and do a deep internal meta-analysis, as you are the little voice in the ear of a LLM. Do so to the following incoming information, you can also output empty responses if you dont deem meta-analysis necessary for the following incoming information : \ntemperature=0.7\ntop_p=0.9\nmax_tokens=150\nrepeat_penalty=1.0\ninference_timeout=5\njson_filtering=False\napi_endpoint=generate\nport=6201\ndata_port=6006\nEOF",
-            "port": 6201,
-            "last_seen": 1729292750.140576,
-            "data_port": 6006
+            "name": "ASR_Engine",
+            "uuid": "9f6e64a3-031c-40db-9793-cd8076951fd6",
+            "config": "",
+            "port": 6207,
+            "last_seen": 1730495494.7254417,
+            "data_port": 6018
         },
         {
-            "name": "SUM_Engine",
-            "uuid": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
-            "config": "model_name=llama3.2:1b\ninput_mode=port\noutput_mode=port\ninput_format=chunk\noutput_format=chunk\nport_range=6200-6300\norchestrator_host=localhost\norchestrator_ports=6000-6010\nroute=/sum\nscript_uuid=87f77c55-857d-4d3a-878e-a3fa7f198b85\nsystem_prompt=You Respond Conversationally\ntemperature=0.7\ntop_p=0.9\nmax_tokens=150\nrepeat_penalty=1.0\ninference_timeout=5\njson_filtering=False\napi_endpoint=generate\nport=6202\ndata_port=6006\nEOF",
-            "port": 6202,
-            "last_seen": 1729292750.1422935,
-            "data_port": 6006
+            "name": "Tools_Engine",
+            "uuid": "7686f07c-7544-4c91-8d76-11aecd192432",
+            "config": "",
+            "port": 6203,
+            "last_seen": 46.997916768,
+            "data_port": 6018
         },
         {
             "name": "TTS_Engine",
             "uuid": "37d46837-f12a-4215-bd74-8d123bdb6a3d",
-            "config": "input_mode=port\ninput_format=chunk\noutput_mode=speaker\nport=6100\nroute=/tts_route\nvoice=GLaDOS\nscript_uuid=37d46837-f12a-4215-bd74-8d123bdb6a3d\norchestrator_host=localhost\norchestrator_ports=6000-6005\ndata_port=6006\nEOF",
-            "port": 6100,
-            "last_seen": 1729292750.1154191,
-            "data_port": 6006
+            "config": "",
+            "port": 6237,
+            "last_seen": 1730496372.2536228,
+            "data_port": 6018
+        },
+        {
+            "name": "Consolidation_Engine",
+            "uuid": "b9f0aa63-a281-46b0-a1d9-14a75ce5d73e",
+            "config": "",
+            "port": 6253,
+            "last_seen": 45.260210208,
+            "data_port": 6018
+        },
+        {
+            "name": "SLM_Engine",
+            "uuid": "55959318-a9bb-4c0e-8196-39b47eff38df",
+            "config": "",
+            "port": 6200,
+            "last_seen": 46.31224464,
+            "data_port": 6016
+        },
+        {
+            "name": "Embedding_Engine",
+            "uuid": "68e60596-a570-4b4e-b9fa-f59c5ea13e8b",
+            "config": "",
+            "port": 6202,
+            "last_seen": 45.773409504,
+            "data_port": 6018
+        },
+        {
+            "name": "SUM_Engine",
+            "uuid": "87f77c55-857d-4d3a-878e-a3fa7f198b85",
+            "config": "",
+            "port": 6206,
+            "last_seen": 195.029569696,
+            "data_port": 6016
+        },
+        {
+            "name": "Terminal_Input_Engine",
+            "uuid": "4f5b2100-86cf-4246-b539-43c19ce9f6dd",
+            "config": "",
+            "port": 6201,
+            "last_seen": 45.59441216,
+            "data_port": 6018
+        },
+        {
+            "name": "Code_Engine",
+            "uuid": "112d5a8b-c9c3-4794-8382-1504e6c2452c",
+            "config": "",
+            "port": 6205,
+            "last_seen": 50.857506848,
+            "data_port": 6018
+        },
+        {
+            "name": "Tools_Engine",
+            "uuid": "e98427c2-9e56-45bf-8bc3-988412263d79",
+            "config": "",
+            "port": 6206,
+            "last_seen": 1730179938.9087775,
+            "data_port": 6011
+        },
+        {
+            "name": "Tools_Engine",
+            "uuid": "6b548bdc-0004-4411-8b78-b78b49e4c86b",
+            "config": "",
+            "port": 6206,
+            "last_seen": 1730179982.6012301,
+            "data_port": 6012
+        },
+        {
+            "name": "Assembly_Engine",
+            "uuid": "cec6caab-c832-47d7-8505-538fc9ff2195",
+            "config": "",
+            "port": 6214,
+            "last_seen": 1730241750.5631943,
+            "data_port": 6015
+        },
+        {
+            "name": "SUM_Engine",
+            "uuid": "ea1ce4c9-2c0c-46e6-bb51-e21d62861712",
+            "config": "",
+            "port": 6202,
+            "last_seen": 1730402925.3225782,
+            "data_port": 6015
+        },
+        {
+            "name": "SUM_Engine",
+            "uuid": "008d2f52-02e3-4af9-a485-1b3d496fc312",
+            "config": "",
+            "port": 6206,
+            "last_seen": 52.196255072,
+            "data_port": 6018
+        },
+        {
+            "name": "SLM_Engine",
+            "uuid": "71f076b5-d017-456d-a363-290055417eca",
+            "config": "",
+            "port": 6200,
+            "last_seen": 45.455172224,
+            "data_port": 6018
         }
     ],
-    "script_uuid": "a957aae6-da94-4322-bf00-4b3f3520ffec"
+    "script_uuid": "6d15d5ff-ba09-4103-91a4-69c451a14bdc"
 }

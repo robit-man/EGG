@@ -145,6 +145,7 @@ def parse_args():
             config[key] = str(arg_value)
     write_config()
     return args
+
 def asr_processing():
     # Load configuration
     sample_rate = int(config.get('sample_rate', '16000'))
@@ -187,7 +188,7 @@ def asr_processing():
         print(f"Failed to initialize ASR Service: {e}")
         return
 
-    # Configure ASR Recognition
+    # Configure ASR Recognition with adjusted EOU parameters
     offline_config = riva.client.RecognitionConfig(
         encoding=riva.client.AudioEncoding.LINEAR_PCM,
         sample_rate_hertz=sample_rate,
@@ -230,7 +231,7 @@ def asr_processing():
                 lambda: stream.read(chunk_size)[0].tobytes(), b''
             )
 
-            # ASR processing using Riva streaming response generator
+            # ASR processing with delayed EOU
             response_generator = asr_service.streaming_response_generator(
                 audio_chunks=audio_chunk_iterator,
                 streaming_config=streaming_config,
@@ -242,40 +243,66 @@ def asr_processing():
         print(f"Error during ASR streaming: {e}")
 
 
+# Constants
+FINAL_TIMEOUT = 2  # Timeout in seconds to wait after a "final" result
+
 def send_text_to_orchestrator(response_generator):
     host = config.get('orchestrator_host', 'localhost')
     port = int(config.get('orchestrator_port', '6000'))
     
-    # Buffer to hold interim and final results for accumulating words
-    sentence_buffer = []
-    
+    # Buffers and state variables for managing EOU
+    sentence_buffer = []       # Collects final results for assembly
+    last_final_text = ""       # Stores the last final output
+    final_timer = None         # Timer for managing the 2-second timeout after final results
+
+    def send_final_sentence(final_sentence):
+        """ Helper function to send a sentence to the orchestrator """
+        message = f"/data {script_uuid} {final_sentence}\n"
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((host, port))
+                s.sendall(message.encode())
+            print(f"Sent final sentence to orchestrator: {final_sentence}")
+        except Exception as e:
+            print(f"Failed to send text to orchestrator at {host}:{port}: {e}")
+
+    def reset_final_timer():
+        """ Resets the 2-second timer to wait for further input after a final result """
+        nonlocal final_timer
+        if final_timer:
+            final_timer.cancel()
+        final_timer = threading.Timer(FINAL_TIMEOUT, process_final_sentence)
+        final_timer.start()
+
+    def process_final_sentence():
+        """ Processes and sends the assembled final sentence to orchestrator """
+        if sentence_buffer:
+            final_sentence = ' '.join(sentence_buffer).strip()
+            if final_sentence:
+                send_final_sentence(final_sentence)
+            sentence_buffer.clear()
+
     for response in response_generator:
         for result in response.results:
-            if result.is_final:
-                # Clear the buffer if we receive a final result
-                recognized_text = result.alternatives[0].transcript
-                sentence_buffer.append(recognized_text)
+            recognized_text = result.alternatives[0].transcript
 
-                # Combine buffered words into a full sentence
-                final_sentence = ' '.join(sentence_buffer).strip()
-                if final_sentence:
-                    print(f"Recognized (final): {final_sentence}")
-                    
-                    # Send recognized text to orchestrator
-                    message = f"/data {script_uuid} {final_sentence}\n"
-                    try:
-                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                            s.connect((host, port))
-                            s.sendall(message.encode())
-                    except Exception as e:
-                        print(f"Failed to send text to orchestrator at {host}:{port}: {e}")
-                    
-                    # Clear buffer after sending
-                    sentence_buffer.clear()
+            if result.is_final:
+                # Store the "final" result in the buffer and reset the timer
+                sentence_buffer.append(recognized_text)
+                reset_final_timer()
+                print(f"Received final result: {recognized_text}")
             else:
-                # Display interim results but don't store them for final consolidation
-                interim_text = result.alternatives[0].transcript
-                print(f"Interim ASR Output: {interim_text}")
+                # Handle interim results; reset timer if within 2 seconds of the last final result
+                if final_timer and final_timer.is_alive():
+                    print(f"Received interim result: {recognized_text}")
+                    reset_final_timer()
+                else:
+                    print(f"Received standalone interim result: {recognized_text}")
+
+    # Ensure any final sentence is sent if the response generator ends
+    if final_timer:
+        final_timer.cancel()
+    process_final_sentence()
 
 
 

@@ -379,13 +379,32 @@ GLaDOS TTS provides a text-to-speech model for conversational AI applications. P
 
 ### 8.2. Initialize Riva for GLaDOS TTS
 
-1. **Copy TTS Models to Riva Artifacts**:
+1. **Download Riva and Create Directories**:
+
+[Download RIVA 2.17.0](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64/files?version=2.17.0)
+
+Extract the contents parallel to config.sh into a folder called 'RIVA' in your '/home/$(whoami)/'
+
+Then run riva init and riva start
+```
+sudo bash config.sh && sudo bash riva_init.sh && sudo bash riva_start.sh
+```
+Then stop services in preperation for the next steps via
+```
+sudo bash riva_stop.sh
+```
+Now create the artifacts directory inside the RIVA dir
+```
+sudo mkdir artifacts
+```
+
+2. **Copy TTS Models to Riva Artifacts**:
 
    ```bash
    sudo cp glados_hifigan.riva glados_fastpitch.riva /home/$(whoami)/RIVA/artifacts/
    ```
 
-2. **Run Riva Speech Service Container**:
+3. **Run Riva Speech Service Container**:
 
    ```bash
    sudo docker run --runtime=nvidia -it --rm \
@@ -395,7 +414,7 @@ GLaDOS TTS provides a text-to-speech model for conversational AI applications. P
        nvcr.io/nvidia/riva/riva-speech:2.17.0-servicemaker-l4t-aarch64
    ```
 
-3. **Build Speech Synthesis Models**:
+4. **Build Speech Synthesis Models**:
    
    Inside the Docker container, execute:
 
@@ -408,17 +427,24 @@ GLaDOS TTS provides a text-to-speech model for conversational AI applications. P
        --sample_rate=22050
    ```
 
-4. **Deploy Riva Models**:
-
+5. **Deploy Riva Models**:
+(inside docker still)
    ```bash
    riva-deploy /servicemaker-dev/glados.rmir:tlt_encode /data/models
    ```
+Now you can exit docker
 
 5. **Copy Models to Repository**:
-
+(you may have to replace $(whoami) with your system uname)
    ```bash
    sudo cp -r /home/$(whoami)/RIVA/riva_repo/models/* /home/$(whoami)/RIVA/model_repository/models/
    ```
+6. **Run Riva**:
+
+You can now run riva via the base folder
+```
+sudo bash riva_start.sh
+```
 
 ---
 

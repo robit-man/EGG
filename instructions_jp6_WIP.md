@@ -191,6 +191,8 @@ jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
 
 NVIDIA Riva provides AI-powered conversational interfaces.
 
+If you want to skip this and do it in conjunction with the TTS Customization Setup, Refere to [Download and Install GLaDOS TTS](#8-download-and-install-glados-tts) which includes manual RIVA installation instructions as well, but come back here to ensure docker configuration for riva at step 6.5 
+
 ### 6.1. Download Riva Quickstart
 
 - **Download via NGC Catalog**: Access the [Riva Quickstart ARM64](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64) and download version 2.17.0.

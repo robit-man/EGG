@@ -9,7 +9,7 @@ This comprehensive guide provides step-by-step instructions for setting up the N
 3. [Install NoMachine](#3-install-nomachine)
 4. [Install Jetson Containers](#4-install-jetson-containers)
 5. [Install Nilecam81 Drivers](#5-install-nilecam81-drivers)
-6. [Install NVIDIA Riva 2.16.0](#6-install-nvidia-riva-2160)
+6. [Install NVIDIA Riva 2.17.0](#6-install-nvidia-riva-2170)
 7. [Configure Default Audio Devices](#7-configure-default-audio-devices)
 8. [Download and Install GLaDOS TTS](#8-download-and-install-glados-tts)
 9. [Run Ollama Jetson Container](#9-run-ollama-jetson-container)
@@ -187,20 +187,20 @@ jetson-containers run -v /home/$(whoami)/Shared:/Shared  \
 
 ---
 
-## 6. Install NVIDIA Riva 2.16.0
+## 6. Install NVIDIA Riva 2.17.0
 
 NVIDIA Riva provides AI-powered conversational interfaces.
 
 ### 6.1. Download Riva Quickstart
 
-- **Download via NGC Catalog**: Access the [Riva Quickstart ARM64](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64) and download version 2.16.0.
+- **Download via NGC Catalog**: Access the [Riva Quickstart ARM64](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/riva/resources/riva_quickstart_arm64) and download version 2.17.0.
 
 ### 6.2. Alternatively, Download via CLI
 
 If you have the NGC CLI installed, execute:
 
 ```bash
-ngc registry resource download-version nvidia/riva/riva_quickstart:2.16.0
+ngc registry resource download-version nvidia/riva/riva_quickstart:2.17.0
 ```
 
 ### 6.3. Organize Riva Files

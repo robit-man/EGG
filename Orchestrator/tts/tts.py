@@ -38,8 +38,8 @@ is_muted_lock = threading.Lock()
 stream_lock = threading.Lock()
 
 # Constants
-MAX_SENTENCES = 5
-MAX_CHARACTERS = 350
+MAX_CHARACTERS = 400  # Updated maximum chunk size
+MAX_SINGLE_CHUNK_LENGTH = 400  # Maximum length to process in one go
 
 # Configuration defaults
 config = {
@@ -277,7 +277,45 @@ def send_info(client_socket):
     response += "EOF\n"
     client_socket.sendall(response.encode())
 
-# TTS Synthesis and Playback with Improved Time-Sensitive Handling
+# Function to Split Text into Chunks with Truncation at Periods or Line Breaks
+def split_text_into_chunks(text, max_chunk_size=400):
+    chunks = []
+    paragraphs = text.split('\n')
+    for paragraph in paragraphs:
+        sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+        current_chunk = ''
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
+                current_chunk += sentence + ' '
+            else:
+                # Add current chunk to chunks
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ''
+                # Check if the sentence itself is longer than max_chunk_size
+                if len(sentence) <= max_chunk_size:
+                    current_chunk = sentence + ' '
+                else:
+                    # Split the long sentence
+                    words = sentence.split()
+                    sub_chunk = ''
+                    for word in words:
+                        if len(sub_chunk) + len(word) + 1 <= max_chunk_size:
+                            sub_chunk += word + ' '
+                        else:
+                            chunks.append(sub_chunk.strip())
+                            sub_chunk = word + ' '
+                    if sub_chunk:
+                        chunks.append(sub_chunk.strip())
+                    current_chunk = ''
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+    return chunks
+
+# TTS Synthesis and Playback with Improved Chunking Logic
 def synthesize_and_play(tts_stub):
     max_retries = 5  # Increase retries for aggressive generation
 
@@ -286,37 +324,16 @@ def synthesize_and_play(tts_stub):
             update_tts_state("RECEIVING")
             text = tts_queue.get(timeout=0.5)
             if cancel_event.is_set():
+                logger.info("Processing was canceled before starting.")
                 break
 
             is_active.set()  # Set to True when starting processing
 
-            # Split into sentences for chunking
-            update_tts_state("CHUNKING")
-            sentences = re.split(r'(?<=[.!?])\s+', text)
             mute_microphone()
 
-            # Chunk processing setup
-            chunk_list = []
-            chunk = ""
-            sentence_count = 0
-
-            # Accumulate sentences until reaching the max sentence or character limits
-            for sentence in sentences:
-                if cancel_event.is_set():
-                    break
-                if sentence_count < MAX_SENTENCES and len(chunk) + len(sentence) <= MAX_CHARACTERS:
-                    chunk += sentence + " "
-                    sentence_count += 1
-                else:
-                    # Add completed chunk and start a new one
-                    if chunk.strip():
-                        chunk_list.append(chunk.strip())
-                    chunk = sentence + " "
-                    sentence_count = 1
-
-            # Add any remaining text in chunk to the list
-            if chunk.strip():
-                chunk_list.append(chunk.strip())
+            # Split text into chunks based on the new logic
+            chunk_list = split_text_into_chunks(text, max_chunk_size=MAX_CHARACTERS)
+            logger.info(f"Split text into {len(chunk_list)} chunk(s).")
 
             # Process chunks using ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=5) as executor:
@@ -324,6 +341,7 @@ def synthesize_and_play(tts_stub):
                 futures = []
                 for idx, chunk_text in enumerate(chunk_list):
                     if cancel_event.is_set():
+                        logger.info("Processing was canceled during chunking.")
                         break
                     future = executor.submit(process_chunk, idx, chunk_text, tts_stub, max_retries)
                     future_to_index[future] = idx
@@ -336,6 +354,7 @@ def synthesize_and_play(tts_stub):
 
                 for future in as_completed(futures):
                     if cancel_event.is_set():
+                        logger.info("Processing was canceled during synthesis.")
                         break
                     idx = future_to_index[future]
                     try:
@@ -363,6 +382,10 @@ def synthesize_and_play(tts_stub):
             update_tts_state("IDLE")
             is_active.clear()  # Set to False when processing is done
 
+            # Clear the cancel_event after successful processing
+            cancel_event.clear()
+            logger.debug("cancel_event cleared after successful processing.")
+
         except queue.Empty:
             with is_muted_lock:
                 if is_muted:
@@ -375,7 +398,9 @@ def synthesize_and_play(tts_stub):
                     unmute_microphone()
             time.sleep(1)
             is_active.clear()  # Ensure it's set to False in case of exception
-
+            # Clear the cancel_event to prevent it from affecting future processing
+            cancel_event.clear()
+            logger.debug("cancel_event cleared after exception.")
 
 def process_chunk(idx, chunk, tts_stub, max_retries):
     failure_count = 0
@@ -452,9 +477,11 @@ def update_tts_state(new_state):
     global tts_state
     with tts_state_lock:
         tts_state = new_state
+    logger.debug(f"TTS state updated to: {new_state}")
 
 def cancel_current_tts():
     if is_active.is_set():
+        logger.info("Cancelling current TTS synthesis and playback.")
         cancel_event.set()  # Set the cancel event
 
         # Wait for threads to acknowledge the cancel event
@@ -463,15 +490,17 @@ def cancel_current_tts():
         # Clear any pending chunks in the TTS queue
         with tts_queue.mutex:
             tts_queue.queue.clear()
+            logger.debug("Cleared TTS queue.")
 
         # Clear any pending audio in the playback queue
         with audio_queue.mutex:
             audio_queue.queue.clear()
+            logger.debug("Cleared audio playback queue.")
 
         update_tts_state("IDLE")
         is_active.clear()  # Reset active state
         logger.info("Canceled current TTS synthesis and playback.")
-        # Do not clear cancel_event here; let threads manage it appropriately
+        # Do not clear cancel_event here; it's cleared after processing
 
 def mute_microphone():
     global is_muted
@@ -507,6 +536,7 @@ def playback_thread():
         try:
             audio_data = audio_queue.get()
             if audio_data is None:
+                logger.info("Playback thread received exit signal.")
                 break  # Exit signal received
             with stream_lock:
                 if stream is not None:
@@ -528,10 +558,6 @@ def start_tts_client():
         ('grpc.http2.max_ping_strikes', 0),
     ]
 
-    channel = None
-    tts_stub = None
-    retry_delay = 5  # seconds
-
     while not cancel_event.is_set():
         try:
             if config.get('use_ssl') and config.get('ssl_cert'):
@@ -546,8 +572,8 @@ def start_tts_client():
             break  # Exit loop if connection is successful
         except Exception as e:
             logger.error(f"Failed to connect to Riva TTS server: {e}")
-            logger.info(f"Retrying to connect in {retry_delay} seconds...")
-            time.sleep(retry_delay)
+            logger.info(f"Retrying to connect in 5 seconds...")
+            time.sleep(5)
 
     try:
         # Fetch and set voice with retry logic
@@ -564,17 +590,16 @@ def start_tts_client():
             )
 
         # Start playback thread
-        playback_thread_instance = threading.Thread(target=playback_thread)
+        playback_thread_instance = threading.Thread(target=playback_thread, daemon=True)
         playback_thread_instance.start()
 
         # Start synthesis and play thread
-        tts_thread = threading.Thread(target=synthesize_and_play, args=(tts_stub,))
-        tts_thread.start()
-        tts_thread.join()
+        synth_thread = threading.Thread(target=synthesize_and_play, args=(tts_stub,), daemon=True)
+        synth_thread.start()
 
-        # Signal playback thread to exit
-        audio_queue.put(None)
-        playback_thread_instance.join()
+        # Keep the main thread alive while synth_thread is running
+        while synth_thread.is_alive():
+            synth_thread.join(timeout=1)
     except Exception as e:
         logger.error(f"Failed during TTS client operation: {e}")
     finally:
@@ -583,15 +608,16 @@ def start_tts_client():
                 stream.stop_stream()
                 stream.close()
                 stream = None
-            pyaudio_instance.terminate()
-        if channel:
+        pyaudio_instance.terminate()
+        if 'channel' in locals() and channel:
             channel.close()
+        logger.info("TTS client has been shut down.")
 
 # Main function to initialize and run the TTS engine
 if __name__ == '__main__':
     read_config()  # Load the configuration from file
     if register_with_orchestrator():  # Register with the orchestrator if available
-        listener_thread = threading.Thread(target=start_data_listener)
+        listener_thread = threading.Thread(target=start_data_listener, daemon=True)
         listener_thread.start()  # Start data listener to handle incoming messages
         start_tts_client()  # Start the TTS client for processing and playback
         listener_thread.join()  # Wait for listener thread to finish before exiting

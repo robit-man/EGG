@@ -13,12 +13,10 @@ from riva.client.proto import riva_tts_pb2, riva_tts_pb2_grpc
 import riva.client
 import random
 import re
-import textwrap
 from num2words import num2words
 import subprocess  # For calling pactl to mute/unmute mic
-import requests
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 # Configuration and Constants
 CONFIG_FILE = 'tts.cf'
@@ -30,17 +28,19 @@ config_lock = threading.Lock()
 sample_rate = 22050  # Default sample rate for Riva TTS
 output_channels = 1  # Mono audio for speaker output
 pyaudio_instance = pyaudio.PyAudio()
-stream = None
 selected_voice = None
-asr_muted = False  # Flag to mute ASR during playback
 tts_state = "IDLE"  # Can be RECEIVING, CHUNKING, INFERENCE, PLAYBACK
 is_muted = False  # Track if the microphone is currently muted
-is_active = False  # Add this at the global level
-recent_audio_patterns = []
+is_active = threading.Event()
+audio_queue = queue.Queue(maxsize=10)
+tts_state_lock = threading.Lock()
+is_muted_lock = threading.Lock()
+stream_lock = threading.Lock()
 
 # Constants
 MAX_SENTENCES = 5
 MAX_CHARACTERS = 350
+
 # Configuration defaults
 config = {
     'orchestrator_host': 'localhost',
@@ -169,80 +169,71 @@ def start_data_listener():
                 logger.error(f"Failed to bind data listener on port {data_port}: {e}")
                 break
 
+def update_orchestrator_data_port(new_data_port):
+    host = config['orchestrator_host']
+    orch_ports = parse_port_range(config['orchestrator_ports'])
+    message = f"/update_data_port {script_uuid} {new_data_port}\n"
+    
+    for port in orch_ports:
+        try:
+            with socket.create_connection((host, port), timeout=5) as s:
+                s.sendall(message.encode())
+                logger.info(f"Notified orchestrator of new data port: {new_data_port}")
+                return
+        except Exception as e:
+            logger.warning(f"Could not update orchestrator on port {port} - {e}")
+
 # Fetch Available Voices from Riva and Set Selected Voice
 def fetch_and_set_voice(tts_stub):
     global selected_voice
-    unmute_microphone() 
-    try:
-        response = tts_stub.GetRivaSynthesisConfig(riva_tts_pb2.RivaSynthesisConfigRequest())
-        available_voices = [
-            (model.parameters["voice_name"], model.parameters.get("language_code", "en-US"))
-            for model in response.model_config if "voice_name" in model.parameters
-        ]
+    unmute_microphone()
+    max_retries = 5
+    retry_delay = 5  # seconds
+    attempt = 0
 
-        if available_voices:
-            # Attempt to match the configured voice and language code
-            selected_voice = next(
-                (voice for voice in available_voices if voice[0] == config['voice']), 
-                None
-            )
-            if not selected_voice:
-                # Default to the first available voice if not specified
-                selected_voice = available_voices[0]
-                config['voice'] = selected_voice[0]
-                config['language_code'] = selected_voice[1]
-                write_config()
+    while attempt < max_retries or max_retries == 0:
+        try:
+            response = tts_stub.GetRivaSynthesisConfig(riva_tts_pb2.RivaSynthesisConfigRequest())
+            available_voices = [
+                (model.parameters["voice_name"], model.parameters.get("language_code", "en-US"))
+                for model in response.model_config if "voice_name" in model.parameters
+            ]
 
-            logger.info(f"Using voice: {selected_voice[0]} with language: {selected_voice[1]}")
-        else:
-            logger.error("No voices available on Riva TTS server.")
-            exit(1)
-    except grpc.RpcError as e:
-        logger.error(f"Failed to retrieve voices: {e.details()}")
-        exit(1)
+            if available_voices:
+                # Attempt to match the configured voice and language code
+                selected_voice = next(
+                    (voice for voice in available_voices if voice[0] == config['voice']), 
+                    None
+                )
+                if not selected_voice:
+                    # Default to the first available voice if not specified
+                    selected_voice = available_voices[0]
+                    config['voice'] = selected_voice[0]
+                    config['language_code'] = selected_voice[1]
+                    write_config()
 
-def calculate_hash(audio_data):
-    """Calculate a hash for a segment of audio data to detect repeats."""
-    return hashlib.md5(audio_data).hexdigest()
+                logger.info(f"Using voice: {selected_voice[0]} with language: {selected_voice[1]}")
+                break
+            else:
+                logger.error("No voices available on Riva TTS server.")
+                time.sleep(retry_delay)
+                attempt += 1
+        except grpc.RpcError as e:
+            logger.error(f"Failed to retrieve voices: {e.details()}")
+            logger.info(f"Retrying to fetch voices in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            attempt += 1
+        except Exception as e:
+            logger.error(f"Unexpected error while fetching voices: {e}")
+            logger.info(f"Retrying to fetch voices in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            attempt += 1
 
-def detect_playback_error(audio_data, recent_audio_patterns):
-    """Detects repeated patterns in audio data to identify playback errors."""
-    current_hash = calculate_hash(audio_data[:1024])  # Hash of the first segment for comparison
-
-    # Check if the new audio pattern is similar to any recent patterns
-    for previous_hash in recent_audio_patterns:
-        if current_hash == previous_hash:
-            return True  # Repeated pattern detected, likely a playback error
-
-    # Append the new hash to recent patterns and limit size of history
-    recent_audio_patterns.append(current_hash)
-    if len(recent_audio_patterns) > 5:  # Limit history to 5 segments
-        recent_audio_patterns.pop(0)
-        
-    return False
-
-def reset_playback():
-    """Resets the playback stream to handle potential underrun or looping errors."""
-    global stream  # Ensure stream is recognized as a global variable
-    if stream and stream.is_active():
-        fade_out_audio()  # Smoothly reduce volume if currently playing
-        stream.stop_stream()
-        stream.close()
-    
-    # Reopen the stream to reset it
-    stream = pyaudio_instance.open(
-        format=pyaudio.paInt16,
-        channels=output_channels,
-        rate=sample_rate,
-        output=True,
-        frames_per_buffer=1024
-    )
-    logger.info("Playback stream reset to handle error.")
-
+    if selected_voice is None:
+        raise RuntimeError("Failed to retrieve voices from the TTS server after multiple attempts.")
 
 # Process Incoming Text
 def handle_client_connection(client_socket):
-    global is_active
     with client_socket:
         while not cancel_event.is_set():
             data = client_socket.recv(1024).decode().strip()
@@ -252,17 +243,12 @@ def handle_client_connection(client_socket):
                 send_info(client_socket)
             else:
                 # Cancel ongoing TTS if synthesis or playback is active
-                if is_active:
+                if is_active.is_set():
                     cancel_current_tts()
-                    # Clear the queue only if we canceled an active TTS
-                    with tts_queue.mutex:
-                        tts_queue.queue.clear()
-
                 # Process the new incoming text and add it to the queue
                 processed_text = preprocess_text(data)
                 tts_queue.put(processed_text)
                 cancel_event.clear()  # Ensure we're ready for new processing
-
 
 def preprocess_text(text):
     # Step 1: Add spaces around non-word or sentence-oriented symbols, but ignore apostrophes
@@ -291,38 +277,21 @@ def send_info(client_socket):
     response += "EOF\n"
     client_socket.sendall(response.encode())
 
-def update_orchestrator_data_port(new_data_port):
-    host = config['orchestrator_host']
-    orch_ports = parse_port_range(config['orchestrator_ports'])
-    message = f"/update_data_port {script_uuid} {new_data_port}\n"
-    
-    for port in orch_ports:
-        try:
-            with socket.create_connection((host, port), timeout=5) as s:
-                s.sendall(message.encode())
-                logger.info(f"Notified orchestrator of new data port: {new_data_port}")
-                return
-        except Exception as e:
-            logger.warning(f"Could not update orchestrator on port {port} - {e}")
-
-
-# TTS Synthesis and Playback with Rapid Failure Recovery
+# TTS Synthesis and Playback with Improved Thread Safety
 def synthesize_and_play(tts_stub):
-    global tts_state, stream, is_active
     max_retries = 2
 
     while not cancel_event.is_set():
         try:
-            # Receive text from the queue
-            tts_state = "RECEIVING"
+            update_tts_state("RECEIVING")
             text = tts_queue.get(timeout=0.5)
             if cancel_event.is_set():
                 break
 
-            is_active = True  # Set to True when starting processing
+            is_active.set()  # Set to True when starting processing
 
             # Split into sentences for chunking
-            tts_state = "CHUNKING"
+            update_tts_state("CHUNKING")
             sentences = re.split(r'(?<=[.!?])\s+', text)
             mute_microphone()
 
@@ -340,7 +309,8 @@ def synthesize_and_play(tts_stub):
                     sentence_count += 1
                 else:
                     # Add completed chunk and start a new one
-                    chunk_list.append(chunk.strip())
+                    if chunk.strip():
+                        chunk_list.append(chunk.strip())
                     chunk = sentence + " "
                     sentence_count = 1
 
@@ -348,73 +318,52 @@ def synthesize_and_play(tts_stub):
             if chunk.strip():
                 chunk_list.append(chunk.strip())
 
-            # Process each chunk in separate threads
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                future_to_chunk = {executor.submit(process_chunk, chunk, tts_stub, max_retries): chunk for chunk in chunk_list}
-                for future in as_completed(future_to_chunk):
+            # Process chunks using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = []
+                for chunk_text in chunk_list:
                     if cancel_event.is_set():
                         break
-                    chunk = future_to_chunk[future]
+                    future = executor.submit(process_chunk, chunk_text, tts_stub, max_retries)
+                    futures.append(future)
+
+                # Wait for all futures to complete in order
+                for future in futures:
+                    if cancel_event.is_set():
+                        break
                     try:
-                        success = future.result(timeout=60)  # Set a timeout for each chunk processing
+                        success = future.result()
                         if not success:
-                            logger.warning(f"Failed to synthesize chunk: '{chunk}'")
+                            logger.warning("Failed to synthesize a chunk.")
                     except Exception as e:
-                        logger.error(f"Chunk '{chunk}' generated an exception: {e}")
+                        logger.error(f"Exception in chunk synthesis: {e}")
 
             unmute_microphone()
-            tts_state = "IDLE"
-            is_active = False  # Set to False when processing is done
+            update_tts_state("IDLE")
+            is_active.clear()  # Set to False when processing is done
 
         except queue.Empty:
-            if is_muted:
-                unmute_microphone()
+            with is_muted_lock:
+                if is_muted:
+                    unmute_microphone()
             continue
         except Exception as e:
             logger.error(f"Unexpected error in synthesis loop: {e}")
-            if is_muted:
-                unmute_microphone()
+            with is_muted_lock:
+                if is_muted:
+                    unmute_microphone()
             time.sleep(1)
-            is_active = False  # Ensure it's set to False in case of exception
-
-
-
-
-def detect_internal_repetition(audio_data, segment_size=256, repetition_threshold=3):
-    """Detects internal repetition in audio data by checking for repeating segments."""
-    segment_hashes = []
-    repeated_segments = 0
-
-    # Process the audio data in segments
-    for i in range(0, len(audio_data) - segment_size, segment_size):
-        segment = audio_data[i:i + segment_size]
-        segment_hash = calculate_hash(segment)
-
-        # Check for a repeating pattern in recent segments
-        if segment_hash in segment_hashes:
-            repeated_segments += 1
-            if repeated_segments >= repetition_threshold:
-                logger.warning("Internal repetition detected in synthesized audio. Requesting re-synthesis.")
-                return True  # Repetition threshold exceeded, indicating looping
-        else:
-            repeated_segments = 0  # Reset if no repetition in this segment
-
-        segment_hashes.append(segment_hash)
-
-        # Limit segment history to avoid excessive memory usage
-        if len(segment_hashes) > 10:
-            segment_hashes.pop(0)
-
-    return False
+            is_active.clear()  # Ensure it's set to False in case of exception
 
 def process_chunk(chunk, tts_stub, max_retries):
-    global tts_state, recent_audio_patterns, stream
-    tts_state = "INFERENCE"
     success = False
     failure_count = 0
     synthesis_timeout = 10  # Timeout in seconds for the synthesis call
     chunk_timeout = 30  # Maximum time to spend on a single chunk
     chunk_start_time = time.time()
+
+    # Count the number of words (tokens) in the chunk
+    num_tokens = len(chunk.split())
 
     while failure_count < max_retries:
         if cancel_event.is_set():
@@ -424,7 +373,7 @@ def process_chunk(chunk, tts_stub, max_retries):
             logger.error("Chunk processing time exceeded maximum duration. Skipping chunk.")
             break
         try:
-            logger.info(f"[Thread-{threading.get_ident()}] Starting synthesis for chunk: '{chunk}' (Attempt {failure_count + 1})")
+            logger.info(f"Starting synthesis for a chunk of length {len(chunk)} characters. (Attempt {failure_count + 1})")
             req = riva_tts_pb2.SynthesizeSpeechRequest(
                 text=chunk,
                 language_code=config['language_code'],
@@ -436,199 +385,188 @@ def process_chunk(chunk, tts_stub, max_retries):
             start_time = time.time()
             resp = tts_stub.Synthesize(req, timeout=synthesis_timeout)
             end_time = time.time()
-            logger.info(f"[Thread-{threading.get_ident()}] Synthesis completed in {end_time - start_time:.2f} seconds")
+            synthesis_time = end_time - start_time
 
-            if not resp.audio or cancel_event.is_set():
+            # Calculate tokens per second
+            tokens_per_second = num_tokens / synthesis_time if synthesis_time > 0 else 0
+            logger.info(f"Synthesis completed in {synthesis_time:.2f} seconds. Tokens per second: {tokens_per_second:.2f}")
+
+            # Check if the response contains valid audio data
+            if not resp.audio:
                 failure_count += 1
-                logger.warning(f"Synthesis attempt {failure_count} failed or canceled.")
+                logger.warning(f"Synthesis attempt {failure_count} failed: No audio data received.")
                 continue
 
-            audio_data = np.frombuffer(resp.audio, dtype=np.int16)
-            if detect_internal_repetition(audio_data) or detect_playback_error(audio_data.tobytes(), recent_audio_patterns):
-                logger.warning("Playback error detected. Resetting playback.")
-                reset_playback()
+            # Additional checks to validate the audio data
+            audio_data = resp.audio
+            if len(audio_data) == 0:
                 failure_count += 1
+                logger.warning(f"Synthesis attempt {failure_count} failed: Empty audio data.")
                 continue
 
-            if not cancel_event.is_set():
-                tts_state = "PLAYBACK"
-                # Ensure the stream is open before writing
-                if stream is None or not stream.is_active():
-                    stream = pyaudio_instance.open(
-                        format=pyaudio.paInt16,
-                        channels=output_channels,
-                        rate=sample_rate,
-                        output=True,
-                        frames_per_buffer=1024
-                    )
-                    logger.info("Playback stream reopened in process_chunk.")
+            # Put audio data into playback queue
+            audio_queue.put(audio_data)
 
-                logger.info(f"[Thread-{threading.get_ident()}] Starting playback for chunk.")
-                stream.write(audio_data.tobytes())
-                logger.info(f"[Thread-{threading.get_ident()}] Finished playback for chunk: '{chunk}'")
-                success = True
+            logger.info("Queued synthesized speech for a chunk.")
+            success = True
             break
         except grpc.RpcError as e:
             failure_count += 1
-            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                logger.error(f"Synthesis timed out on attempt {failure_count}: {e.details()}")
-            else:
-                logger.error(f"Synthesis failed on attempt {failure_count}: {e.details()}")
-            time.sleep(0.5)
+            logger.error(f"Synthesis failed on attempt {failure_count}: {e.code().name} - {e.details()}")
+            time.sleep(0.1)  # Short delay before retrying
         except Exception as e:
-            logger.error(f"Unexpected error during playback: {e}")
             failure_count += 1
-            time.sleep(0.5)
+            logger.error(f"Unexpected error during synthesis attempt {failure_count}: {e}")
+            time.sleep(0.1)  # Short delay before retrying
 
-    tts_state = "IDLE"
+    if not success:
+        logger.error(f"Failed to synthesize chunk after {max_retries} attempts.")
     return success
 
-
-
-
-def detect_playback_error(audio_data, recent_audio_patterns):
-    """Detects repeated patterns in audio data to identify playback errors."""
-    for previous_data in recent_audio_patterns:
-        if np.array_equal(audio_data[:100], previous_data):
-            return True  # Repeated pattern detected, likely a playback error
-    return False
-
-
-def reset_playback():
-    """Resets the playback stream to handle potential underrun or looping errors."""
-    global stream
-    if stream and stream.is_active():
-        stream.stop_stream()
-        stream.close()
-        logger.info("Playback stream stopped and closed.")
-
-    # Reopen the stream to reset it
-    stream = pyaudio_instance.open(
-        format=pyaudio.paInt16,
-        channels=output_channels,
-        rate=sample_rate,
-        output=True,
-        frames_per_buffer=1024
-    )
-    logger.info("Playback stream reset and reopened.")
-
+def update_tts_state(new_state):
+    global tts_state
+    with tts_state_lock:
+        tts_state = new_state
 
 def cancel_current_tts():
-    global tts_state, is_active, stream
-    if is_active and tts_state in ["INFERENCE", "PLAYBACK", "CHUNKING"]:
+    if is_active.is_set():
         cancel_event.set()  # Set the cancel event
 
-        # Stop and close stream if playing
-        if stream and stream.is_active():
-            stream.stop_stream()
-            stream.close()
-            logger.info("Playback stream stopped and closed in cancel_current_tts.")
+        # Wait for threads to acknowledge the cancel event
+        time.sleep(0.5)
 
-        # Reopen the stream to ensure it's ready for the next playback
-        stream = pyaudio_instance.open(
-            format=pyaudio.paInt16,
-            channels=output_channels,
-            rate=sample_rate,
-            output=True,
-            frames_per_buffer=1024
-        )
-        logger.info("Playback stream reopened in cancel_current_tts.")
-
-        # Clear any pending chunks in the queue
+        # Clear any pending chunks in the TTS queue
         with tts_queue.mutex:
             tts_queue.queue.clear()
 
-        tts_state = "IDLE"
-        is_active = False  # Reset active state
+        # Clear any pending audio in the playback queue
+        with audio_queue.mutex:
+            audio_queue.queue.clear()
+
+        update_tts_state("IDLE")
+        is_active.clear()  # Reset active state
         logger.info("Canceled current TTS synthesis and playback.")
-        # Wait briefly to ensure processing halt before clearing
-        time.sleep(0.1)
-    cancel_event.clear()
+        # Do not clear cancel_event here; let threads manage it appropriately
 
-
-
-
-def fade_out_audio():
-    """Stops the audio playback stream."""
-    try:
-        if stream and stream.is_active():
-            stream.stop_stream()
-            logger.info("Playback stream stopped.")
-    except Exception as e:
-        logger.error(f"Failed to stop audio: {e}")
-
-
-
-# Function to mute the microphone
 def mute_microphone():
     global is_muted
-    if config['mute_during_playback'] and not is_muted:
-        try:
-            default_source = subprocess.check_output(
-                ["pactl", "get-default-source"], universal_newlines=True
-            ).strip()
-            subprocess.run(["pactl", "set-source-mute", default_source, "1"], check=True)
-            is_muted = True
-            logger.info(f"Microphone {default_source} muted.")
-        except Exception as e:
-            logger.error(f"Failed to mute the microphone: {e}")
+    with is_muted_lock:
+        if config['mute_during_playback'] and not is_muted:
+            try:
+                default_source = subprocess.check_output(
+                    ["pactl", "get-default-source"], universal_newlines=True
+                ).strip()
+                subprocess.run(["pactl", "set-source-mute", default_source, "1"], check=True)
+                is_muted = True
+                logger.info(f"Microphone {default_source} muted.")
+            except Exception as e:
+                logger.error(f"Failed to mute the microphone: {e}")
 
-# Function to unmute the microphone
 def unmute_microphone():
     global is_muted
-    if is_muted:  # Only unmute if currently muted
-        try:
-            default_source = subprocess.check_output(
-                ["pactl", "get-default-source"], universal_newlines=True
-            ).strip()
-            subprocess.run(["pactl", "set-source-mute", default_source, "0"], check=True)
-            is_muted = False
-            logger.info(f"Microphone {default_source} unmuted.")
-        except Exception as e:
-            logger.error(f"Failed to unmute the microphone: {e}")
+    with is_muted_lock:
+        if is_muted:  # Only unmute if currently muted
+            try:
+                default_source = subprocess.check_output(
+                    ["pactl", "get-default-source"], universal_newlines=True
+                ).strip()
+                subprocess.run(["pactl", "set-source-mute", default_source, "0"], check=True)
+                is_muted = False
+                logger.info(f"Microphone {default_source} unmuted.")
+            except Exception as e:
+                logger.error(f"Failed to unmute the microphone: {e}")
 
+def playback_thread():
+    global stream
+    while True:
+        try:
+            audio_data = audio_queue.get()
+            if audio_data is None:
+                break  # Exit signal received
+            with stream_lock:
+                if stream is not None:
+                    stream.write(audio_data)
+            audio_queue.task_done()
+        except Exception as e:
+            logger.error(f"Error during playback: {e}")
+            break
 
 def start_tts_client():
     global stream
+    # Adjusted keepalive settings
+    keepalive_options = [
+        ('grpc.keepalive_time_ms', 7200000),  # Send keepalive ping every 2 hours
+        ('grpc.keepalive_timeout_ms', 20000),  # Timeout for keepalive ping
+        ('grpc.keepalive_permit_without_calls', False),
+        ('grpc.http2.max_pings_without_data', 0),
+        ('grpc.http2.min_time_between_pings_ms', 7200000),  # Minimum time between pings without data
+        ('grpc.http2.max_ping_strikes', 0),
+    ]
+
+    channel = None
+    tts_stub = None
+    retry_delay = 5  # seconds
+
+    while not cancel_event.is_set():
+        try:
+            if config.get('use_ssl') and config.get('ssl_cert'):
+                with open(config['ssl_cert'], 'rb') as f:
+                    creds = grpc.ssl_channel_credentials(f.read())
+                channel = grpc.secure_channel(config['server'], creds, options=keepalive_options)
+            else:
+                channel = grpc.insecure_channel(config['server'], options=keepalive_options)
+
+            tts_stub = riva_tts_pb2_grpc.RivaSpeechSynthesisStub(channel)
+            logger.info("Successfully connected to Riva TTS server.")
+            break  # Exit loop if connection is successful
+        except Exception as e:
+            logger.error(f"Failed to connect to Riva TTS server: {e}")
+            logger.info(f"Retrying to connect in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+
     try:
-        # Keepalive settings
-        keepalive_options = [
-            ('grpc.keepalive_time_ms', 10000),  # Send keepalive ping every 10 seconds
-            ('grpc.keepalive_timeout_ms', 5000),  # Timeout for keepalive ping
-            ('grpc.keepalive_permit_without_calls', True),
-            ('grpc.http2.max_pings_without_data', 0),
-            ('grpc.http2.min_time_between_pings_ms', 10000),
-            ('grpc.http2.min_ping_interval_without_data_ms', 5000),
-        ]
-
-        if config.get('use_ssl') and config.get('ssl_cert'):
-            with open(config['ssl_cert'], 'rb') as f:
-                creds = grpc.ssl_channel_credentials(f.read())
-            channel = grpc.secure_channel(config['server'], creds, options=keepalive_options)
-        else:
-            channel = grpc.insecure_channel(config['server'], options=keepalive_options)
-
-        tts_stub = riva_tts_pb2_grpc.RivaSpeechSynthesisStub(channel)
+        # Fetch and set voice with retry logic
         fetch_and_set_voice(tts_stub)
-        stream = pyaudio_instance.open(
-            format=pyaudio.paInt16,
-            channels=output_channels,
-            rate=sample_rate,
-            output=True,
-            frames_per_buffer=1024
-        )
-        tts_thread = threading.Thread(target=synthesize_and_play, args=(tts_stub,), daemon=True)
+
+        # Initialize audio stream
+        with stream_lock:
+            stream = pyaudio_instance.open(
+                format=pyaudio.paInt16,
+                channels=output_channels,
+                rate=sample_rate,
+                output=True,
+                frames_per_buffer=1024
+            )
+
+        # Start playback thread
+        playback_thread_instance = threading.Thread(target=playback_thread)
+        playback_thread_instance.start()
+
+        # Start synthesis and play thread
+        tts_thread = threading.Thread(target=synthesize_and_play, args=(tts_stub,))
         tts_thread.start()
         tts_thread.join()
-    except Exception as e:
-        logger.error(f"Failed to start TTS client: {e}")
 
+        # Signal playback thread to exit
+        audio_queue.put(None)
+        playback_thread_instance.join()
+    except Exception as e:
+        logger.error(f"Failed during TTS client operation: {e}")
+    finally:
+        with stream_lock:
+            if stream is not None:
+                stream.stop_stream()
+                stream.close()
+                stream = None
+            pyaudio_instance.terminate()
+        if channel:
+            channel.close()
 
 # Main function to initialize and run the TTS engine
 if __name__ == '__main__':
     read_config()  # Load the configuration from file
     if register_with_orchestrator():  # Register with the orchestrator if available
-        listener_thread = threading.Thread(target=start_data_listener, daemon=True)
+        listener_thread = threading.Thread(target=start_data_listener)
         listener_thread.start()  # Start data listener to handle incoming messages
         start_tts_client()  # Start the TTS client for processing and playback
         listener_thread.join()  # Wait for listener thread to finish before exiting

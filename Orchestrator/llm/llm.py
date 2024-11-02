@@ -44,7 +44,7 @@ FUNCTIONS_FILE_URL = 'https://raw.githubusercontent.com/robit-man/EGG/main/Orche
 
 # Default configuration
 default_config = {
-    'model_name': 'llama:3.2:3b',
+    'model_name': 'llama3.2:3b',
     'input_mode': 'port',           # Options: 'port', 'terminal', 'route'
     'output_mode': 'port',          # Options: 'port', 'terminal', 'route'
     'input_format': 'chunk',        # Options: 'streaming', 'chunk'

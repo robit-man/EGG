@@ -16,7 +16,7 @@ import re
 from num2words import num2words
 import subprocess  # For calling pactl to mute/unmute mic
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration and Constants
 CONFIG_FILE = 'tts.cf'
@@ -277,9 +277,9 @@ def send_info(client_socket):
     response += "EOF\n"
     client_socket.sendall(response.encode())
 
-# TTS Synthesis and Playback with Improved Thread Safety
+# TTS Synthesis and Playback with Improved Time-Sensitive Handling
 def synthesize_and_play(tts_stub):
-    max_retries = 2
+    max_retries = 5  # Increase retries for aggressive generation
 
     while not cancel_event.is_set():
         try:
@@ -320,23 +320,44 @@ def synthesize_and_play(tts_stub):
 
             # Process chunks using ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_index = {}
                 futures = []
-                for chunk_text in chunk_list:
+                for idx, chunk_text in enumerate(chunk_list):
                     if cancel_event.is_set():
                         break
-                    future = executor.submit(process_chunk, chunk_text, tts_stub, max_retries)
+                    future = executor.submit(process_chunk, idx, chunk_text, tts_stub, max_retries)
+                    future_to_index[future] = idx
                     futures.append(future)
 
-                # Wait for all futures to complete in order
-                for future in futures:
+                # Collect results as they complete
+                results = {}
+                failed_chunks = set()
+                next_index_to_play = 0
+
+                for future in as_completed(futures):
                     if cancel_event.is_set():
                         break
+                    idx = future_to_index[future]
                     try:
-                        success = future.result()
-                        if not success:
-                            logger.warning("Failed to synthesize a chunk.")
+                        audio_data = future.result()
+                        if audio_data is not None:
+                            results[idx] = audio_data
+                            logger.info(f"Chunk index {idx} synthesized successfully.")
+                        else:
+                            logger.warning(f"Failed to synthesize chunk at index {idx}.")
+                            failed_chunks.add(idx)
                     except Exception as e:
-                        logger.error(f"Exception in chunk synthesis: {e}")
+                        logger.error(f"Exception in chunk synthesis at index {idx}: {e}")
+                        failed_chunks.add(idx)
+
+                    # Enqueue any ready chunks in order
+                    while next_index_to_play in results or next_index_to_play in failed_chunks:
+                        if next_index_to_play in results:
+                            audio_queue.put(results[next_index_to_play])
+                            del results[next_index_to_play]
+                        elif next_index_to_play in failed_chunks:
+                            logger.warning(f"Skipping failed chunk index {next_index_to_play}")
+                        next_index_to_play += 1
 
             unmute_microphone()
             update_tts_state("IDLE")
@@ -355,25 +376,23 @@ def synthesize_and_play(tts_stub):
             time.sleep(1)
             is_active.clear()  # Ensure it's set to False in case of exception
 
-def process_chunk(chunk, tts_stub, max_retries):
-    success = False
+
+def process_chunk(idx, chunk, tts_stub, max_retries):
     failure_count = 0
-    synthesis_timeout = 10  # Timeout in seconds for the synthesis call
-    chunk_timeout = 30  # Maximum time to spend on a single chunk
+    synthesis_timeout = 5  # Reduce timeout to fail faster
+    chunk_timeout = 15  # Reduce maximum time to spend on a single chunk
     chunk_start_time = time.time()
+    backoff_delay = 0.5  # Initial delay for exponential backoff
 
     # Count the number of words (tokens) in the chunk
     num_tokens = len(chunk.split())
 
-    while failure_count < max_retries:
-        if cancel_event.is_set():
-            logger.info("Cancelled during inference.")
-            break
+    while failure_count < max_retries and not cancel_event.is_set():
         if time.time() - chunk_start_time > chunk_timeout:
-            logger.error("Chunk processing time exceeded maximum duration. Skipping chunk.")
+            logger.error(f"Chunk processing time exceeded maximum duration for chunk index {idx}. Skipping chunk.")
             break
         try:
-            logger.info(f"Starting synthesis for a chunk of length {len(chunk)} characters. (Attempt {failure_count + 1})")
+            logger.info(f"Starting synthesis for chunk index {idx} with length {len(chunk)} characters. (Attempt {failure_count + 1})")
             req = riva_tts_pb2.SynthesizeSpeechRequest(
                 text=chunk,
                 language_code=config['language_code'],
@@ -389,39 +408,45 @@ def process_chunk(chunk, tts_stub, max_retries):
 
             # Calculate tokens per second
             tokens_per_second = num_tokens / synthesis_time if synthesis_time > 0 else 0
-            logger.info(f"Synthesis completed in {synthesis_time:.2f} seconds. Tokens per second: {tokens_per_second:.2f}")
+            logger.info(f"Synthesis for chunk index {idx} completed in {synthesis_time:.2f} seconds. Tokens per second: {tokens_per_second:.2f}")
 
             # Check if the response contains valid audio data
             if not resp.audio:
                 failure_count += 1
-                logger.warning(f"Synthesis attempt {failure_count} failed: No audio data received.")
+                logger.warning(f"Synthesis attempt {failure_count} for chunk index {idx} failed: No audio data received.")
                 continue
 
             # Additional checks to validate the audio data
             audio_data = resp.audio
             if len(audio_data) == 0:
                 failure_count += 1
-                logger.warning(f"Synthesis attempt {failure_count} failed: Empty audio data.")
+                logger.warning(f"Synthesis attempt {failure_count} for chunk index {idx} failed: Empty audio data.")
                 continue
 
-            # Put audio data into playback queue
-            audio_queue.put(audio_data)
+            logger.info(f"Synthesized chunk index {idx} successfully.")
+            return audio_data  # Return the audio data instead of queuing it
 
-            logger.info("Queued synthesized speech for a chunk.")
-            success = True
-            break
         except grpc.RpcError as e:
             failure_count += 1
-            logger.error(f"Synthesis failed on attempt {failure_count}: {e.code().name} - {e.details()}")
-            time.sleep(0.1)  # Short delay before retrying
+            logger.error(f"Synthesis failed on attempt {failure_count} for chunk index {idx}: {e.code().name} - {e.details()}")
+            # Exponential backoff with jitter
+            sleep_time = backoff_delay + random.uniform(0, 0.5)
+            logger.info(f"Retrying chunk index {idx} after {sleep_time:.2f} seconds...")
+            time.sleep(sleep_time)
+            backoff_delay *= 2  # Exponential increase
+            continue
         except Exception as e:
             failure_count += 1
-            logger.error(f"Unexpected error during synthesis attempt {failure_count}: {e}")
-            time.sleep(0.1)  # Short delay before retrying
+            logger.error(f"Unexpected error during synthesis attempt {failure_count} for chunk index {idx}: {e}")
+            # Exponential backoff with jitter
+            sleep_time = backoff_delay + random.uniform(0, 0.5)
+            logger.info(f"Retrying chunk index {idx} after {sleep_time:.2f} seconds...")
+            time.sleep(sleep_time)
+            backoff_delay *= 2  # Exponential increase
+            continue
 
-    if not success:
-        logger.error(f"Failed to synthesize chunk after {max_retries} attempts.")
-    return success
+    logger.error(f"Failed to synthesize chunk index {idx} after {max_retries} attempts.")
+    return None  # Return None to indicate failure
 
 def update_tts_state(new_state):
     global tts_state

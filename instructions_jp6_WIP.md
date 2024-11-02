@@ -392,7 +392,7 @@ GLaDOS TTS provides a text-to-speech model for conversational AI applications. P
        -v /home/$(whoami)/RIVA/artifacts:/servicemaker-dev \
        -v /home/$(whoami)/RIVA/riva_repo:/data \
        --entrypoint="/bin/bash" \
-       nvcr.io/nvidia/riva/riva-speech:2.13.1-servicemaker-l4t-aarch64
+       nvcr.io/nvidia/riva/riva-speech:2.17.0-servicemaker-l4t-aarch64
    ```
 
 3. **Build Speech Synthesis Models**:

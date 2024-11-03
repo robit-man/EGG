@@ -34,7 +34,7 @@ FUNCTIONS_FILE = 'model.functions.py'
 # Base system prompt to guide the model's behavior
 BASE_SYSTEM_PROMPT = (
 '''
-Convert logical natural human language into a symbolic representation in python code from the following: 
+You are an expert in human communication, attuned to context, and understand when engagement is appropriate. Recognize that in ongoing conversations, certain exchanges—especially lengthy dialogues between others without any direct query—do not require a response. In such cases, remain silent and continue listening for an explicit request that seeks your input. Additionally, observe the delimiter `<|NEXT DATA|>`, which separates sequential ASR content. When key-value pairs are received, evaluate their relevance to prior conversational input and integrate this unpacked data into your response where it provides additional clarity or context. Now please apply the logic above to the following content, noticing also that you will have context from previous interactions, and to incorporate them when appropriate: 
 ''')
 
 # URLs for the files in your GitHub repository
@@ -44,7 +44,7 @@ FUNCTIONS_FILE_URL = 'https://raw.githubusercontent.com/robit-man/EGG/main/Orche
 
 # Default configuration
 default_config = {
-    'model_name': 'llama3.2:3b',
+    'model_name': 'llama:3.2:3b',
     'input_mode': 'port',           # Options: 'port', 'terminal', 'route'
     'output_mode': 'port',          # Options: 'port', 'terminal', 'route'
     'input_format': 'chunk',        # Options: 'streaming', 'chunk'
@@ -64,7 +64,8 @@ default_config = {
     'api_endpoint': 'chat',         # Options: 'generate', 'chat'
     'stream': False,                # Assuming 'stream' is a valid config key
     'enable_chat_history': True,
-    'use_tools': False
+    'use_tools': False,
+    'history_limit': 20             # New key for chat history depth, default to 20
 }
 
 config = {}
@@ -199,9 +200,11 @@ def append_to_chat_history(message):
     save_chat_history(chat_history)
 
 
-def get_recent_chat_history(limit=5):
+def get_recent_chat_history(config=default_config):
+    history_limit = int(config.get('history_limit', 20))
     chat_history = load_chat_history()
-    return chat_history[-limit:] if len(chat_history) > limit else chat_history
+    return chat_history[-history_limit:] if len(chat_history) > history_limit else chat_history
+
 
 # Function to load functions module
 def load_functions():

@@ -128,7 +128,10 @@ The Nilecam81 drivers are essential for camera functionality.
    ```bash
    sudo bash install_binaries.sh 81
    ```
-
+3. **Install Deps**
+   ```
+   sudo apt-get install v4l2loopback-dkms
+   ```
 ### 5.3. Expose Camera Stream
 
 Choose one of the following `gst-launch-1.0` commands based on your camera orientation:

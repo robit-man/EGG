@@ -9,17 +9,18 @@
     "orchestrator_ports": "6000-6099",
     "route": "/llm",
     "script_uuid": "8f27f986-a213-4bfd-87c4-72dbffedf9e8",
-    "system_prompt": "\nYou receive both user inputs as well as a delimiter and returned content from tool calls, sometimes the tool call is either empty or returns an error, in these cases, ignore them! The following content is formatted in the above schema: \n",
+    "system_prompt": "You are an expert in human communication, attuned to context, and understand when engagement is appropriate. Recognize that in ongoing conversations, certain exchanges\u2014especially lengthy dialogues between others without any direct query\u2014do not require a response. In such cases, remain silent and continue listening for an explicit request that seeks your input. Additionally, observe the delimiter `<|NEXT DATA|>`, which separates sequential ASR content. When key-value pairs are received, evaluate their relevance to prior conversational input and integrate this unpacked data into your response where it provides additional clarity or context. Now please apply the logic above to the following content, noticing also that you will have context from previous interactions, and to incorporate them when appropriate:",
     "temperature": 0.7,
     "top_p": 0.9,
     "max_tokens": 150,
     "repeat_penalty": 1.0,
     "inference_timeout": 15,
-    "json_filtering": false,
+    "json_filtering": true,
     "api_endpoint": "chat",
     "stream": false,
     "enable_chat_history": true,
     "use_tools": false,
-    "port": "6200",
-    "data_port": "6011"
+    "history_limit": 20,
+    "port": "6204",
+    "data_port": "6018"
 }

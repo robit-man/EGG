@@ -5,12 +5,14 @@ import json
 import uuid
 import os
 import re
+import pickle
+from math import radians, sin, cos, sqrt, atan2
 import argparse
 import requests
 import traceback
 import sqlite3
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Configuration file name
 CONFIG_FILE = 'embed.cf'
@@ -393,14 +395,19 @@ def handle_command(command, client_socket):
     elif command.startswith('/exit'):
         send_exit(client_socket)
     elif command.startswith('/embed'):
-        perform_embedding(command, client_socket)  # New function for embedding
+        perform_embedding(command, client_socket)  # Function for embedding
     elif command.startswith('/extract'):
-        perform_extraction(command, client_socket)  # New function for extraction
+        perform_extraction(command, client_socket)  # Function for text-based extraction
+    elif command.startswith('/time'):
+        perform_extraction(command, client_socket)  # /time is also handled by perform_extraction for time-based extraction
+    elif command.startswith('/loc'):
+        perform_extraction(command, client_socket)  # /loc handled by perform_extraction for location-based retrieval
     elif command.startswith('/list_embeddings'):
         list_embeddings(client_socket)
     else:
         print(f"[Warning] Unknown command received: {command}")
         send_error_response(client_socket, f"Unknown command: {command}")
+
 
 
 # Send configuration info to the orchestrator over the existing socket
@@ -433,13 +440,13 @@ def list_embeddings(client_socket):
     try:
         conn = sqlite3.connect(config.get('database_path', 'embeddings.db'))
         cursor = conn.cursor()
-        cursor.execute('SELECT id, prompt, timestamp FROM embeddings')
+        cursor.execute('SELECT id, prompt, timestamp, latitude, longitude FROM embeddings')
         rows = cursor.fetchall()
         conn.close()
 
         response = "📦 Stored Embeddings:\n"
         for row in rows:
-            response += f"ID: {row[0]}, Prompt: {row[1]}, Timestamp: {row[2]}\n"
+            response += f"ID: {row[0]}, Prompt: {row[1]}, Timestamp: {row[2]}, Latitude: {row[3]}, Longitude: {row[4]}\n"
         response += 'EOF\n'
         client_socket.sendall(response.encode())
         print(f"[Info] Sent list of embeddings to {client_socket.getpeername()}")
@@ -448,29 +455,35 @@ def list_embeddings(client_socket):
         traceback.print_exc()
         send_error_response(client_socket, f"Error listing embeddings: {e}")
 
+
 # Initialize the SQLite database
 def initialize_db():
     db_path = config.get('database_path', 'embeddings.db')
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+    # Create the table if it doesn't exist
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS embeddings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             prompt TEXT,
-            embedding TEXT,
-            timestamp TEXT
+            embedding BLOB,
+            timestamp TEXT,
+            latitude REAL,
+            longitude REAL
         )
     ''')
     conn.commit()
     conn.close()
-    print(f"[Info] Initialized database at {db_path}")
+    print(f"[Info] Initialized database with updated schema at {db_path}")
+
+
+
 
 # Lock for controlling concurrency of embedding and retrieval requests
 embedding_lock = threading.Lock()
 
-# Function to perform embedding and retrieval using Ollama API
 def perform_embedding_and_retrieval(user_input):
-    with embedding_lock:  # Ensure only one embedding and retrieval happens at a time
+    with embedding_lock:
         model_name = config.get('model_name', 'nomic-embed-text')
         api_endpoint = config.get('api_endpoint', 'embeddings')
         inference_timeout = config.get('inference_timeout', 5)
@@ -509,20 +522,25 @@ def perform_embedding_and_retrieval(user_input):
 
                 # Send retrieved data downstream
                 if retrieved_data:
-                    retrieved_prompts = [item['prompt'] for item in retrieved_data]
-                    retrieved_scores = [item['similarity'] for item in retrieved_data]
                     retrieval_response = "🔍 Top Matches:\n"
-                    for prompt, score in zip(retrieved_prompts, retrieved_scores):
+                    for item in retrieved_data:
+                        prompt = item['prompt']
+                        score = item['similarity']
                         retrieval_response += f"Prompt: {prompt}, Similarity: {score:.4f}\n"
                 else:
                     retrieval_response = "No similar embeddings found."
 
                 send_response_to_all(retrieval_response)
 
-                # Embed the new input with timestamp and store it
+                # Get current location (latitude and longitude)
+                latitude, longitude = get_location()
+                latitude = float(latitude) if latitude is not None else None
+                longitude = float(longitude) if longitude is not None else None
+
+                # Store the embedding with timestamp and location
                 timestamp = datetime.utcnow().isoformat()
-                store_embedding(user_input, embedding, timestamp)
-                print(f"[Embedding] Stored new embedding with timestamp {timestamp}")
+                store_embedding(user_input, embedding, timestamp, latitude, longitude)
+                print(f"[Embedding] Stored new embedding with timestamp {timestamp} at location ({latitude}, {longitude})")
 
             else:
                 print(f"[Error] Ollama API responded with status code: {response.status_code}")
@@ -538,71 +556,180 @@ def perform_embedding_and_retrieval(user_input):
             traceback.print_exc()
             send_error_response_to_all(f"Error during embedding and retrieval: {e}")
 
+
+def haversine(lat1, lon1, lat2, lon2):
+    # Radius of the Earth in meters
+    R = 6371000
+    # Convert coordinates to radians
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    distance = R * c  # Distance in meters
+    return distance
+
+def get_location():
+    try:
+        response = requests.get("https://ipinfo.io/json", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            loc = data.get("loc", None)
+            if loc:
+                latitude, longitude = map(float, loc.split(","))
+                print(f"[Location] Retrieved location: ({latitude}, {longitude})")
+                return latitude, longitude
+            else:
+                print("[Error] Location not available in response.")
+        else:
+            print(f"[Error] Failed to retrieve location data. Status Code: {response.status_code}")
+    except Exception as e:
+        print(f"[Error] Exception while fetching location: {e}")
+    # Return None values if location cannot be retrieved
+    print("[Location] Returning None for latitude and longitude.")
+    return None, None
+
 def perform_embedding(command, client_socket):
-    # Parse the input text to embed (assumes command is "/embed [text]")
-    _, text_to_embed = command.split(' ', 1)
-    print(f"[Embedding] Processing embedding for text: {text_to_embed}")
+    try:
+        # Parse the input text to embed (assumes command is "/embed [text]")
+        parts = command.split(' ', 1)
+        if len(parts) < 2:
+            error_msg = "Error: No text provided for embedding."
+            print(f"[Error] {error_msg}")
+            client_socket.sendall(f"{error_msg}\n".encode())
+            return
+        _, text_to_embed = parts
+        print(f"[Embedding] Processing embedding for text: {text_to_embed}")
 
-    # Generate embedding using perform_embedding_and_retrieval
-    embedding_result = generate_embedding_only(text_to_embed)  # New helper function for embedding only
+        # Generate embedding using generate_embedding_only
+        embedding_result = generate_embedding_only(text_to_embed)
 
-    if embedding_result:
-        # Store the embedding
-        timestamp = datetime.utcnow().isoformat()
-        store_embedding(text_to_embed, embedding_result, timestamp)
-        client_socket.sendall(f"Embedding stored for: {text_to_embed}\n".encode())
-    else:
-        client_socket.sendall("Error: Failed to generate embedding.\n".encode())
+        if embedding_result:
+            # Get current location (latitude and longitude)
+            latitude, longitude = get_location()
+            # Ensure latitude and longitude are floats or None
+            latitude = float(latitude) if latitude is not None else None
+            longitude = float(longitude) if longitude is not None else None
+
+            # Store the embedding with location data
+            timestamp = datetime.utcnow().isoformat()
+            store_embedding(text_to_embed, embedding_result, timestamp, latitude, longitude)
+            success_message = f"Embedding stored for: {text_to_embed} at location ({latitude}, {longitude})\n"
+            client_socket.sendall(success_message.encode())
+            print(f"[Success] {success_message.strip()}")
+        else:
+            error_msg = "Error: Failed to generate embedding."
+            print(f"[Error] {error_msg}")
+            client_socket.sendall(f"{error_msg}\n".encode())
+    except Exception as e:
+        error_msg = f"Error during embedding: {e}"
+        print(f"[Error] {error_msg}")
+        traceback.print_exc()
+        client_socket.sendall(f"{error_msg}\n".encode())
+
 
 def perform_extraction(command, client_socket):
-    # Default values
-    max_results = 5
-    similarity_threshold = None
-    criteria = ""
-
-    # Parse command for integer (max_results), float (similarity threshold), and criteria (prompt text)
-    matches = re.findall(r"([0-9]*\.?[0-9]+)", command)
-    for match in matches:
+    # Check for /time command format
+    if command.startswith("/time"):
+        # Parse timestamp and time range from command
+        _, timestamp_str, time_range_str = command.split(' ', 2)
+        
         try:
-            num = float(match)
-            if num.is_integer():
-                max_results = int(num)  # Interpret as an integer for max results
+            # Convert the timestamp string to a datetime object
+            reference_time = datetime.fromisoformat(timestamp_str)
+            time_range_minutes = int(time_range_str)
+            print(f"[Time Extraction] Retrieving entries within {time_range_minutes} minutes of {reference_time}.")
+            
+            # Retrieve embeddings within the time range
+            retrieved_data = retrieve_embeddings_by_time(reference_time, time_range_minutes)
+            
+            # Format results
+            response = "🔍 Time-Based Retrieval Results:\n"
+            if retrieved_data:
+                for item in retrieved_data:
+                    response += (f"Prompt: {item['prompt']}, "
+                                 f"Timestamp: {item['timestamp']}, "
+                                 f"Latitude: {item['latitude']}, "
+                                 f"Longitude: {item['longitude']}\n")
             else:
-                similarity_threshold = num  # Interpret as a float for similarity threshold
-        except ValueError:
-            pass
+                response += "No embeddings found within the specified time range.\n"
+            
+            # Send the response to the orchestrator
+            send_response_to_all(response)
+            print(f"[Debug] Sent time-based retrieval response to orchestrator: {response}")
+            return
+        except (ValueError, TypeError) as e:
+            print(f"[Error] Invalid timestamp or range: {e}")
+            send_error_response_to_all("Error: Invalid timestamp format or range.")
+            return
 
-    # Remove extracted numbers to isolate the criteria text
-    criteria = re.sub(r"([0-9]*\.?[0-9]+)", "", command).replace("/extract", "").strip()
+    # Check for /loc command format
+    if command.startswith("/loc"):
+        try:
+            # Parse latitude, longitude, and distance from the command
+            _, loc_str, distance_str = command.split(' ', 2)
+            lat, lon = map(float, loc_str.split(','))
+            max_distance_km = float(distance_str)
+            print(f"[Location Extraction] Retrieving entries within {max_distance_km} km of ({lat}, {lon}).")
 
-    print(f"[Extraction] Criteria: {criteria}, Max Results: {max_results}, Similarity Threshold: {similarity_threshold}")
+            # Retrieve embeddings within the specified distance
+            retrieved_data = retrieve_embeddings_by_location(lat, lon, max_distance_km)
 
-    # Generate embedding for the criteria to use in similarity search
-    query_embedding = generate_embedding_only(criteria)
-    
-    if query_embedding is None:
-        print("[Error] Failed to generate embedding for extraction criteria.")
-        send_error_response_to_all("Error: Could not generate embedding for extraction.")
-        return
+            # Format results
+            response = "🔍 Location-Based Retrieval Results:\n"
+            if retrieved_data:
+                for item in retrieved_data:
+                    response += (f"Prompt: {item['prompt']}, "
+                                 f"Distance: {item['distance']:.2f} km, "
+                                 f"Timestamp: {item['timestamp']}, "
+                                 f"Latitude: {item['latitude']}, "
+                                 f"Longitude: {item['longitude']}\n")
+            else:
+                response += "No embeddings found within the specified distance.\n"
 
-    # Retrieve similar embeddings
-    retrieved_data = retrieve_similar_embeddings(query_embedding, top_k=max_results)
+            # Send the response to the orchestrator
+            send_response_to_all(response)
+            print(f"[Debug] Sent location-based retrieval response to orchestrator: {response}")
+            return
+        except (ValueError, TypeError) as e:
+            print(f"[Error] Invalid location or distance: {e}")
+            send_error_response_to_all("Error: Invalid location format or distance.")
+            return
 
-    # Apply similarity threshold if provided
-    if similarity_threshold is not None:
-        retrieved_data = [item for item in retrieved_data if item['similarity'] >= similarity_threshold]
-
-    # Format retrieval results for the orchestrator
-    response = "🔍 Retrieval Results:\n"
-    if retrieved_data:
-        for item in retrieved_data:
-            response += f"Prompt: {item['prompt']}, Similarity: {item['similarity']:.4f}\n"
+    # Default /extract behavior (text-based similarity)
     else:
-        response += "No similar embeddings found above the threshold.\n"
+        _, criteria = command.split(' ', 1)
+        print(f"[Extraction] Retrieving similar entries based on criteria: {criteria}")
 
-    # Send the response to the orchestrator
-    send_response_to_all(response)
-    print(f"[Debug] Sent retrieval response to orchestrator: {response}")
+        # Generate embedding for the criteria to use in similarity search
+        query_embedding = generate_embedding_only(criteria)
+        
+        if query_embedding is None:
+            print("[Error] Failed to generate embedding for extraction criteria.")
+            send_error_response_to_all("Error: Could not generate embedding for extraction.")
+            return
+
+        # Perform retrieval based on the generated embedding
+        retrieved_data = retrieve_similar_embeddings(query_embedding, top_k=5)
+
+        # Format retrieval results for the orchestrator
+        response = "🔍 Retrieval Results:\n"
+        if retrieved_data:
+            for item in retrieved_data:
+                response += (f"Prompt: {item['prompt']}, "
+                             f"Similarity: {item['similarity']:.4f}, "
+                             f"Timestamp: {item['timestamp']}, "
+                             f"Latitude: {item['latitude']}, "
+                             f"Longitude: {item['longitude']}\n")
+        else:
+            response += "No similar embeddings found above the threshold.\n"
+
+        # Send the response to the orchestrator
+        send_response_to_all(response)
+        print(f"[Debug] Sent retrieval response to orchestrator: {response}")
+
 
 
 def generate_embedding_only(user_input):
@@ -656,35 +783,133 @@ def generate_embedding_only(user_input):
             traceback.print_exc()
             return None
 
-# Function to store embedding in the database
-def store_embedding(prompt, embedding, timestamp):
+def retrieve_embeddings_by_time(reference_time, time_range_minutes=10):
+    try:
+        # Define the time range
+        time_lower_bound = reference_time - timedelta(minutes=time_range_minutes)
+        time_upper_bound = reference_time + timedelta(minutes=time_range_minutes)
+        
+        print(f"[Debug] Searching for embeddings between {time_lower_bound} and {time_upper_bound}")
+        
+        # Connect to the database and query within the time range
+        conn = sqlite3.connect(config.get('database_path', 'embeddings.db'))
+        cursor = conn.cursor()
+        # Use BETWEEN to retrieve entries within the time range
+        cursor.execute(
+            'SELECT prompt, embedding, timestamp, latitude, longitude FROM embeddings WHERE timestamp BETWEEN ? AND ?',
+            (time_lower_bound.isoformat(), time_upper_bound.isoformat())
+        )
+        results = cursor.fetchall()
+        conn.close()
+
+        # Format results for retrieval
+        if results:
+            formatted_results = [
+                {
+                    'prompt': prompt,
+                    'embedding': pickle.loads(embedding_bytes),
+                    'timestamp': timestamp,
+                    'latitude': latitude,
+                    'longitude': longitude
+                }
+                for prompt, embedding_bytes, timestamp, latitude, longitude in results
+            ]
+            print(f"[Time Retrieval] Found {len(formatted_results)} embeddings within time range.")
+            return formatted_results
+        else:
+            print("[Debug] No embeddings found within the specified time range.")
+            return []
+    except Exception as e:
+        print(f"[Error] Failed to retrieve embeddings by time: {e}")
+        traceback.print_exc()
+        return []
+
+
+
+def retrieve_embeddings_by_location(query_lat, query_lon, max_distance_km):
     try:
         conn = sqlite3.connect(config.get('database_path', 'embeddings.db'))
         cursor = conn.cursor()
-        embedding_str = json.dumps(embedding)  # Store embedding as JSON string
-        cursor.execute('INSERT INTO embeddings (prompt, embedding, timestamp) VALUES (?, ?, ?)', 
-                       (prompt, embedding_str, timestamp))
+        cursor.execute('SELECT prompt, embedding, timestamp, latitude, longitude FROM embeddings')
+        results = cursor.fetchall()
+        conn.close()
+
+        nearby_results = []
+        for prompt, embedding_bytes, timestamp, lat, lon in results:
+            if lat is not None and lon is not None:
+                distance_meters = haversine(query_lat, query_lon, lat, lon)
+                distance_km = distance_meters / 1000  # Convert meters to kilometers
+                if distance_km <= max_distance_km:
+                    similarity_score = max(0, 1 - distance_km / max_distance_km)  # Normalize similarity
+                    try:
+                        embedding = pickle.loads(embedding_bytes)
+                    except (pickle.UnpicklingError, EOFError) as e:
+                        print(f"[Error] Failed to unpickle embedding for prompt: {prompt}: {e}")
+                        continue
+                    nearby_results.append({
+                        'prompt': prompt,
+                        'embedding': embedding,
+                        'timestamp': timestamp,
+                        'distance': distance_km,
+                        'similarity': similarity_score,
+                        'latitude': lat,
+                        'longitude': lon
+                    })
+
+        # Sort by similarity (closest first)
+        nearby_results.sort(key=lambda x: x['similarity'], reverse=True)
+        print(f"[Location Retrieval] Found {len(nearby_results)} embeddings within {max_distance_km} km.")
+        return nearby_results
+    except Exception as e:
+        print(f"[Error] Failed to retrieve embeddings by location: {e}")
+        traceback.print_exc()
+        return []
+
+
+
+# Function to store embedding in the database
+def store_embedding(prompt, embedding, timestamp, latitude=None, longitude=None):
+    try:
+        # Convert embedding to bytes using pickle
+        embedding_bytes = pickle.dumps(embedding)
+        print(f"[Debug] Serialized embedding size: {len(embedding_bytes)} bytes")
+        conn = sqlite3.connect(config.get('database_path', 'embeddings.db'))
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO embeddings (prompt, embedding, timestamp, latitude, longitude) VALUES (?, ?, ?, ?, ?)',
+            (prompt, embedding_bytes, timestamp, latitude, longitude)
+        )
         conn.commit()
         conn.close()
-        print(f"[Database] Stored embedding for prompt: {prompt}")
+        print(f"[Database] Stored embedding for prompt: {prompt} at location ({latitude}, {longitude})")
     except Exception as e:
         print(f"[Error] Failed to store embedding: {e}")
         traceback.print_exc()
 
-# Function to retrieve similar embeddings based on cosine similarity
+
 def retrieve_similar_embeddings(query_embedding, top_k=5):
     try:
         conn = sqlite3.connect(config.get('database_path', 'embeddings.db'))
         cursor = conn.cursor()
-        cursor.execute('SELECT prompt, embedding FROM embeddings')
+        cursor.execute('SELECT prompt, embedding, timestamp, latitude, longitude FROM embeddings')
         results = cursor.fetchall()
         conn.close()
 
         similarities = []
-        for stored_prompt, stored_embedding_str in results:
-            stored_embedding = json.loads(stored_embedding_str)
+        for stored_prompt, stored_embedding_bytes, timestamp, latitude, longitude in results:
+            try:
+                stored_embedding = pickle.loads(stored_embedding_bytes)
+            except (pickle.UnpicklingError, EOFError) as e:
+                print(f"[Error] Failed to unpickle embedding for prompt: {stored_prompt}: {e}")
+                continue
             similarity = cosine_similarity(query_embedding, stored_embedding)
-            similarities.append({'prompt': stored_prompt, 'similarity': similarity})
+            similarities.append({
+                'prompt': stored_prompt,
+                'similarity': similarity,
+                'timestamp': timestamp,
+                'latitude': latitude,
+                'longitude': longitude
+            })
 
         # Sort by similarity descending
         similarities.sort(key=lambda x: x['similarity'], reverse=True)
@@ -695,6 +920,8 @@ def retrieve_similar_embeddings(query_embedding, top_k=5):
         print(f"[Error] Failed to retrieve similar embeddings: {e}")
         traceback.print_exc()
         return []
+
+
 
 # Cosine similarity function
 def cosine_similarity(vec1, vec2):

@@ -24,7 +24,7 @@ default_config = {
     'output_format': 'chunk',           # Options: 'streaming', 'chunk'
     'port_range': '6200-6300',
     'orchestrator_host': 'localhost',
-    'orchestrator_ports': '6000-6010',  # Updated to handle multiple ports
+    'orchestrator_ports': '6000-6099',  # Updated to handle multiple ports
     'route': '/embedding',              # Updated route
     'script_uuid': '',                  # Initialize as empty; will be set in read_config()
     'system_prompt': "",                 # Not needed for embeddings
@@ -278,7 +278,7 @@ def start_server():
 
     if not registration_successful and config['input_mode'] == 'terminal':
         # Fallback to terminal mode if orchestrator registration fails
-        terminal_input()
+        #terminal_input()
         return
     elif not registration_successful:
         # Exit if not in terminal mode and registration fails
@@ -387,16 +387,21 @@ def handle_client_socket(client_socket):
 def handle_command(command, client_socket):
     addr = client_socket.getpeername()
     print(f"[Command Received] {command} from {addr}")
-    
+
     if command.startswith('/info'):
         send_info(client_socket)
     elif command.startswith('/exit'):
         send_exit(client_socket)
+    elif command.startswith('/embed'):
+        perform_embedding(command, client_socket)  # New function for embedding
+    elif command.startswith('/extract'):
+        perform_extraction(command, client_socket)  # New function for extraction
     elif command.startswith('/list_embeddings'):
         list_embeddings(client_socket)
     else:
         print(f"[Warning] Unknown command received: {command}")
         send_error_response(client_socket, f"Unknown command: {command}")
+
 
 # Send configuration info to the orchestrator over the existing socket
 def send_info(client_socket):
@@ -532,6 +537,124 @@ def perform_embedding_and_retrieval(user_input):
             print(f"[Error] Exception during embedding and retrieval: {e}")
             traceback.print_exc()
             send_error_response_to_all(f"Error during embedding and retrieval: {e}")
+
+def perform_embedding(command, client_socket):
+    # Parse the input text to embed (assumes command is "/embed [text]")
+    _, text_to_embed = command.split(' ', 1)
+    print(f"[Embedding] Processing embedding for text: {text_to_embed}")
+
+    # Generate embedding using perform_embedding_and_retrieval
+    embedding_result = generate_embedding_only(text_to_embed)  # New helper function for embedding only
+
+    if embedding_result:
+        # Store the embedding
+        timestamp = datetime.utcnow().isoformat()
+        store_embedding(text_to_embed, embedding_result, timestamp)
+        client_socket.sendall(f"Embedding stored for: {text_to_embed}\n".encode())
+    else:
+        client_socket.sendall("Error: Failed to generate embedding.\n".encode())
+
+def perform_extraction(command, client_socket):
+    # Default values
+    max_results = 5
+    similarity_threshold = None
+    criteria = ""
+
+    # Parse command for integer (max_results), float (similarity threshold), and criteria (prompt text)
+    matches = re.findall(r"([0-9]*\.?[0-9]+)", command)
+    for match in matches:
+        try:
+            num = float(match)
+            if num.is_integer():
+                max_results = int(num)  # Interpret as an integer for max results
+            else:
+                similarity_threshold = num  # Interpret as a float for similarity threshold
+        except ValueError:
+            pass
+
+    # Remove extracted numbers to isolate the criteria text
+    criteria = re.sub(r"([0-9]*\.?[0-9]+)", "", command).replace("/extract", "").strip()
+
+    print(f"[Extraction] Criteria: {criteria}, Max Results: {max_results}, Similarity Threshold: {similarity_threshold}")
+
+    # Generate embedding for the criteria to use in similarity search
+    query_embedding = generate_embedding_only(criteria)
+    
+    if query_embedding is None:
+        print("[Error] Failed to generate embedding for extraction criteria.")
+        send_error_response_to_all("Error: Could not generate embedding for extraction.")
+        return
+
+    # Retrieve similar embeddings
+    retrieved_data = retrieve_similar_embeddings(query_embedding, top_k=max_results)
+
+    # Apply similarity threshold if provided
+    if similarity_threshold is not None:
+        retrieved_data = [item for item in retrieved_data if item['similarity'] >= similarity_threshold]
+
+    # Format retrieval results for the orchestrator
+    response = "🔍 Retrieval Results:\n"
+    if retrieved_data:
+        for item in retrieved_data:
+            response += f"Prompt: {item['prompt']}, Similarity: {item['similarity']:.4f}\n"
+    else:
+        response += "No similar embeddings found above the threshold.\n"
+
+    # Send the response to the orchestrator
+    send_response_to_all(response)
+    print(f"[Debug] Sent retrieval response to orchestrator: {response}")
+
+
+def generate_embedding_only(user_input):
+    with embedding_lock:  # Ensure only one embedding operation happens at a time
+        model_name = config.get('model_name', 'nomic-embed-text')
+        api_endpoint = config.get('api_endpoint', 'embeddings')
+        inference_timeout = config.get('inference_timeout', 5)
+
+        # Build the payload for embedding
+        payload = {
+            "model": model_name,
+            "prompt": user_input
+        }
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        # Check if Ollama API is up before making the request
+        if not check_ollama_api():
+            print("Error: Ollama API is not available.")
+            return None
+
+        try:
+            api_url = f"{OLLAMA_URL}{api_endpoint}"
+            print(f"[Embedding] Sending request to Ollama API at {api_url} with payload: {json.dumps(payload)}")
+            response = requests.post(api_url, json=payload, headers=headers, timeout=inference_timeout)
+            print(f"[Ollama API Response Status] {response.status_code}")
+            
+            if response.status_code == 200:
+                response_json = response.json()
+                embedding = response_json.get("embedding", [])
+                
+                if not embedding:
+                    print("Error: Empty embedding received from model.")
+                    return None
+
+                return embedding  # Return the generated embedding
+
+            else:
+                print(f"[Error] Ollama API responded with status code: {response.status_code}")
+                return None
+        except requests.exceptions.Timeout:
+            print("[Error] Request to Ollama API timed out.")
+            return None
+        except requests.exceptions.ConnectionError:
+            print("[Error] Connection error occurred while contacting Ollama API.")
+            return None
+        except Exception as e:
+            print(f"[Error] Exception during embedding generation: {e}")
+            traceback.print_exc()
+            return None
 
 # Function to store embedding in the database
 def store_embedding(prompt, embedding, timestamp):

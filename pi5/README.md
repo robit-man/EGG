@@ -3,10 +3,15 @@
 ## Installation and Runtime
 
 Purchase the following list of hardware components:
+
 [Raspberry Pi 5 8GB](https://www.sparkfun.com/products/23551) $80
+
 [Pi Active Cooling](https://www.sparkfun.com/products/23585) $5
+
 [Pi Battery UPS](https://www.amazon.com/gp/product/B0D39VDMDP) $33
+
 [2x 21700 Batteries](https://www.amazon.com/dp/B0CJ4J6B8Z) $20
+
 [Mini Bluetooth Speaker / Mic](https://www.amazon.com/dp/B0BPNYY61M) $13
 
 ### Total Cost: $151

@@ -1,4 +1,4 @@
-### ASR > Ollama > TTS Pipeline for Pi5
+# ASR > Ollama > TTS Pipeline for Pi5
 
 ## Installation and Runtime
 
@@ -9,7 +9,7 @@ Purchase the following list of hardware components:
 [2x 21700 Batteries](https://www.amazon.com/dp/B0CJ4J6B8Z) $20
 [Mini Bluetooth Speaker / Mic](https://www.amazon.com/dp/B0BPNYY61M) $13
 
-# Total Cost: $151
+### Total Cost: $151
 
 
 Install [Ollama](https://ollama.com/)

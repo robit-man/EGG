@@ -1,7 +1,15 @@
 ### ASR > Ollama > TTS Pipeline for Pi5
-Install Ollama
+Install [Ollama](https://ollama.com/)
 ```
 curl -fsSL https://ollama.com/install.sh | sh
+```
+Pull llama3.2:1b
+```
+ollama pull llama3.2:1b
+```
+Install [Flite](http://www.festvox.org/flite/) TTS
+```
+sudo apt install flite
 ```
 Then Get the feedback.py file
 ```

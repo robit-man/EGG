@@ -20,6 +20,7 @@ VENV_DIR = "voice_venv"
 API_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "llama3.2:1b"
 CONFIG_FILE = "config.json"
+CHAT_HISTORY_FILE = "chat_history.json"  # Path to chat history file
 DEFAULT_CONFIG = {
     "system_prompt": "You are a helpful assistant.",
     "ollama_chat_history": True,
@@ -175,6 +176,34 @@ class TTSHandler:
         self.thread.join()
         logging.info("TTSHandler stopped.")
 
+# ======================= Chat History Management ==========================
+def load_chat_history(config):
+    """Load chat history from CHAT_HISTORY_FILE if enabled."""
+    if config.get("ollama_chat_history", False):
+        if os.path.exists(CHAT_HISTORY_FILE):
+            try:
+                with open(CHAT_HISTORY_FILE, 'r') as f:
+                    chat_history = json.load(f)
+                logging.info("Chat history loaded successfully.")
+                return chat_history
+            except (json.JSONDecodeError, IOError) as e:
+                logging.error(f"Error loading chat history: {e}. Starting with empty history.")
+                return []
+        else:
+            logging.info("Chat history file not found. Starting with empty history.")
+            return []
+    else:
+        return []
+
+def save_chat_history(chat_history):
+    """Save chat history to CHAT_HISTORY_FILE."""
+    try:
+        with open(CHAT_HISTORY_FILE, 'w') as f:
+            json.dump(chat_history, f, indent=4)
+        logging.info("Chat history saved successfully.")
+    except IOError as e:
+        logging.error(f"Failed to save chat history: {e}")
+
 # ======================= Speech Recognition Thread ======================
 def speech_recognition_thread(recognizer, mic, text_queue, stop_event):
     import speech_recognition as sr  # Import here after activating venv
@@ -196,16 +225,13 @@ def speech_recognition_thread(recognizer, mic, text_queue, stop_event):
                 continue  # Could not understand audio, continue listening
 
 # ======================= Ollama API Streaming ============================
-def send_to_ollama_api_stream(text, response_queue, stop_event, config):
+def send_to_ollama_api_stream(text, response_queue, stop_event, config, chat_history):
     headers = {"Content-Type": "application/json"}
     messages = []
     if config["ollama_chat_history"]:
-        # Here you can implement chat history by loading previous messages
-        # For simplicity, only system and user messages are included
-        messages = [
-            {"role": "system", "content": config["system_prompt"]},
-            {"role": "user", "content": text}
-        ]
+        messages = chat_history.copy()
+        # Append the new user message
+        messages.append({"role": "user", "content": text})
     else:
         messages = [
             {"role": "system", "content": config["system_prompt"]},
@@ -242,16 +268,18 @@ def send_to_ollama_api_stream(text, response_queue, stop_event, config):
 
 # ======================= Curses Menu System ==============================
 class Menu:
-    def __init__(self, stdscr, config, tts_handler):
+    def __init__(self, stdscr, config, tts_handler, chat_history):
         self.stdscr = stdscr
         self.config = config
         self.tts_handler = tts_handler
+        self.chat_history = chat_history
         self.menu_items = [
             "Set System Prompt",
             "Toggle Ollama Chat History",
             "Set Temperature",
             "Toggle Text-to-Speech",
             "Set TTS Voice",
+            "Clear Chat History",      # New menu item
             "Back to Main"
         ]
         self.current_selection = 0
@@ -297,6 +325,8 @@ class Menu:
                     self.toggle_tts()
                 elif selected_item == "Set TTS Voice":
                     self.set_tts_voice()
+                elif selected_item == "Clear Chat History":
+                    self.clear_chat_history()
                 elif selected_item == "Back to Main":
                     break
 
@@ -371,6 +401,25 @@ class Menu:
         else:
             self.show_message("Invalid voice selected.")
 
+    def clear_chat_history(self):
+        if self.config.get("ollama_chat_history", False):
+            confirm = self.get_input("Are you sure you want to clear chat history? (y/n):", "n")
+            if confirm.lower() == 'y':
+                try:
+                    with open(CHAT_HISTORY_FILE, 'w') as f:
+                        json.dump([], f, indent=4)
+                    self.chat_history.clear()
+                    self.show_message("Chat history cleared successfully.")
+                    if self.tts_handler and self.config.get("tts_enabled", False):
+                        self.tts_handler.speak("Chat history cleared successfully.")
+                except IOError as e:
+                    logging.error(f"Failed to clear chat history: {e}")
+                    self.show_message(f"Failed to clear chat history: {e}")
+            else:
+                self.show_message("Chat history not cleared.")
+        else:
+            self.show_message("Chat history is disabled.")
+
     def get_available_flite_voices(self):
         """Retrieve available flite voices."""
         try:
@@ -421,6 +470,9 @@ def main(stdscr):
 
     # Load or create configuration
     config = load_config()
+
+    # Load chat history
+    chat_history = load_chat_history(config)
 
     # Set up virtual environment and dependencies
     create_venv()
@@ -494,10 +546,12 @@ def main(stdscr):
                     break
                 elif key in [ord('m'), ord('M')]:
                     # Open Menu
-                    menu = Menu(stdscr, config, tts_handler)
+                    menu = Menu(stdscr, config, tts_handler, chat_history)
                     menu.run()
                     # Reload config in case it was changed
                     config = load_config()
+                    # Reload chat history in case it was cleared
+                    chat_history = load_chat_history(config)
                     # Handle TTS Handler based on updated config
                     if config.get("tts_enabled", False) and not tts_handler:
                         try:
@@ -524,7 +578,7 @@ def main(stdscr):
                         api_thread.join()
                         stop_event.clear()
                     ollama_response = ""  # Reset the Ollama response buffer
-                    api_thread = threading.Thread(target=send_to_ollama_api_stream, args=(text, response_queue, stop_event, config))
+                    api_thread = threading.Thread(target=send_to_ollama_api_stream, args=(text, response_queue, stop_event, config, chat_history))
                     api_thread.daemon = True
                     api_thread.start()
             except Empty:
@@ -542,6 +596,10 @@ def main(stdscr):
                         # Pass the complete sentence to flite
                         if config.get("tts_enabled", False) and tts_handler:
                             tts_handler.speak(complete_sentence)
+                        # Append to chat history
+                        if config.get("ollama_chat_history", False):
+                            chat_history.append({"role": "assistant", "content": complete_sentence})
+                            save_chat_history(chat_history)
                         ollama_response = ""  # Reset for the next sentence
             except Empty:
                 pass

@@ -6,6 +6,8 @@ Purchase the following list of hardware components:
 
 [Raspberry Pi 5 8GB](https://www.sparkfun.com/products/23551) $80
 
+[256Gb Micro SD Memory Card](https://www.amazon.com/SanDisk-Extreme-microSDXC-Memory-Adapter/dp/B09X7C2GBC) $25
+
 [Pi Active Cooling](https://www.sparkfun.com/products/23585) $5
 
 [Pi Battery UPS](https://www.amazon.com/gp/product/B0D39VDMDP) $33
@@ -14,7 +16,7 @@ Purchase the following list of hardware components:
 
 [Mini Bluetooth Speaker / Mic](https://www.amazon.com/dp/B0BPNYY61M) $13
 
-### Total Cost: $151
+### Total Cost: $176
 
 
 Install [Ollama](https://ollama.com/)

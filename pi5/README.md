@@ -42,6 +42,40 @@ mkdir -p ~/.config/autostart && echo -e "[Desktop Entry]\nType=Application\nName
 
 ## Debugging
 
+You will likely run into undercurrent when powering off of battery, therefor we must add the following to cpu_freq settings for throttling power consumption during inference
+
+First open the settings to edit
+```
+sudo nano /etc/init.d/cpufreq_settings.sh
+```
+
+Append the file with the following content
+```
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          cpufreq_settings
+# Required-Start:    $all
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Set CPU frequency limits
+### END INIT INFO
+
+echo "ondemand" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+echo 1800000 | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq
+echo 800000 | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq
+```
+
+Make the script executable
+```
+sudo chmod +x /etc/init.d/cpufreq_settings.sh
+```
+
+Register the script to run at boot
+```
+sudo update-rc.d cpufreq_settings.sh defaults
+```
+
 If your Bluetooth speaker connects but fails to act as a sound device, here are some steps to troubleshoot:
 
 1. **Install Bluetooth Utilities:** Ensure you have the necessary Bluetooth and audio packages installed. Run:

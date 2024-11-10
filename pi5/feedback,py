@@ -687,7 +687,10 @@ def main(stdscr):
     MAX_CONVERSATION_LINES = 100  # Adjust as needed
 
     # Define a regex pattern to detect sentence endings
-    sentence_end_pattern = re.compile(r'.*[.!?]$')
+    sentence_end_pattern = re.compile(r'([.!?])')  # Matches ., !, or ?
+
+    # Initialize TTS buffer for sentence chunking
+    tts_buffer = ""
 
     try:
         while True:
@@ -779,6 +782,26 @@ def main(stdscr):
                         # Append token to the assistant's last message
                         if 'assistant_entry_index' in locals():
                             conversation_log[assistant_entry_index]['content'] += token
+
+                        # *** Begin Sentence Chunking and TTS Playback ***
+                        # Append token to tts_buffer
+                        tts_buffer += token
+                        # Check for sentence-ending punctuation
+                        sentences = []
+                        while True:
+                            match = sentence_end_pattern.search(tts_buffer)
+                            if match:
+                                end = match.end()
+                                sentence = tts_buffer[:end]
+                                sentences.append(sentence.strip())
+                                tts_buffer = tts_buffer[end:].strip()
+                            else:
+                                break
+                        # Send complete sentences to TTSHandler
+                        for sentence in sentences:
+                            if sentence:
+                                tts_handler.speak(sentence)
+                        # *** End Sentence Chunking and TTS Playback ***
             except Empty:
                 pass
 

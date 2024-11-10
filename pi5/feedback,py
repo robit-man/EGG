@@ -762,17 +762,18 @@ def main(stdscr):
                     token = response_queue.get_nowait()
                     if token is None:
                         # API response is complete
-                        if ollama_response.strip():
-                            complete_response = ollama_response.strip()
-                            # Pass the complete response to flite
-                            if config.get("tts_enabled", False) and tts_handler:
-                                tts_handler.speak(complete_response)
-                            # Append assistant's response to chat history
-                            chat_history = append_to_chat_history(chat_history, "assistant", complete_response, config)
-                            # Add separator line to conversation_log
-                            conversation_log.append({"role": "separator", "content": "----- Generated"})
-                            # Reset variables
-                            ollama_response = ""
+                        # *** Remove the complete_response TTS trigger ***
+                        # if ollama_response.strip():
+                        #     complete_response = ollama_response.strip()
+                        #     # Pass the complete response to flite
+                        #     if config.get("tts_enabled", False) and tts_handler:
+                        #         tts_handler.speak(complete_response)
+                        #     # Append assistant's response to chat history
+                        #     chat_history = append_to_chat_history(chat_history, "assistant", complete_response, config)
+                        #     # Add separator line to conversation_log
+                        #     conversation_log.append({"role": "separator", "content": "----- Generated"})
+                        #     # Reset variables
+                        #     ollama_response = ""
                         break
                     elif token.startswith("Failed to send to Ollama:"):
                         conversation_log.append({"role": "error", "content": token})

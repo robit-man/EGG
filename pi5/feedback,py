@@ -14,13 +14,18 @@ from queue import Queue, Empty
 import logging
 import time
 import re
+from datetime import datetime, timedelta
+import zipfile
+import shutil
 
 # ======================= Configuration Constants =======================
 VENV_DIR = "voice_venv"
-API_URL = "http://localhost:11434/api/chat"  # Ollama API endpoint
+API_URL = "http://127.0.0.1:11434/api/chat"  # Using '127.0.0.1' for offline use
 MODEL_NAME = "llama3.2:1b"  # Replace with your model name
 CONFIG_FILE = "config.json"
 CHAT_HISTORY_FILE = "chat_history.json"  # Path to chat history file
+VOSK_MODEL_PATH = "models/vosk-model-small-en-us-0.15"  # Path to Vosk model
+VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"  # URL to download the Vosk model
 DEFAULT_CONFIG = {
     "system_prompt": "You are a helpful assistant.",
     "ollama_chat_history": True,
@@ -122,6 +127,7 @@ def install_dependencies():
     required_packages = [
         "SpeechRecognition",
         "pyaudio",
+        "vosk",
         "requests",
         "numpy",
         "transformers==4.33.0",  # Specific version to prevent multiple downloads
@@ -141,10 +147,58 @@ def install_dependencies():
 
 def activate_venv():
     """Activate virtual environment by updating sys.path."""
-    venv_site_packages = Path(VENV_DIR) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    if os.name == 'nt':
+        venv_site_packages = Path(VENV_DIR) / "Lib" / "site-packages"
+    else:
+        venv_site_packages = Path(VENV_DIR) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     sys.path.insert(0, str(venv_site_packages))
     logging.info("Virtual environment activated.")
     print("Virtual environment activated.")
+
+# ======================= Vosk Model Downloader ============================
+def download_vosk_model():
+    """Download and extract the Vosk model if not already present."""
+    if os.path.exists(VOSK_MODEL_PATH):
+        logging.info(f"Vosk model already exists at {VOSK_MODEL_PATH}.")
+        return
+    os.makedirs(os.path.dirname(VOSK_MODEL_PATH), exist_ok=True)
+    model_zip_path = VOSK_MODEL_PATH + ".zip"
+    try:
+        logging.info(f"Downloading Vosk model from {VOSK_MODEL_ZIP_URL}...")
+        print("Downloading Vosk model. This may take a few minutes...")
+        response = requests.get(VOSK_MODEL_ZIP_URL, stream=True)
+        response.raise_for_status()
+        total_size = int(response.headers.get('content-length', 0))
+        with open(model_zip_path, 'wb') as f:
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    done = int(50 * downloaded / total_size)
+                    sys.stdout.write('\r[{}{}]'.format('█' * done, '.' * (50-done)))
+                    sys.stdout.flush()
+        print("\nDownload completed.")
+        logging.info("Vosk model downloaded successfully.")
+        
+        # Extract the zip file
+        logging.info(f"Extracting Vosk model to {VOSK_MODEL_PATH}...")
+        print("Extracting Vosk model...")
+        with zipfile.ZipFile(model_zip_path, 'r') as zip_ref:
+            zip_ref.extractall(os.path.dirname(VOSK_MODEL_PATH))
+        logging.info("Vosk model extracted successfully.")
+        print("Vosk model extracted successfully.")
+        
+        # Remove the zip file
+        os.remove(model_zip_path)
+    except requests.RequestException as e:
+        logging.error(f"Failed to download Vosk model: {e}")
+        print(f"Error: Failed to download Vosk model: {e}")
+        sys.exit("Error: Failed to download Vosk model.")
+    except zipfile.BadZipFile as e:
+        logging.error(f"Failed to extract Vosk model: {e}")
+        print(f"Error: Failed to extract Vosk model: {e}")
+        sys.exit("Error: Failed to extract Vosk model.")
 
 # ======================= Text-to-Speech Handler Using flite ==============
 class TTSHandler:
@@ -233,25 +287,68 @@ def get_recent_chat_history(chat_history, history_limit):
         return chat_history[-history_limit:]
     return chat_history
 
-# ======================= Speech Recognition Thread ======================
-def speech_recognition_thread(recognizer, mic, text_queue, stop_event):
-    import speech_recognition as sr  # Import here after activating venv
+# ======================= Speech Recognition Thread with Vosk ============
+def speech_recognition_thread(text_queue, stop_event):
+    from vosk import Model, KaldiRecognizer, SetLogLevel
+    import sys
+    import wave
+
+    SetLogLevel(-1)  # Suppress Vosk logs
+
+    if not os.path.exists(VOSK_MODEL_PATH):
+        error_msg = f"Vosk model not found at {VOSK_MODEL_PATH}. Please download and place it accordingly."
+        text_queue.put(error_msg)
+        logging.error(error_msg)
+        return
+
+    try:
+        model = Model(VOSK_MODEL_PATH)
+        recognizer = KaldiRecognizer(model, 16000)
+    except Exception as e:
+        error_msg = f"Failed to initialize Vosk model: {e}"
+        text_queue.put(error_msg)
+        logging.error(error_msg)
+        return
+
+    import pyaudio
+
+    p = pyaudio.PyAudio()
+
+    try:
+        stream = p.open(format=pyaudio.paInt16,
+                        channels=1,
+                        rate=16000,
+                        input=True,
+                        frames_per_buffer=4000)
+        stream.start_stream()
+    except Exception as e:
+        error_msg = f"Microphone error: {e}"
+        text_queue.put(error_msg)
+        logging.error(error_msg)
+        return
+
     while not stop_event.is_set():
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source)
-            try:
-                audio = recognizer.listen(source, timeout=1, phrase_time_limit=5)
-                text = recognizer.recognize_google(audio)
-                text_queue.put(text)
-                logging.info(f"Recognized speech: {text}")
-            except sr.WaitTimeoutError:
-                continue  # No speech detected, continue listening
-            except sr.RequestError as e:
-                error_msg = f"Ollama API request error: {e}"
-                text_queue.put(error_msg)
-                logging.error(error_msg)
-            except sr.UnknownValueError:
-                continue  # Could not understand audio, continue listening
+        try:
+            data = stream.read(4000, exception_on_overflow=False)
+            if recognizer.AcceptWaveform(data):
+                result = recognizer.Result()
+                result_json = json.loads(result)
+                text = result_json.get("text", "")
+                if text:
+                    text_queue.put(text)
+                    logging.info(f"Recognized speech: {text}")
+            else:
+                partial = recognizer.PartialResult()
+                # Optionally handle partial results
+        except Exception as e:
+            error_msg = f"Speech Recognition error: {e}"
+            text_queue.put(error_msg)
+            logging.error(error_msg)
+            break
+
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
 
 # ======================= Ollama API Streaming ============================
 def send_to_ollama_api_stream(text, response_queue, stop_event, config, chat_history):
@@ -299,6 +396,9 @@ def send_to_ollama_api_stream(text, response_queue, stop_event, config, chat_his
         error_msg = f"Failed to send to Ollama: {e}"
         response_queue.put(error_msg)
         logging.error(error_msg)
+    finally:
+        # Signal that the API streaming is done
+        response_queue.put(None)
 
 # ======================= Curses Menu System ==============================
 class Menu:
@@ -504,10 +604,18 @@ class Menu:
     def show_message(self, message):
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
-        self.stdscr.addstr(h//2, w//2 - len(message)//2, message)
-        self.stdscr.addstr(h//2 + 2, w//2 - 10, "Press any key to continue.")
-        self.stdscr.refresh()
-        self.stdscr.getch()
+        try:
+            # Split message into lines if it's too long
+            lines = message.split('\n')
+            for idx, line in enumerate(lines):
+                if idx >= h - 4:
+                    break  # Prevent writing beyond the window
+                self.stdscr.addstr(h//2 - len(lines)//2 + idx, w//2 - len(line)//2, line[:w-1])
+            self.stdscr.addstr(h//2 + 2, w//2 - 10, "Press any key to continue.")
+            self.stdscr.refresh()
+            self.stdscr.getch()
+        except curses.error:
+            pass  # Ignore if the string is too long for the window
 
 # ======================= Main curses display loop with Menu Integration =========================
 def main(stdscr):
@@ -528,24 +636,21 @@ def main(stdscr):
     install_dependencies()
     activate_venv()
 
+    # Download Vosk model if not present
+    download_vosk_model()
+
     # Import modules within the activated virtual environment
     try:
-        import speech_recognition as sr
+        from vosk import Model, KaldiRecognizer
     except ImportError as e:
-        stdscr.addstr(0, 0, f"Failed to import SpeechRecognition: {e}")
+        stdscr.addstr(0, 0, f"Failed to import Vosk: {e}")
         stdscr.refresh()
         stdscr.getch()
         return
 
     # Initialize recognizer and microphone
-    recognizer = sr.Recognizer()
-    try:
-        mic = sr.Microphone()
-    except OSError as e:
-        stdscr.addstr(0, 0, f"Microphone error: {e}")
-        stdscr.refresh()
-        stdscr.getch()
-        return
+    # Vosk handles microphone within the speech_recognition_thread
+    # So no need to initialize here
 
     # Queues for inter-thread communication
     text_queue = Queue()
@@ -567,17 +672,19 @@ def main(stdscr):
             return  # Exit the main loop
 
     # Start speech recognition thread
-    speech_thread = threading.Thread(target=speech_recognition_thread, args=(recognizer, mic, text_queue, stop_event))
+    speech_thread = threading.Thread(target=speech_recognition_thread, args=(text_queue, stop_event))
     speech_thread.daemon = True
     speech_thread.start()
 
     # Variables to handle API responses
     api_thread = None
     ollama_response = ""
+    last_speech_time = None
+    accumulated_text = ""
 
-    # Display logs for recognized speech and Ollama responses
-    recognized_log = ["Ready to receive voice input."]
-    # ollama_response buffer handled separately
+    # Initialize conversation log with system prompt
+    conversation_log = [{"role": "system", "content": config.get("system_prompt", "You are a helpful assistant.")}]
+    MAX_CONVERSATION_LINES = 100  # Adjust as needed
 
     # Define a regex pattern to detect sentence endings
     sentence_end_pattern = re.compile(r'.*[.!?]$')
@@ -617,45 +724,67 @@ def main(stdscr):
             # Check if any new recognized text is available
             try:
                 text = text_queue.get_nowait()
-                if text.startswith("Ollama API request error:"):
-                    recognized_log.append(text)
+                if text.startswith("Speech Recognition error:"):
+                    conversation_log.append({"role": "error", "content": text})
                 else:
-                    recognized_log.append(f"Recognized: {text}")
-                    # Append user input to chat history
-                    chat_history = append_to_chat_history(chat_history, "user", text, config)
-                    # Start API streaming thread
+                    if text:
+                        accumulated_text += " " + text
+                        last_speech_time = datetime.now()
+                        conversation_log.append({"role": "user", "content": text})
+                        # Append user input to chat history
+                        chat_history = append_to_chat_history(chat_history, "user", text, config)
+            except Empty:
+                pass
+
+            # Check if 2 seconds have passed since last speech
+            if accumulated_text and last_speech_time:
+                if datetime.now() - last_speech_time > timedelta(seconds=2):
+                    # Send accumulated_text to Ollama API
                     if api_thread and api_thread.is_alive():
                         stop_event.set()
                         api_thread.join()
                         stop_event.clear()
-                    ollama_response = ""  # Reset the Ollama response buffer
-                    api_thread = threading.Thread(target=send_to_ollama_api_stream, args=(text, response_queue, stop_event, config, chat_history))
+                    # Append a new entry for Ollama's response
+                    conversation_log.append({"role": "assistant", "content": ""})
+                    assistant_entry_index = len(conversation_log) - 1
+                    api_thread = threading.Thread(target=send_to_ollama_api_stream, args=(accumulated_text.strip(), response_queue, stop_event, config, chat_history))
                     api_thread.daemon = True
                     api_thread.start()
-            except Empty:
-                pass
+                    accumulated_text = ""
+                    last_speech_time = None
 
             # Check if any new API response tokens are available
             try:
-                token = response_queue.get_nowait()
-                ollama_response += token
-                logging.debug(f"Received token: {token}")
-                # Accumulate tokens into sentences
-                if sentence_end_pattern.match(token):
-                    complete_sentence = ollama_response.strip()
-                    if complete_sentence.endswith(('.', '!', '?')):
-                        # Pass the complete sentence to flite
-                        if config.get("tts_enabled", False) and tts_handler:
-                            tts_handler.speak(complete_sentence)
-                        # Append assistant's response to chat history
-                        chat_history = append_to_chat_history(chat_history, "assistant", complete_sentence, config)
-                        ollama_response = ""  # Reset for the next sentence
+                while True:
+                    token = response_queue.get_nowait()
+                    if token is None:
+                        # API response is complete
+                        if ollama_response.strip():
+                            complete_response = ollama_response.strip()
+                            # Pass the complete response to flite
+                            if config.get("tts_enabled", False) and tts_handler:
+                                tts_handler.speak(complete_response)
+                            # Append assistant's response to chat history
+                            chat_history = append_to_chat_history(chat_history, "assistant", complete_response, config)
+                            # Add separator line to conversation_log
+                            conversation_log.append({"role": "separator", "content": "----- Generated"})
+                            # Reset variables
+                            ollama_response = ""
+                        break
+                    elif token.startswith("Failed to send to Ollama:"):
+                        conversation_log.append({"role": "error", "content": token})
+                    else:
+                        ollama_response += token
+                        logging.debug(f"Received token: {token}")
+                        # Append token to the assistant's last message
+                        if 'assistant_entry_index' in locals():
+                            conversation_log[assistant_entry_index]['content'] += token
             except Empty:
                 pass
 
-            # Limit recognized_log to last 5 entries
-            while len(recognized_log) > 5:
-                recognized_log.pop(0)
+            # Limit conversation_log to last MAX_CONVERSATION_LINES entries
+            while len(conversation_log) > MAX_CONVERSATION_LINES:
+                conversation_log.pop(0)
 
             # Get terminal dimensions
             height, width = stdscr.getmaxyx()
@@ -663,27 +792,31 @@ def main(stdscr):
             # Clear the screen
             stdscr.erase()
 
-            # Display recognized speech
-            for idx, log_entry in enumerate(recognized_log):
-                if idx >= height - 4:
-                    break  # Reserve last 3 lines for Ollama response and instructions
+            # Display conversation_log entries with wrapping
+            display_lines = []
+            for entry in conversation_log:
+                if entry['role'] == 'system':
+                    wrapped_lines = textwrap.wrap(f"System: {entry['content']}", width=width-1)
+                elif entry['role'] == 'user':
+                    wrapped_lines = textwrap.wrap(f"User: {entry['content']}", width=width-1)
+                elif entry['role'] == 'assistant':
+                    wrapped_lines = textwrap.wrap(f"Ollama: {entry['content']}", width=width-1)
+                elif entry['role'] == 'error':
+                    wrapped_lines = textwrap.wrap(f"Error: {entry['content']}", width=width-1)
+                elif entry['role'] == 'separator':
+                    wrapped_lines = textwrap.wrap(f"{entry['content']}", width=width-1)
+                else:
+                    wrapped_lines = textwrap.wrap(f"{entry['content']}", width=width-1)
+                display_lines.extend(wrapped_lines)
+
+            # Now display the last lines that fit on the screen
+            max_display_lines = height - 2  # Reserve last line for instructions
+            display_start = max(0, len(display_lines) - max_display_lines)
+            for idx, line in enumerate(display_lines[display_start:]):
                 try:
-                    stdscr.addstr(idx, 0, log_entry[:width-1])  # Truncate long lines
+                    stdscr.addstr(idx, 0, line[:width-1])
                 except curses.error:
                     pass  # Ignore if the string is too long for the window
-
-            # Prepare Ollama response with wrapping
-            if ollama_response:
-                wrapped_response = textwrap.wrap(ollama_response, width=width-20)
-                for idx, line in enumerate(wrapped_response):
-                    display_line = f"Ollama: {line}" if idx == 0 else f"        {line}"  # Indent subsequent lines
-                    display_idx = len(recognized_log) + idx
-                    if display_idx >= height - 2:
-                        break  # Prevent writing beyond the window
-                    try:
-                        stdscr.addstr(display_idx, 0, display_line[:width-1])
-                    except curses.error:
-                        pass  # Ignore if the string is too long for the window
 
             # Instructions at the bottom
             instruction = "Press 'M' for Menu | 'Q' to Quit."
@@ -721,7 +854,12 @@ def display_error(stdscr, message, tts_handler=None, config=None):
     stdscr.clear()
     h, w = stdscr.getmaxyx()
     try:
-        stdscr.addstr(h//2, w//2 - len(message)//2, message, curses.A_BOLD)
+        # Split message into lines if it's too long
+        lines = message.split('\n')
+        for idx, line in enumerate(lines):
+            if idx >= h - 4:
+                break  # Prevent writing beyond the window
+            stdscr.addstr(h//2 - len(lines)//2 + idx, w//2 - len(line)//2, line[:w-1])
         stdscr.addstr(h//2 + 2, w//2 - 10, "Press any key to exit.")
         stdscr.refresh()
         stdscr.getch()
@@ -738,11 +876,16 @@ if __name__ == "__main__":
         create_venv()
         install_dependencies()
         activate_venv()
+        # Download Vosk model
+        download_vosk_model()
         # Relaunch the script within the virtual environment
-        python_executable = os.path.join(VENV_DIR, "bin", "python")
-        if not os.path.exists(python_executable):
-            # Handle Windows path
+        if os.name == 'nt':
             python_executable = os.path.join(VENV_DIR, "Scripts", "python.exe")
+        else:
+            python_executable = os.path.join(VENV_DIR, "bin", "python")
+        if not os.path.exists(python_executable):
+            logging.error(f"Pip executable not found at {python_executable}")
+            sys.exit("Error: Pip executable not found. Check the virtual environment setup.")
         logging.info("Relaunching the script within the virtual environment.")
         try:
             subprocess.check_call([python_executable] + sys.argv, stderr=SUBPROCESS_STDERR)

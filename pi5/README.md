@@ -1,4 +1,4 @@
-![image](https://github.com/user-attachments/assets/05a0154d-d3a2-4b2d-b474-5d371ae18485)
+![small](https://github.com/user-attachments/assets/9dffeb2d-ca27-4e23-94c5-b3bea3b602dd)
 
 # ASR > Ollama > TTS Pipeline for Pi5
 

@@ -1,3 +1,5 @@
+![image](https://github.com/user-attachments/assets/05a0154d-d3a2-4b2d-b474-5d371ae18485)
+
 # ASR > Ollama > TTS Pipeline for Pi5
 
 ## Installation and Runtime

@@ -1,6 +1,7 @@
 # 🥚 EGG Project
 
 ![Egg Transparent](https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14)
+![384771265-9dffeb2d-ca27-4e23-94c5-b3bea3b602dd](https://github.com/user-attachments/assets/763a775e-2676-45ab-94eb-897db4da2355)
 
 ## Quick Start
 

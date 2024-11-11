@@ -4,7 +4,7 @@ import os
 import sys
 import subprocess
 import curses
-import curses.textpad  # Ensure this import is present
+import curses.textpad  # Required for text input within curses
 import json
 import requests
 import threading
@@ -20,19 +20,45 @@ import shutil
 
 # ======================= Configuration Constants =======================
 VENV_DIR = "voice_venv"
-API_URL = "http://127.0.0.1:11434/api/chat"  # Using '127.0.0.1' for offline use
-MODEL_NAME = "llama3.2:1b"  # Replace with your model name
 CONFIG_FILE = "config.json"
 CHAT_HISTORY_FILE = "chat_history.json"  # Path to chat history file
 VOSK_MODEL_PATH = "models/vosk-model-small-en-us-0.15"  # Path to Vosk model
 VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"  # URL to download the Vosk model
+
+# User-provided configuration
 DEFAULT_CONFIG = {
-    "system_prompt": "You are a helpful assistant.",
+    "system_prompt": "make a clear and conscious decision which carefully and appropriately responds to inputs",
     "ollama_chat_history": True,
-    "history_limit": 20,            # New configuration for chat history limit
-    "temperature": 0.7,
-    "tts_enabled": True,            # Enable TTS by default
-    "tts_voice": "slt"               # Default flite voice
+    "history_limit": 9,
+    "temperature": 0.6,
+    "tts_enabled": True,
+    "tts_voice": "slt",
+    "top_k": 40,
+    "top_p": 0.9,
+    "seed": 42,
+    "stop": [
+        "user:",
+        "assistant:"
+    ],
+    "stream": True,
+    "format": "json",               # Ensuring format is set to 'json'
+    "keep_alive": "5m",
+    "raw": False,
+    "penalize_newline": True,
+    "num_keep": 24,
+    "num_predict": 100,
+    "mirostat": 1,
+    "mirostat_tau": 0.8,
+    "mirostat_eta": 0.6,
+    "presence_penalty": 1.5,
+    "frequency_penalty": 1.0,
+    "repeat_penalty": 1.2,
+    "tools": [],
+    "model_list_refresh_interval": 300,
+    "model": "llama3.2:1b",
+    "generate_api_url": "http://127.0.0.1:11434/api/generate",
+    "chat_api_url": "http://127.0.0.1:11434/api/chat",
+    "default_endpoint": "chat"
 }
 
 # ======================= Logging Configuration ==========================
@@ -103,6 +129,7 @@ def is_venv():
            (hasattr(sys, 'real_prefix') and sys.real_prefix != sys.prefix)
 
 def create_venv():
+    """Create a virtual environment if it doesn't exist."""
     if not os.path.exists(VENV_DIR):
         logging.info("Creating virtual environment.")
         result = subprocess.run([sys.executable, "-m", "venv", VENV_DIR], stderr=SUBPROCESS_STDERR)
@@ -116,6 +143,7 @@ def create_venv():
         print("Virtual environment already exists.")
 
 def install_dependencies():
+    """Install required Python packages in the virtual environment."""
     logging.info("Installing dependencies.")
     # Determine the pip executable path based on OS
     if os.name == 'nt':
@@ -201,37 +229,56 @@ def download_vosk_model():
         sys.exit("Error: Failed to extract Vosk model.")
 
 # ======================= Text-to-Speech Handler Using flite ==============
+def clear_queue(q):
+    """Drain all items from a queue."""
+    try:
+        while True:
+            q.get_nowait()
+    except Empty:
+        pass
+
 class TTSHandler:
+    """Handles Text-to-Speech operations using flite."""
     def __init__(self, voice='slt'):
         self.voice = voice  # Default voice
         self.queue = Queue()
-        self.thread = threading.Thread(target=self.run)
+        self.thread = threading.Thread(target=self.run, name="TTSHandlerThread")
         self.stop_event = threading.Event()
         self.thread.start()
         logging.info("TTSHandler initialized successfully.")
     
     def run(self):
+        """Continuously processes the TTS queue and speaks sentences."""
         while not self.stop_event.is_set():
             try:
                 sentence = self.queue.get(timeout=0.1)
                 if sentence:
-                    logging.debug(f"TTSHandler is speaking: {sentence}")
-                    # Invoke flite with the selected voice
+                    logging.info(f"TTSHandler is speaking: {sentence}")
                     subprocess.run(['flite', '-voice', self.voice, '-t', sentence], check=True, stderr=subprocess.PIPE)
-                    logging.debug(f"TTSHandler finished speaking: {sentence}")
+                    logging.info(f"TTSHandler finished speaking: {sentence}")
             except Empty:
                 continue
             except subprocess.CalledProcessError as e:
                 error_output = e.stderr.decode().strip()
                 logging.error(f"flite failed to speak '{sentence}': {error_output}")
             except Exception as e:
-                logging.error(f"Unexpected error in TTSHandler: {e}")
+                logging.exception(f"Unexpected error in TTSHandler: {e}")
     
     def speak(self, sentence):
-        logging.debug(f"Enqueuing sentence for TTS: {sentence}")
-        self.queue.put(sentence)
+        """Enqueue a sentence to be spoken."""
+        if self.queue.qsize() < 50:  # Example max size
+            logging.debug(f"Enqueuing sentence for TTS: {sentence}")
+            self.queue.put(sentence)
+        else:
+            logging.warning("TTS queue is full. Dropping sentence.")
+    
+    def clear_queue(self):
+        """Clear the TTS queue."""
+        clear_queue(self.queue)
+        logging.debug("TTSHandler queue cleared.")
     
     def stop(self):
+        """Stop the TTSHandler thread."""
         logging.info("Stopping TTSHandler...")
         self.stop_event.set()
         self.thread.join()
@@ -277,7 +324,10 @@ def append_to_chat_history(chat_history, role, content, config):
     # Enforce history limit
     history_limit = config.get("history_limit", 20)
     if len(chat_history) > history_limit:
-        chat_history = chat_history[-history_limit:]
+        removed = len(chat_history) - history_limit
+        for _ in range(removed):
+            removed_entry = chat_history.pop(0)
+            logging.debug(f"Removed from chat history: {removed_entry}")
     save_chat_history(chat_history)
     return chat_history
 
@@ -289,9 +339,9 @@ def get_recent_chat_history(chat_history, history_limit):
 
 # ======================= Speech Recognition Thread with Vosk ============
 def speech_recognition_thread(text_queue, stop_event):
+    """Thread function for speech recognition using Vosk."""
     from vosk import Model, KaldiRecognizer, SetLogLevel
-    import sys
-    import wave
+    import pyaudio
 
     SetLogLevel(-1)  # Suppress Vosk logs
 
@@ -310,8 +360,6 @@ def speech_recognition_thread(text_queue, stop_event):
         logging.error(error_msg)
         return
 
-    import pyaudio
-
     p = pyaudio.PyAudio()
 
     try:
@@ -326,6 +374,8 @@ def speech_recognition_thread(text_queue, stop_event):
         text_queue.put(error_msg)
         logging.error(error_msg)
         return
+
+    logging.info("Speech recognition thread started.")
 
     while not stop_event.is_set():
         try:
@@ -349,59 +399,73 @@ def speech_recognition_thread(text_queue, stop_event):
     stream.stop_stream()
     stream.close()
     p.terminate()
+    logging.info("Speech recognition thread terminated.")
 
 # ======================= Ollama API Streaming ============================
-def send_to_ollama_api_stream(text, response_queue, stop_event, config, chat_history):
+def send_to_ollama_api_stream(endpoint, data, response_queue, stop_event, config, chat_history):
+    """
+    Thread function to send user input to Ollama API and stream responses.
+    
+    :param endpoint: API endpoint to use ('generate' or 'chat')
+    :param data: Dictionary containing the request payload
+    :param response_queue: Queue to put the responses
+    :param stop_event: Event to signal thread to stop
+    :param config: Configuration dictionary
+    :param chat_history: Current chat history
+    """
+    url = config.get("generate_api_url") if endpoint == "generate" else config.get("chat_api_url")
     headers = {"Content-Type": "application/json"}
-    messages = []
 
-    if config["ollama_chat_history"]:
-        messages = get_recent_chat_history(chat_history, config.get("history_limit", 20)).copy()
-        # Append the new user message
-        messages.append({"role": "user", "content": text})
-    else:
-        messages = [
-            {"role": "system", "content": config["system_prompt"]},
-            {"role": "user", "content": text}
-        ]
-
-    data = {
-        "model": MODEL_NAME,
-        "messages": messages,
-        "options": {
-            "temperature": config["temperature"]
-        },
-        "stream": True  # Enable streaming
-    }
-
-    logging.debug(f"Sending messages to Ollama API: {json.dumps(messages, indent=2)}")
+    logging.debug(f"Sending data to Ollama API at {url}: {json.dumps(data, indent=2)}")
     
     try:
-        with requests.post(API_URL, headers=headers, json=data, stream=True, timeout=60) as response:
+        with requests.post(url, headers=headers, json=data, stream=True, timeout=60) as response:
             response.raise_for_status()
-            for line in response.iter_lines():
+            logging.info(f"Ollama API ({endpoint}) request sent successfully.")
+            buffer = ""
+            for chunk in response.iter_content(chunk_size=1024):
                 if stop_event.is_set():
+                    logging.info("Stop event set. Exiting Ollama API stream.")
                     break
-                if line:
-                    try:
-                        decoded_line = line.decode('utf-8')
-                        json_obj = json.loads(decoded_line)
-                        if 'message' in json_obj and 'content' in json_obj['message']:
-                            content = json_obj['message']['content']
-                            response_queue.put(content)
-                            logging.debug(f"Received content: {content}")
-                    except json.JSONDecodeError:
-                        continue  # Ignore malformed JSON lines
+                if chunk:
+                    decoded_chunk = chunk.decode('utf-8')
+                    buffer += decoded_chunk
+                    while '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            json_obj = json.loads(line)
+                            if config.get("format") == "json":
+                                if endpoint == "generate":
+                                    content = json_obj.get("response", "")
+                                elif endpoint == "chat":
+                                    message = json_obj.get("message", {})
+                                    content = message.get("content", "")
+                                else:
+                                    content = ""
+                            else:  # raw format
+                                content = line
+                            
+                            if content:
+                                response_queue.put(content)
+                                logging.debug(f"Received content: {content}")
+                        except json.JSONDecodeError:
+                            logging.warning(f"Malformed JSON line received: {line}")
+                            continue  # Ignore malformed JSON lines
     except requests.RequestException as e:
-        error_msg = f"Failed to send to Ollama: {e}"
+        error_msg = f"Failed to send to Ollama API: {e}"
         response_queue.put(error_msg)
         logging.error(error_msg)
     finally:
         # Signal that the API streaming is done
         response_queue.put(None)
+        logging.info("Ollama API streaming ended.")
 
 # ======================= Curses Menu System ==============================
 class Menu:
+    """Handles the configuration menu within the curses interface."""
     def __init__(self, stdscr, config, tts_handler, chat_history):
         self.stdscr = stdscr
         self.config = config
@@ -410,23 +474,32 @@ class Menu:
         self.menu_items = [
             "Set System Prompt",
             "Toggle Ollama Chat History",
+            "Set History Limit",
             "Set Temperature",
+            "Set Response Format",
             "Toggle Text-to-Speech",
             "Set TTS Voice",
-            "Clear Chat History",      # New menu item
-            "View Chat History",       # Optional: View current chat history
+            "Clear Chat History",
+            "View Chat History",
             "Back to Main"
         ]
         self.current_selection = 0
 
     def display_menu(self):
+        """Display the configuration menu."""
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
         title = "Configuration Menu (Use Arrow Keys & Enter)"
-        self.stdscr.addstr(1, w//2 - len(title)//2, title, curses.A_BOLD | curses.A_UNDERLINE)
+        try:
+            self.stdscr.addstr(1, w//2 - len(title)//2, title, curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass  # Handle window too small
+
         for idx, item in enumerate(self.menu_items):
-            x = w//2 - 20
+            x = w//2 - 30
             y = 3 + idx
+            if y >= h - 1:
+                break  # Prevent writing beyond the window
             if idx == self.current_selection:
                 self.stdscr.attron(curses.color_pair(1))
                 self.stdscr.addstr(y, x, f"> {item}")
@@ -436,12 +509,14 @@ class Menu:
         self.stdscr.refresh()
 
     def navigate(self, key):
+        """Navigate through the menu items."""
         if key == curses.KEY_UP and self.current_selection > 0:
             self.current_selection -= 1
         elif key == curses.KEY_DOWN and self.current_selection < len(self.menu_items) - 1:
             self.current_selection += 1
 
     def run(self):
+        """Run the menu loop."""
         curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
         while True:
             self.display_menu()
@@ -454,8 +529,12 @@ class Menu:
                     self.set_system_prompt()
                 elif selected_item == "Toggle Ollama Chat History":
                     self.toggle_chat_history()
+                elif selected_item == "Set History Limit":
+                    self.set_history_limit()
                 elif selected_item == "Set Temperature":
                     self.set_temperature()
+                elif selected_item == "Set Response Format":
+                    self.set_response_format()
                 elif selected_item == "Toggle Text-to-Speech":
                     self.toggle_tts()
                 elif selected_item == "Set TTS Voice":
@@ -468,6 +547,7 @@ class Menu:
                     break
 
     def set_system_prompt(self):
+        """Set a new system prompt."""
         prompt = self.get_input("Enter new system prompt:", self.config["system_prompt"])
         if prompt is not None:
             self.config["system_prompt"] = prompt
@@ -477,16 +557,38 @@ class Menu:
                 self.tts_handler.speak("System prompt updated successfully.")
 
     def toggle_chat_history(self):
-        self.config["ollama_chat_history"] = not self.config["ollama_chat_history"]
+        """Toggle the Ollama chat history feature."""
+        self.config["ollama_chat_history"] = not self.config.get("ollama_chat_history", False)
         save_config(self.config)
         status = "enabled" if self.config["ollama_chat_history"] else "disabled"
         self.show_message(f"Ollama Chat History {status}.")
         if self.tts_handler and self.config.get("tts_enabled", False):
             self.tts_handler.speak(f"Ollama Chat History {status}.")
 
-    def set_temperature(self):
+    def set_history_limit(self):
+        """Set the history limit for chat history."""
         while True:
-            temp = self.get_input("Set temperature (0.0 to 1.0):", str(self.config["temperature"]))
+            limit = self.get_input("Set history limit (number of messages):", str(self.config.get("history_limit", 20)))
+            if limit is None:
+                break  # User cancelled
+            try:
+                limit_val = int(limit)
+                if limit_val > 0:
+                    self.config["history_limit"] = limit_val
+                    save_config(self.config)
+                    self.show_message("History limit updated successfully.")
+                    if self.tts_handler and self.config.get("tts_enabled", False):
+                        self.tts_handler.speak("History limit updated successfully.")
+                    break
+                else:
+                    self.show_message("Please enter a positive integer.")
+            except ValueError:
+                self.show_message("Invalid input. Please enter a numerical value.")
+
+    def set_temperature(self):
+        """Set the temperature parameter for the API."""
+        while True:
+            temp = self.get_input("Set temperature (0.0 to 1.0):", str(self.config.get("temperature", 0.7)))
             if temp is None:
                 break  # User cancelled
             try:
@@ -503,8 +605,23 @@ class Menu:
             except ValueError:
                 self.show_message("Invalid input. Please enter a numerical value.")
 
+    def set_response_format(self):
+        """Set the response format for the API."""
+        formats = ["json", "raw"]
+        current_format = self.config.get("format", "json")
+        format_input = self.get_input(f"Set response format ({', '.join(formats)}):", current_format)
+        if format_input in formats:
+            self.config["format"] = format_input
+            save_config(self.config)
+            self.show_message(f"Response format set to {format_input}.")
+            if self.tts_handler and self.config.get("tts_enabled", False):
+                self.tts_handler.speak(f"Response format set to {format_input}.")
+        else:
+            self.show_message(f"Invalid format. Available formats: {', '.join(formats)}.")
+
     def toggle_tts(self):
-        self.config["tts_enabled"] = not self.config["tts_enabled"]
+        """Toggle the Text-to-Speech feature."""
+        self.config["tts_enabled"] = not self.config.get("tts_enabled", False)
         save_config(self.config)
         status = "enabled" if self.config["tts_enabled"] else "disabled"
         self.show_message(f"Text-to-Speech {status}.")
@@ -522,11 +639,12 @@ class Menu:
                 self.tts_handler = None
 
     def set_tts_voice(self):
+        """Set the voice for Text-to-Speech."""
         available_voices = self.get_available_flite_voices()
         if not available_voices:
             self.show_message("No available flite voices found.")
             return
-        voice = self.get_input(f"Enter TTS Voice ({', '.join(available_voices)}):", self.config.get("tts_voice", 'slt'))
+        voice = self.get_input(f"Enter TTS Voice ({', '.join(available_voices)}):", self.config.get("tts_voice", "slt"))
         if voice in available_voices:
             self.config["tts_voice"] = voice
             save_config(self.config)
@@ -539,6 +657,7 @@ class Menu:
             self.show_message("Invalid voice selected.")
 
     def clear_chat_history(self):
+        """Clear the chat history."""
         if not self.config.get("ollama_chat_history", False):
             self.show_message("Chat history is disabled.")
             return
@@ -558,6 +677,7 @@ class Menu:
             self.show_message("Chat history not cleared.")
 
     def view_chat_history(self):
+        """View the current chat history."""
         if not self.config.get("ollama_chat_history", False):
             self.show_message("Chat history is disabled.")
             return
@@ -583,15 +703,21 @@ class Menu:
             return []
 
     def get_input(self, prompt, default=""):
-        # Removed curses.echo() to prevent double echoing
+        """Get user input within the curses interface."""
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
         prompt_str = f"{prompt}"
-        self.stdscr.addstr(h//2 - 1, w//2 - len(prompt_str)//2, prompt_str)
-        self.stdscr.addstr(h//2, w//2 - 10, "> ")
+        try:
+            self.stdscr.addstr(h//2 - 1, w//2 - len(prompt_str)//2, prompt_str)
+            self.stdscr.addstr(h//2, w//2 - 10, "> ")
+        except curses.error:
+            pass  # Handle window too small
         self.stdscr.refresh()
         # Create a window for input
         input_width = min(len(default) + 20, w - (w//2 - 10) - 4)
+        if input_width <= 0:
+            logging.error("Window too small for input.")
+            return default
         input_win = curses.newwin(1, input_width, h//2, w//2 - 8)
         box = curses.textpad.Textbox(input_win)
         try:
@@ -602,6 +728,7 @@ class Menu:
         return user_input if user_input else default
 
     def show_message(self, message):
+        """Display a message within the curses interface."""
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
         try:
@@ -619,6 +746,7 @@ class Menu:
 
 # ======================= Main curses display loop with Menu Integration =========================
 def main(stdscr):
+    """Main function to handle the curses interface and voice assistant operations."""
     # Initialize curses settings
     curses.curs_set(0)  # Hide cursor
     stdscr.clear()
@@ -648,11 +776,7 @@ def main(stdscr):
         stdscr.getch()
         return
 
-    # Initialize recognizer and microphone
-    # Vosk handles microphone within the speech_recognition_thread
-    # So no need to initialize here
-
-    # Queues for inter-thread communication
+    # Initialize Queues for inter-thread communication
     text_queue = Queue()
     response_queue = Queue()
 
@@ -672,8 +796,12 @@ def main(stdscr):
             return  # Exit the main loop
 
     # Start speech recognition thread
-    speech_thread = threading.Thread(target=speech_recognition_thread, args=(text_queue, stop_event))
-    speech_thread.daemon = True
+    speech_thread = threading.Thread(
+        target=speech_recognition_thread,
+        args=(text_queue, stop_event),
+        name="SpeechRecognitionThread",
+        daemon=True
+    )
     speech_thread.start()
 
     # Variables to handle API responses
@@ -742,16 +870,102 @@ def main(stdscr):
             # Check if 2 seconds have passed since last speech
             if accumulated_text and last_speech_time:
                 if datetime.now() - last_speech_time > timedelta(seconds=2):
-                    # Send accumulated_text to Ollama API
+                    # ==== Clearing Queues and Buffers Before New Generation ====
+                    # 1. Stop any existing API thread
                     if api_thread and api_thread.is_alive():
+                        logging.info("Stopping existing API thread.")
                         stop_event.set()
                         api_thread.join()
                         stop_event.clear()
+
+                    # 2. Clear the response_queue
+                    logging.debug("Clearing response_queue.")
+                    clear_queue(response_queue)
+
+                    # 3. Clear the TTSHandler's queue
+                    if tts_handler:
+                        logging.debug("Clearing TTSHandler's queue.")
+                        tts_handler.clear_queue()
+
+                    # 4. Reset the tts_buffer
+                    logging.debug("Resetting tts_buffer.")
+                    tts_buffer = ""
+
+                    # ==== End of Clearing ====
+
+                    # Determine which endpoint to use based on configuration
+                    endpoint = config.get("default_endpoint", "generate")
+
+                    # Prepare the data payload based on endpoint
+                    if endpoint == "generate":
+                        data = {
+                            "model": config.get("model", "llama3.2:1b"),
+                            "prompt": accumulated_text.strip(),
+                            "stream": config.get("stream", True),
+                            "format": config.get("format", "json"),
+                            "options": {
+                                "temperature": config.get("temperature", 0.7),
+                                "top_k": config.get("top_k", 40),
+                                "top_p": config.get("top_p", 0.9),
+                                "seed": config.get("seed", 42),
+                                "stop": config.get("stop", ["\n", "user:", "assistant:"]),
+                                "keep_alive": config.get("keep_alive", "5m"),
+                                "mirostat": config.get("mirostat", 1),
+                                "mirostat_tau": config.get("mirostat_tau", 0.8),
+                                "mirostat_eta": config.get("mirostat_eta", 0.6),
+                                "presence_penalty": config.get("presence_penalty", 1.5),
+                                "frequency_penalty": config.get("frequency_penalty", 1.0),
+                                "repeat_penalty": config.get("repeat_penalty", 1.2),
+                                "penalize_newline": config.get("penalize_newline", True),
+                                "raw": config.get("raw", False)
+                            }
+                        }
+                        # If 'tools' are specified in config, include them (applicable for 'chat' endpoint)
+                        if config.get("tools"):
+                            data["tools"] = config["tools"]
+                    elif endpoint == "chat":
+                        data = {
+                            "model": config.get("model", "llama3.2:1b"),
+                            "messages": chat_history,
+                            "stream": config.get("stream", True),
+                            "format": config.get("format", "json"),
+                            "options": {
+                                "temperature": config.get("temperature", 0.7),
+                                "top_k": config.get("top_k", 40),
+                                "top_p": config.get("top_p", 0.9),
+                                "seed": config.get("seed", 42),
+                                "stop": config.get("stop", ["\n", "user:", "assistant:"]),
+                                "keep_alive": config.get("keep_alive", "5m"),
+                                "mirostat": config.get("mirostat", 1),
+                                "mirostat_tau": config.get("mirostat_tau", 0.8),
+                                "mirostat_eta": config.get("mirostat_eta", 0.6),
+                                "presence_penalty": config.get("presence_penalty", 1.5),
+                                "frequency_penalty": config.get("frequency_penalty", 1.0),
+                                "repeat_penalty": config.get("repeat_penalty", 1.2),
+                                "penalize_newline": config.get("penalize_newline", True),
+                                "raw": config.get("raw", False)
+                            }
+                        }
+                        # If 'tools' are specified in config, include them
+                        if config.get("tools"):
+                            data["tools"] = config["tools"]
+                    else:
+                        logging.error(f"Unsupported endpoint selected: {endpoint}")
+                        conversation_log.append({"role": "error", "content": f"Unsupported endpoint selected: {endpoint}"})
+                        accumulated_text = ""
+                        last_speech_time = None
+                        continue
+
+                    # Send accumulated_text to Ollama API
                     # Append a new entry for Ollama's response
                     conversation_log.append({"role": "assistant", "content": ""})
                     assistant_entry_index = len(conversation_log) - 1
-                    api_thread = threading.Thread(target=send_to_ollama_api_stream, args=(accumulated_text.strip(), response_queue, stop_event, config, chat_history))
-                    api_thread.daemon = True
+                    api_thread = threading.Thread(
+                        target=send_to_ollama_api_stream,
+                        args=(endpoint, data, response_queue, stop_event, config, chat_history),
+                        name="OllamaAPIThread",
+                        daemon=True
+                    )
                     api_thread.start()
                     accumulated_text = ""
                     last_speech_time = None
@@ -762,20 +976,8 @@ def main(stdscr):
                     token = response_queue.get_nowait()
                     if token is None:
                         # API response is complete
-                        # *** Remove the complete_response TTS trigger ***
-                        # if ollama_response.strip():
-                        #     complete_response = ollama_response.strip()
-                        #     # Pass the complete response to flite
-                        #     if config.get("tts_enabled", False) and tts_handler:
-                        #         tts_handler.speak(complete_response)
-                        #     # Append assistant's response to chat history
-                        #     chat_history = append_to_chat_history(chat_history, "assistant", complete_response, config)
-                        #     # Add separator line to conversation_log
-                        #     conversation_log.append({"role": "separator", "content": "----- Generated"})
-                        #     # Reset variables
-                        #     ollama_response = ""
                         break
-                    elif token.startswith("Failed to send to Ollama:"):
+                    elif token.startswith("Failed to send to Ollama API:"):
                         conversation_log.append({"role": "error", "content": token})
                     else:
                         ollama_response += token
@@ -784,7 +986,7 @@ def main(stdscr):
                         if 'assistant_entry_index' in locals():
                             conversation_log[assistant_entry_index]['content'] += token
 
-                        # *** Begin Sentence Chunking and TTS Playback ***
+                        # ==== Sentence Chunking and TTS Playback ====
                         # Append token to tts_buffer
                         tts_buffer += token
                         # Check for sentence-ending punctuation
@@ -802,13 +1004,19 @@ def main(stdscr):
                         for sentence in sentences:
                             if sentence:
                                 tts_handler.speak(sentence)
-                        # *** End Sentence Chunking and TTS Playback ***
+                        # ==== End of TTS Playback ====
             except Empty:
                 pass
 
-            # Limit conversation_log to last MAX_CONVERSATION_LINES entries
+            # Additionally, check if API response is complete and send any remaining text to TTS
+            if api_thread and not api_thread.is_alive() and tts_buffer:
+                tts_handler.speak(tts_buffer.strip())
+                tts_buffer = ""
+
+            # Enforce MAX_CONVERSATION_LINES
             while len(conversation_log) > MAX_CONVERSATION_LINES:
-                conversation_log.pop(0)
+                removed_entry = conversation_log.pop(0)
+                logging.debug(f"Removed from conversation_log: {removed_entry}")
 
             # Get terminal dimensions
             height, width = stdscr.getmaxyx()
@@ -817,26 +1025,34 @@ def main(stdscr):
             stdscr.erase()
 
             # Display conversation_log entries with wrapping
-            display_lines = []
+            display_text = ""
             for entry in conversation_log:
                 if entry['role'] == 'system':
-                    wrapped_lines = textwrap.wrap(f"System: {entry['content']}", width=width-1)
+                    prefix = "System: "
                 elif entry['role'] == 'user':
-                    wrapped_lines = textwrap.wrap(f"User: {entry['content']}", width=width-1)
+                    prefix = "User: "
                 elif entry['role'] == 'assistant':
-                    wrapped_lines = textwrap.wrap(f"Ollama: {entry['content']}", width=width-1)
+                    prefix = "Ollama: "
                 elif entry['role'] == 'error':
-                    wrapped_lines = textwrap.wrap(f"Error: {entry['content']}", width=width-1)
-                elif entry['role'] == 'separator':
-                    wrapped_lines = textwrap.wrap(f"{entry['content']}", width=width-1)
+                    prefix = "Error: "
                 else:
-                    wrapped_lines = textwrap.wrap(f"{entry['content']}", width=width-1)
-                display_lines.extend(wrapped_lines)
+                    prefix = ""
+                
+                if entry['role'] != 'separator':
+                    wrapped_content = textwrap.fill(f"{prefix}{entry['content']}", width=width-1)
+                else:
+                    wrapped_content = f"{prefix}"
+                
+                display_text += wrapped_content + "\n"
 
-            # Now display the last lines that fit on the screen
+            # Now split display_text into lines and display only the last 'max_display_lines' lines
+            display_lines = display_text.split('\n')
             max_display_lines = height - 2  # Reserve last line for instructions
-            display_start = max(0, len(display_lines) - max_display_lines)
-            for idx, line in enumerate(display_lines[display_start:]):
+            if len(display_lines) > max_display_lines:
+                display_lines = display_lines[-max_display_lines:]
+
+            # Display the lines
+            for idx, line in enumerate(display_lines):
                 try:
                     stdscr.addstr(idx, 0, line[:width-1])
                 except curses.error:

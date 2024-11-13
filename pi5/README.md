@@ -53,7 +53,42 @@ mkdir -p ~/.config/autostart && echo -e "[Desktop Entry]\nType=Application\nName
 Set Full Send Bless Mode for max fan across reboots:
 
 ```
-sudo sed -i '$ i\\n# Start pigpio and configure pinctrl for PWM\nsudo pigpiod\nsudo pinctrl FAN_PWM op dl' /etc/rc.local
+sudo nano /etc/systemd/system/fan_pwm.service
+```
+
+Then inject:
+```
+[Unit]
+Description=Fan PWM Setup
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'sudo pigpiod && pinctrl FAN_PWM op dl'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Now we reload
+```
+sudo systemctl daemon-reload
+```
+
+And Enable
+```
+sudo systemctl enable fan_pwm.service
+```
+
+And start the service!
+```
+sudo systemctl start fan_pwm.service
+```
+
+Check if its running:
+```
+sudo systemctl status fan_pwm.service
 ```
 
 You will likely run into undercurrent when powering off of battery, therefor we must add the following to cpu_freq settings for throttling power consumption during inference

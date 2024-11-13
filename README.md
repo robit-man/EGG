@@ -1,6 +1,6 @@
 # 🥚 EGG Project
 
-<img src="https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14" alt="Egg Transparent" width="500"/> <img src="https://github.com/user-attachments/assets/763a775e-2676-45ab-94eb-897db4da2355" alt="384771265-9dffeb2d-ca27-4e23-94c5-b3bea3b602dd" width="200"/>
+<img src="https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14" alt="Egg Transparent" width="500"/> <img src="[https://github.com/user-attachments/assets/763a775e-2676-45ab-94eb-897db4da2355](https://github.com/user-attachments/assets/42caf09c-1e7b-42bd-9255-e3171ebd5006)" alt="384771265-9dffeb2d-ca27-4e23-94c5-b3bea3b602dd" width="200"/>
 
 
 ## Quick Start

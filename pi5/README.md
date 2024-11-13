@@ -48,6 +48,12 @@ mkdir -p ~/.config/autostart && echo -e "[Desktop Entry]\nType=Application\nName
 
 ## Debugging
 
+Set Full Send Bless Mode for max fan across reboots:
+
+```
+sudo sed -i '$ i\\n# Start pigpio and configure pinctrl for PWM\nsudo pigpiod\nsudo pinctrl FAN_PWM op dl' /etc/rc.local
+```
+
 You will likely run into undercurrent when powering off of battery, therefor we must add the following to cpu_freq settings for throttling power consumption during inference
 
 First open the settings to edit

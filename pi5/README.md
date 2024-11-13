@@ -127,6 +127,9 @@ Register the script to run at boot
 sudo update-rc.d cpufreq_settings.sh defaults
 ```
 
+For Camera Info, [Check out this page](https://www.raspberrypi.com/documentation/accessories/camera.html#libcamera-and-libcamera-apps)
+
+
 For more information and support related to battery monitoring [visit the wiki here](https://www.waveshare.com/wiki/UPS_HAT_(D))
 
 If your Bluetooth speaker connects but fails to act as a sound device, here are some steps to troubleshoot:

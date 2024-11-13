@@ -2,7 +2,9 @@
 
 
 
-# ASR > Ollama > TTS Pipeline for Pi5
+# MINI EGG
+
+### ASR > Ollama > TTS Pipeline for Pi5 - EXPERIMENTAL RELEASE!
 
 ## Installation and Runtime
 

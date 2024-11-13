@@ -1,4 +1,6 @@
-![small](https://github.com/user-attachments/assets/9dffeb2d-ca27-4e23-94c5-b3bea3b602dd)
+![mini-egg](https://github.com/user-attachments/assets/42caf09c-1e7b-42bd-9255-e3171ebd5006)
+
+
 
 # ASR > Ollama > TTS Pipeline for Pi5
 

@@ -61,7 +61,8 @@ DEFAULT_CONFIG = {
     "model": "llava",  # Updated to 'llava'
     "generate_api_url": "http://127.0.0.1:11434/api/generate",
     "chat_api_url": "http://127.0.0.1:11434/api/chat",
-    "default_endpoint": "chat"
+    "default_endpoint": "chat",
+    "image_included_inference": True  # New configuration parameter
 }
 
 # ======================= Logging Configuration ==========================
@@ -232,59 +233,33 @@ def download_vosk_model():
         sys.exit("Error: Failed to extract Vosk model.")
 
 # ======================= Model Checker and Downloader ====================
-def check_and_download_model(model_name, progress_queue):
+def check_and_list_models(progress_queue):
     """
-    Check if the specified Ollama model is installed.
-    If not, download it using 'ollama pull' and send progress updates to the queue.
+    Check and list models available locally using the Ollama API's /api/tags endpoint.
     
-    :param model_name: Name of the model to check/download.
     :param progress_queue: Queue to send progress updates.
-    :return: True if model is ready, False otherwise.
+    :return: List of model names.
     """
+    api_url = "http://localhost:11434/api/tags"
     try:
-        result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
-        installed_models = result.stdout.splitlines()
-        if model_name in installed_models:
-            logging.info(f"Model '{model_name}' is already installed.")
-            progress_queue.put(("status", f"Model '{model_name}' is already installed."))
-            return True
-        else:
-            logging.info(f"Model '{model_name}' not found. Pulling model...")
-            progress_queue.put(("status", f"Model '{model_name}' not found. Downloading..."))
-            
-            # Start the 'ollama pull' subprocess
-            process = subprocess.Popen(['ollama', 'pull', model_name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            
-            # Read the output line by line and send progress updates
-            while True:
-                output = process.stdout.readline()
-                if output == '' and process.poll() is not None:
-                    break
-                if output:
-                    # Parse the output for progress information
-                    # This parsing depends on the actual output format of 'ollama pull'
-                    # Adjust the regex as per the actual output
-                    progress_queue.put(("progress", output.strip()))
-            return_code = process.poll()
-            if return_code == 0:
-                logging.info(f"Model '{model_name}' pulled successfully.")
-                progress_queue.put(("status", f"Model '{model_name}' downloaded successfully."))
-                return True
-            else:
-                error_msg = f"Failed to pull model '{model_name}'."
-                logging.error(error_msg)
-                progress_queue.put(("error", error_msg))
-                return False
-    except subprocess.CalledProcessError as e:
-        error_msg = f"Failed to list Ollama models: {e}"
-        logging.error(error_msg)
+        progress_queue.put(("status", "Fetching available models..."))
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        models = [model['name'] for model in data.get('models', [])]
+        progress_queue.put(("status", f"Found {len(models)} models."))
+        logging.info(f"Fetched {len(models)} models from Ollama API.")
+        return models
+    except requests.RequestException as e:
+        error_msg = f"Failed to fetch models from Ollama API: {e}"
         progress_queue.put(("error", error_msg))
-        return False
-    except Exception as e:
-        error_msg = f"Unexpected error during model check/download: {e}"
         logging.error(error_msg)
+        return []
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON response from Ollama API: {e}"
         progress_queue.put(("error", error_msg))
-        return False
+        logging.error(error_msg)
+        return []
 
 # ======================= Text-to-Speech Handler Using flite ==============
 def clear_queue(q):
@@ -475,12 +450,12 @@ def send_to_ollama_api_stream(endpoint, data, response_queue, stop_event, config
     url = config.get("generate_api_url") if endpoint == "generate" else config.get("chat_api_url")
     headers = {"Content-Type": "application/json"}
 
-    # If image_path is provided, encode the image in base64 and add to data
-    if image_path and os.path.exists(image_path):
+    # If image_path is provided and image_included_inference is True, encode the image in base64 and add to data
+    if config.get("image_included_inference", True) and image_path and os.path.exists(image_path):
         try:
             with open(image_path, "rb") as img_file:
                 encoded_string = base64.b64encode(img_file.read()).decode('utf-8')
-            data["image"] = encoded_string
+            data["images"] = [encoded_string]
             logging.info(f"Image '{image_path}' encoded and added to the payload.")
         except Exception as e:
             error_msg = f"Failed to encode image '{image_path}': {e}"
@@ -489,7 +464,7 @@ def send_to_ollama_api_stream(endpoint, data, response_queue, stop_event, config
             return
     else:
         if image_path:
-            error_msg = f"Image file '{image_path}' does not exist."
+            error_msg = f"Image file '{image_path}' does not exist or image_included_inference is disabled."
             response_queue.put(("error", error_msg))
             logging.error(error_msg)
             return
@@ -559,7 +534,8 @@ class Menu:
             "Set TTS Voice",
             "Clear Chat History",
             "View Chat History",
-            "Check and Download Models",
+            "Select Model",  # New menu item
+            "Toggle Image Included Inference",
             "Back to Main"
         ]
         self.current_selection = 0
@@ -623,8 +599,10 @@ class Menu:
                     self.clear_chat_history()
                 elif selected_item == "View Chat History":
                     self.view_chat_history()
-                elif selected_item == "Check and Download Models":
-                    self.check_and_download_models()
+                elif selected_item == "Select Model":  # Handle new menu item
+                    self.select_model()
+                elif selected_item == "Toggle Image Included Inference":  # Handle existing menu item
+                    self.toggle_image_included_inference()
                 elif selected_item == "Back to Main":
                     break
 
@@ -744,7 +722,7 @@ class Menu:
             self.show_message("Chat history is disabled.")
             return
         confirm = self.get_input("Are you sure you want to clear chat history? (y/n):", "n")
-        if confirm.lower() == 'y':
+        if confirm and confirm.lower() == 'y':
             try:
                 with open(CHAT_HISTORY_FILE, 'w') as f:
                     json.dump([], f, indent=4)
@@ -771,64 +749,96 @@ class Menu:
         display_text = "\n".join([f"{entry['role'].capitalize()}: {entry['content']}" for entry in history_to_display])
         self.show_message(f"Chat History:\n{display_text}")
 
-    def check_and_download_models(self):
-        """Check and download necessary models, displaying progress."""
-        model_name = self.config.get("model", "llava")
+    def toggle_image_included_inference(self):
+        """Toggle the Image-Included Inference feature."""
+        self.config["image_included_inference"] = not self.config.get("image_included_inference", True)
+        save_config(self.config)
+        status = "enabled" if self.config["image_included_inference"] else "disabled"
+        self.show_message(f"Image-Included Inference {status}.")
+        if self.tts_handler and self.config.get("tts_enabled", False):
+            self.tts_handler.speak(f"Image-included inference {status}.")
+
+    def select_model(self):
+        """Fetch available models from Ollama API and allow user to select one."""
+        # Initialize a queue to receive progress updates
         progress_queue = Queue()
-        download_thread = threading.Thread(
-            target=check_and_download_model,
-            args=(model_name, progress_queue),
-            name="ModelDownloadThread",
+        # Start a thread to fetch available models
+        fetch_thread = threading.Thread(
+            target=check_and_list_models,
+            args=(progress_queue,),
+            name="ModelFetchThread",
             daemon=True
         )
-        download_thread.start()
+        fetch_thread.start()
 
         # Display progress in a separate window
-        self.display_download_progress(progress_queue, model_name)
-    
-    def display_download_progress(self, progress_queue, model_name):
-        """Display the download progress in the curses interface."""
-        self.stdscr.clear()
-        h, w = self.stdscr.getmaxyx()
-        title = f"Downloading Model '{model_name}' (Press 'c' to cancel)"
-        try:
-            self.stdscr.addstr(1, w//2 - len(title)//2, title, curses.A_BOLD | curses.A_UNDERLINE)
-        except curses.error:
-            pass  # Handle window too small
-        
-        progress_window = curses.newwin(h-4, w-2, 3, 1)
-        progress_window.box()
-        progress_window.refresh()
-
-        download_complete = False
-        while not download_complete:
+        models = []
+        while fetch_thread.is_alive() or not progress_queue.empty():
             try:
                 msg_type, message = progress_queue.get(timeout=0.1)
                 if msg_type == "status":
-                    progress_window.addstr(1, 2, message[:w-6])
-                elif msg_type == "progress":
-                    # Display progress line
-                    progress_window.addstr(3, 2, message[:w-6])
+                    self.show_message(message)
+                    if self.tts_handler and self.config.get("tts_enabled", False):
+                        self.tts_handler.speak(message)
                 elif msg_type == "error":
-                    progress_window.addstr(5, 2, f"Error: {message}"[:w-6], curses.A_BOLD | curses.A_BLINK)
-                elif msg_type == "complete":
-                    download_complete = True
-                progress_window.refresh()
+                    self.show_message(message)
+                    if self.tts_handler and self.config.get("tts_enabled", False):
+                        self.tts_handler.speak("Failed to fetch available models.")
             except Empty:
                 pass
-            # Check for user input to cancel
+
+        # After fetching, retrieve the models
+        models = check_and_list_models(progress_queue)
+        if not models:
+            self.show_message("No models available or failed to fetch models.")
+            if self.tts_handler and self.config.get("tts_enabled", False):
+                self.tts_handler.speak("No models available or failed to fetch models.")
+            return
+
+        # Display models in a sub-menu
+        selected_model = self.model_selection_submenu(models)
+        if selected_model:
+            # Update configuration with the selected model
+            self.config["model"] = selected_model
+            save_config(self.config)
+            self.show_message(f"Selected model: {selected_model}")
+            if self.tts_handler and self.config.get("tts_enabled", False):
+                self.tts_handler.speak(f"Selected model: {selected_model}")
+
+    def model_selection_submenu(self, models):
+        """Display a sub-menu with the list of models and allow user to select one."""
+        current_selection = 0
+        while True:
+            self.stdscr.clear()
+            h, w = self.stdscr.getmaxyx()
+            title = "Select a Model (Use Arrow Keys & Enter, 'b' to go back)"
+            try:
+                self.stdscr.addstr(1, w//2 - len(title)//2, title, curses.A_BOLD | curses.A_UNDERLINE)
+            except curses.error:
+                pass  # Handle window too small
+
+            for idx, model in enumerate(models):
+                x = w//2 - 30
+                y = 3 + idx
+                if y >= h - 2:
+                    break  # Prevent writing beyond the window
+                if idx == current_selection:
+                    self.stdscr.attron(curses.color_pair(1))
+                    self.stdscr.addstr(y, x, f"> {model}")
+                    self.stdscr.attroff(curses.color_pair(1))
+                else:
+                    self.stdscr.addstr(y, x, f"  {model}")
+            self.stdscr.refresh()
+
             key = self.stdscr.getch()
-            if key in [ord('c'), ord('C')]:
-                # Attempt to terminate the download thread
-                logging.info("User requested to cancel model download.")
-                # Note: Python does not provide a direct way to terminate threads.
-                # As a workaround, you can set the stop_event or implement a flag.
-                # Here, we'll just inform the user.
-                self.show_message("Cancellation not supported at this time.")
-        
-        self.show_message(f"Model '{model_name}' download process completed.")
-        if self.tts_handler and self.config.get("tts_enabled", False):
-            self.tts_handler.speak(f"Model {model_name} download process completed.")
+            if key == curses.KEY_UP and current_selection > 0:
+                current_selection -= 1
+            elif key == curses.KEY_DOWN and current_selection < len(models) - 1:
+                current_selection += 1
+            elif key in [curses.KEY_ENTER, 10, 13]:
+                return models[current_selection]
+            elif key in [ord('b'), ord('B')]:
+                return None
 
     def get_available_flite_voices(self):
         """Retrieve available flite voices."""
@@ -883,7 +893,18 @@ class Menu:
             self.stdscr.refresh()
             self.stdscr.getch()
         except curses.error:
-            pass  # Ignore if the string is too long for the window
+            pass  # If the string is too long for the window
+
+# ======================= Health Check Display ============================
+def display_health_status(stdscr, is_healthy):
+    """Display the health status of the Ollama API."""
+    h, w = stdscr.getmaxyx()
+    status = "Healthy" if is_healthy else "Unhealthy"
+    color = curses.color_pair(2) if is_healthy else curses.color_pair(3)
+    try:
+        stdscr.addstr(0, 0, f"Ollama API Health: {status}", color)
+    except curses.error:
+        pass  # Handle window too small
 
 # ======================= Main curses display loop with Menu Integration =========================
 def main(stdscr):
@@ -893,6 +914,12 @@ def main(stdscr):
     stdscr.clear()
     stdscr.nodelay(True)  # Make getch() non-blocking
     stdscr.timeout(100)   # Set timeout for screen refresh rate
+
+    # Initialize color pairs for health status
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Healthy
+    curses.init_pair(3, curses.COLOR_RED, curses.COLOR_BLACK)    # Unhealthy
 
     # Load or create configuration
     config = load_config()
@@ -906,16 +933,23 @@ def main(stdscr):
     # This will automatically download if not present and display progress
     # Initialize a queue to receive progress updates
     progress_queue = Queue()
-    progress_thread = threading.Thread(
-        target=check_and_download_model,
-        args=(config.get("model", "llava"), progress_queue),
-        name="ModelDownloadThread",
+    download_thread = threading.Thread(
+        target=check_and_list_models,
+        args=(progress_queue,),
+        name="ModelFetchThread",
         daemon=True
     )
-    progress_thread.start()
+    download_thread.start()
 
-    # Initialize a temporary directory for captured images
-    temp_dir = tempfile.mkdtemp(prefix="voice_assistant_")
+    # Display initial model fetching status
+    stdscr.clear()
+    h, w = stdscr.getmaxyx()
+    loading_message = "Fetching available models..."
+    try:
+        stdscr.addstr(h//2, w//2 - len(loading_message)//2, loading_message, curses.A_BOLD)
+    except curses.error:
+        pass  # Handle window too small
+    stdscr.refresh()
 
     # Load chat history
     chat_history = load_chat_history(config)
@@ -983,23 +1017,25 @@ def main(stdscr):
 
     try:
         while True:
-            # Handle model download progress
+            # Handle model fetching progress
             try:
                 while True:
                     msg_type, message = progress_queue.get_nowait()
                     if msg_type == "status":
-                        # Display status messages
-                        display_download_status(stdscr, message)
+                        stdscr.clear()
+                        h, w = stdscr.getmaxyx()
+                        status_message = f"Status: {message}"
+                        try:
+                            stdscr.addstr(1, w//2 - len(status_message)//2, status_message, curses.A_BOLD)
+                        except curses.error:
+                            pass  # Handle window too small
+                        stdscr.refresh()
+                        if self := getattr(Menu, 'show_message', None):
+                            pass  # No action
                         if tts_handler and config.get("tts_enabled", False):
                             tts_handler.speak(message)
-                    elif msg_type == "progress":
-                        # Display progress messages
-                        display_download_progress(stdscr, message)
                     elif msg_type == "error":
                         display_error(stdscr, message, tts_handler, config)
-                    elif msg_type == "complete":
-                        # Download complete
-                        display_download_complete(stdscr, config.get("model", "llava"))
             except Empty:
                 pass
 
@@ -1138,31 +1174,33 @@ def main(stdscr):
                         continue
 
                     # Capture camera frame for inference and save to 'frames' directory
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    image_filename = f"inference_frame_{timestamp}.jpg"
-                    image_path = os.path.join(temp_dir, image_filename)
-                    logging.info(f"Capturing camera frame to '{image_path}'...")
-                    try:
-                        # Execute libcamera-still to capture a frame
-                        subprocess.run(['libcamera-still', '-o', image_path, '--width', '640', '--height', '480', '-t', '1'], check=True, stdout=SUBPROCESS_STDERR, stderr=SUBPROCESS_STDERR)
-                        logging.info(f"Captured frame saved to '{image_path}'.")
-                        
-                        # Save the image to 'frames' directory with timestamped name
-                        frames_image_path = os.path.join(FRAMES_DIR, f"{timestamp}.jpg")
-                        shutil.copy(image_path, frames_image_path)
-                        logging.info(f"Image saved to frames directory at '{frames_image_path}'.")
-                        
-                        if tts_handler and config.get("tts_enabled", False):
-                            tts_handler.speak(f"Captured a frame for inference at {timestamp}.")
-                        # Display a message about the captured frame
-                        conversation_log.append({"role": "assistant", "content": f"Captured a frame for inference at {timestamp}."})
-                    except subprocess.CalledProcessError as e:
-                        error_msg = f"Failed to capture camera frame: {e}"
-                        conversation_log.append({"role": "error", "content": error_msg})
-                        logging.error(error_msg)
-                        accumulated_text = ""
-                        last_speech_time = None
-                        continue
+                    image_path = None
+                    if config.get("image_included_inference", True):
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        image_filename = f"inference_frame_{timestamp}.jpg"
+                        image_path = os.path.join(temp_dir := tempfile.gettempdir(), image_filename)
+                        logging.info(f"Capturing camera frame to '{image_path}'...")
+                        try:
+                            # Execute libcamera-still to capture a frame with 180-degree rotation
+                            subprocess.run(['libcamera-still', '-o', image_path, '--width', '640', '--height', '480', '--rotation', '180', '-t', '1'], check=True, stdout=SUBPROCESS_STDERR, stderr=SUBPROCESS_STDERR)
+                            logging.info(f"Captured frame saved to '{image_path}'.")
+                            
+                            # Save the image to 'frames' directory with timestamped name
+                            frames_image_path = os.path.join(FRAMES_DIR, f"{timestamp}.jpg")
+                            shutil.copy(image_path, frames_image_path)
+                            logging.info(f"Image saved to frames directory at '{frames_image_path}'.")
+                            
+                            if tts_handler and config.get("tts_enabled", False):
+                                tts_handler.speak(f"Captured a frame for inference at {timestamp}.")
+                            # Display a message about the captured frame
+                            conversation_log.append({"role": "assistant", "content": f"Captured a frame for inference at {timestamp}."})
+                        except subprocess.CalledProcessError as e:
+                            error_msg = f"Failed to capture camera frame: {e}"
+                            conversation_log.append({"role": "error", "content": error_msg})
+                            logging.error(error_msg)
+                            accumulated_text = ""
+                            last_speech_time = None
+                            continue
 
                     # Send accumulated_text and image_path to Ollama API
                     api_thread = threading.Thread(
@@ -1319,38 +1357,16 @@ def display_error(stdscr, message, tts_handler=None, config=None):
     except curses.error:
         pass  # If even this fails, just exit
 
-def display_download_status(stdscr, message):
-    """Display a status message in the curses interface."""
+# ======================= Health Check Display ============================
+def display_health_status(stdscr, is_healthy):
+    """Display the health status of the Ollama API."""
     h, w = stdscr.getmaxyx()
-    status_window = curses.newwin(3, w-2, h//2 - 1, 1)
-    status_window.box()
+    status = "Healthy" if is_healthy else "Unhealthy"
+    color = curses.color_pair(2) if is_healthy else curses.color_pair(3)
     try:
-        status_window.addstr(1, 2, message[:w-6])
+        stdscr.addstr(0, 0, f"Ollama API Health: {status}", color)
     except curses.error:
         pass  # Handle window too small
-    status_window.refresh()
-
-def display_download_progress(stdscr, message):
-    """Display a progress message in the curses interface."""
-    h, w = stdscr.getmaxyx()
-    progress_window = curses.newwin(3, w-2, h//2 + 2, 1)
-    progress_window.box()
-    try:
-        progress_window.addstr(1, 2, message[:w-6])
-    except curses.error:
-        pass  # Handle window too small
-    progress_window.refresh()
-
-def display_download_complete(stdscr, model_name):
-    """Display a completion message in the curses interface."""
-    h, w = stdscr.getmaxyx()
-    complete_window = curses.newwin(3, w-2, h//2 + 6, 1)
-    complete_window.box()
-    try:
-        complete_window.addstr(1, 2, f"Model '{model_name}' download completed.")
-    except curses.error:
-        pass  # Handle window too small
-    complete_window.refresh()
 
 # ======================= Entry Point ======================================
 if __name__ == "__main__":

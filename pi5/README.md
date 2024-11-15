@@ -93,6 +93,17 @@ Check if its running:
 sudo systemctl status fan_pwm.service
 ```
 
+To Reduce Power Consumption when halted:
+
+```
+sudo rpi-eeprom-config -e
+```
+
+Change:
+```
+POWER_OFF_ON_HALT=1
+```
+
 You will likely run into undercurrent when powering off of battery, therefor we must add the following to cpu_freq settings for throttling power consumption during inference
 
 First open the settings to edit

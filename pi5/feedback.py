@@ -369,60 +369,68 @@ def speech_recognition_thread(text_queue, stop_event):
 
     SetLogLevel(-1)  # Suppress Vosk logs
 
-    if not os.path.exists(VOSK_MODEL_PATH):
-        error_msg = f"Vosk model not found at {VOSK_MODEL_PATH}. Please download and place it accordingly."
-        text_queue.put(error_msg)
-        logging.error(error_msg)
-        return
-
-    try:
-        model = Model(VOSK_MODEL_PATH)
-        recognizer = KaldiRecognizer(model, 16000)
-    except Exception as e:
-        error_msg = f"Failed to initialize Vosk model: {e}"
-        text_queue.put(error_msg)
-        logging.error(error_msg)
-        return
-
-    p = pyaudio.PyAudio()
-
-    try:
-        stream = p.open(format=pyaudio.paInt16,
-                        channels=1,
-                        rate=16000,
-                        input=True,
-                        frames_per_buffer=4000)
-        stream.start_stream()
-    except Exception as e:
-        error_msg = f"Microphone error: {e}"
-        text_queue.put(error_msg)
-        logging.error(error_msg)
-        return
-
-    logging.info("Speech recognition thread started.")
-
     while not stop_event.is_set():
         try:
-            data = stream.read(4000, exception_on_overflow=False)
-            if recognizer.AcceptWaveform(data):
-                result = recognizer.Result()
-                result_json = json.loads(result)
-                text = result_json.get("text", "")
-                if text:
-                    text_queue.put(text)
-                    logging.info(f"Recognized speech: {text}")
-            else:
-                partial = recognizer.PartialResult()
-                # Optionally handle partial results
+            if not os.path.exists(VOSK_MODEL_PATH):
+                error_msg = f"Vosk model not found at {VOSK_MODEL_PATH}. Please download and place it accordingly."
+                text_queue.put(error_msg)
+                logging.error(error_msg)
+                return
+
+            model = Model(VOSK_MODEL_PATH)
+            recognizer = KaldiRecognizer(model, 16000)
+
+            p = pyaudio.PyAudio()
+
+            try:
+                stream = p.open(format=pyaudio.paInt16,
+                                channels=1,
+                                rate=16000,
+                                input=True,
+                                frames_per_buffer=4000)
+                stream.start_stream()
+            except Exception as e:
+                error_msg = f"Microphone error: {e}"
+                text_queue.put(error_msg)
+                logging.error(error_msg)
+                p.terminate()
+                time.sleep(5)  # Wait before retrying
+                continue  # Retry initializing the microphone
+
+            logging.info("Speech recognition thread started.")
+
+            while not stop_event.is_set():
+                try:
+                    data = stream.read(4000, exception_on_overflow=False)
+                    if recognizer.AcceptWaveform(data):
+                        result = recognizer.Result()
+                        result_json = json.loads(result)
+                        text = result_json.get("text", "")
+                        if text:
+                            text_queue.put(text)
+                            logging.info(f"Recognized speech: {text}")
+                    else:
+                        partial = recognizer.PartialResult()
+                        # Optionally handle partial results
+                except Exception as e:
+                    error_msg = f"Speech Recognition error: {e}"
+                    text_queue.put(error_msg)
+                    logging.error(error_msg)
+                    break  # Exit the inner loop to restart recognition
+
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            logging.info("Speech recognition stream closed.")
+
         except Exception as e:
-            error_msg = f"Speech Recognition error: {e}"
+            error_msg = f"Speech Recognition initialization error: {e}"
             text_queue.put(error_msg)
             logging.error(error_msg)
-            break
-
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+        
+        # Wait before retrying to prevent rapid restarts
+        time.sleep(5)
+    
     logging.info("Speech recognition thread terminated.")
 
 # ======================= Ollama API Streaming ============================
@@ -1124,10 +1132,39 @@ def main(stdscr):
     MAX_CONVERSATION_LINES = 100  # Adjust as needed
 
     # Define a regex pattern to detect sentence endings
-    sentence_end_pattern = re.compile(r'([.!?,\n])')  # Matches ., !, ?, ,, or newline
+    sentence_end_pattern = re.compile(r'([.!?,\n]|  )')  # Matches ., !, ?, ,, newline, or double space
 
     # Initialize TTS buffer for sentence chunking
     tts_buffer = ""
+
+    # --- Modification Start ---
+    # Function to monitor and restart speech recognition thread if it's not alive
+    def monitor_speech_thread():
+        """Monitor the speech recognition thread and restart if necessary."""
+        nonlocal speech_thread  # Declare as nonlocal to modify the speech_thread defined in main
+        while not stop_event.is_set():
+            if not speech_thread.is_alive():
+                logging.warning("Speech recognition thread has stopped. Restarting...")
+                # Restart the speech recognition thread
+                new_speech_thread = threading.Thread(
+                    target=speech_recognition_thread,
+                    args=(text_queue, stop_event),
+                    name="SpeechRecognitionThread",
+                    daemon=True
+                )
+                new_speech_thread.start()
+                logging.info("Speech recognition thread restarted.")
+                speech_thread = new_speech_thread
+            time.sleep(5)  # Check every 5 seconds
+
+    # Start the monitor thread
+    monitor_thread = threading.Thread(
+        target=monitor_speech_thread,
+        name="SpeechMonitorThread",
+        daemon=True
+    )
+    monitor_thread.start()
+    # --- Modification End ---
 
     try:
         while True:
@@ -1460,6 +1497,7 @@ def main(stdscr):
         # Signal threads to stop and wait for them to finish
         stop_event.set()
         speech_thread.join()
+        monitor_thread.join()  # Wait for the monitor thread to finish
         if api_thread:
             api_thread.join()
         if tts_handler:

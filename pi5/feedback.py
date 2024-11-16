@@ -17,6 +17,8 @@ import re
 from datetime import datetime, timedelta
 import zipfile
 import shutil
+import base64
+import tempfile
 
 # ======================= Configuration Constants =======================
 VENV_DIR = "voice_venv"
@@ -24,6 +26,7 @@ CONFIG_FILE = "config.json"
 CHAT_HISTORY_FILE = "chat_history.json"  # Path to chat history file
 VOSK_MODEL_PATH = "models/vosk-model-small-en-us-0.15"  # Path to Vosk model
 VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"  # URL to download the Vosk model
+FRAMES_DIR = "frames"  # Directory to save inference frames
 
 # User-provided configuration
 DEFAULT_CONFIG = {
@@ -55,10 +58,11 @@ DEFAULT_CONFIG = {
     "repeat_penalty": 1.2,
     "tools": [],
     "model_list_refresh_interval": 300,
-    "model": "llama3.2:1b",
+    "model": "llava",  # Updated to 'llava'
     "generate_api_url": "http://127.0.0.1:11434/api/generate",
     "chat_api_url": "http://127.0.0.1:11434/api/chat",
-    "default_endpoint": "chat"
+    "default_endpoint": "chat",
+    "image_included_inference": True  # New configuration parameter
 }
 
 # ======================= Logging Configuration ==========================
@@ -67,15 +71,6 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-# ======================= Suppress ALSA and JACK Warnings ==================
-def redirect_stderr():
-    """Redirects the OS-level stderr to suppress ALSA and JACK errors."""
-    sys.stderr.flush()
-    devnull = open(os.devnull, 'w')
-    os.dup2(devnull.fileno(), sys.stderr.fileno())
-
-redirect_stderr()
 
 # ======================= Subprocess stderr suppression ====================
 SUBPROCESS_STDERR = subprocess.DEVNULL
@@ -228,6 +223,35 @@ def download_vosk_model():
         print(f"Error: Failed to extract Vosk model: {e}")
         sys.exit("Error: Failed to extract Vosk model.")
 
+# ======================= Model Checker and Downloader ====================
+def check_and_list_models(progress_queue):
+    """
+    Check and list models available locally using the Ollama API's /api/tags endpoint.
+    
+    :param progress_queue: Queue to send progress updates.
+    :return: List of model names.
+    """
+    api_url = "http://localhost:11434/api/tags"
+    try:
+        progress_queue.put(("status", "Fetching available models..."))
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        models = [model['name'] for model in data.get('models', [])]
+        progress_queue.put(("status", f"Found {len(models)} models."))
+        logging.info(f"Fetched {len(models)} models from Ollama API.")
+        return models
+    except requests.RequestException as e:
+        error_msg = f"Failed to fetch models from Ollama API: {e}"
+        progress_queue.put(("error", error_msg))
+        logging.error(error_msg)
+        return []
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON response from Ollama API: {e}"
+        progress_queue.put(("error", error_msg))
+        logging.error(error_msg)
+        return []
+
 # ======================= Text-to-Speech Handler Using flite ==============
 def clear_queue(q):
     """Drain all items from a queue."""
@@ -298,7 +322,7 @@ def load_chat_history(config):
                     chat_history.insert(0, {"role": "system", "content": config.get("system_prompt", "You are a helpful assistant.")})
                 return chat_history
             except (json.JSONDecodeError, IOError) as e:
-                logging.error(f"Error loading chat history: {e}. Starting with empty history.")
+                logging.error(f"Error loading chat history: {e}. Starting with system prompt.")
                 return [{"role": "system", "content": config.get("system_prompt", "You are a helpful assistant.")}]
         else:
             logging.info("Chat history file not found. Starting with system prompt.")
@@ -402,24 +426,44 @@ def speech_recognition_thread(text_queue, stop_event):
     logging.info("Speech recognition thread terminated.")
 
 # ======================= Ollama API Streaming ============================
-def send_to_ollama_api_stream(endpoint, data, response_queue, stop_event, config, chat_history):
+def send_to_ollama_api_stream(endpoint, data, response_queue, stop_event, config, chat_history, image_path=None):
     """
     Thread function to send user input to Ollama API and stream responses.
-    
+
     :param endpoint: API endpoint to use ('generate' or 'chat')
     :param data: Dictionary containing the request payload
     :param response_queue: Queue to put the responses
     :param stop_event: Event to signal thread to stop
     :param config: Configuration dictionary
     :param chat_history: Current chat history
+    :param image_path: Path to the image to send for inference (if any)
     """
     url = config.get("generate_api_url") if endpoint == "generate" else config.get("chat_api_url")
     headers = {"Content-Type": "application/json"}
 
+    # If image_path is provided and image_included_inference is True, encode the image in base64 and add to data
+    if config.get("image_included_inference", True) and image_path and os.path.exists(image_path):
+        try:
+            with open(image_path, "rb") as img_file:
+                encoded_string = base64.b64encode(img_file.read()).decode('utf-8')
+            data["images"] = [encoded_string]
+            logging.info(f"Image '{image_path}' encoded and added to the payload.")
+        except Exception as e:
+            error_msg = f"Failed to encode image '{image_path}': {e}"
+            response_queue.put(("error", error_msg))
+            logging.error(error_msg)
+            return
+    else:
+        if image_path:
+            error_msg = f"Image file '{image_path}' does not exist or image_included_inference is disabled."
+            response_queue.put(("error", error_msg))
+            logging.error(error_msg)
+            return
+
     logging.debug(f"Sending data to Ollama API at {url}: {json.dumps(data, indent=2)}")
-    
+
     try:
-        with requests.post(url, headers=headers, json=data, stream=True, timeout=60) as response:
+        with requests.post(url, headers=headers, json=data, stream=True, timeout=120) as response:
             response.raise_for_status()
             logging.info(f"Ollama API ({endpoint}) request sent successfully.")
             buffer = ""
@@ -449,24 +493,132 @@ def send_to_ollama_api_stream(endpoint, data, response_queue, stop_event, config
                                 content = line
                             
                             if content:
-                                response_queue.put(content)
+                                response_queue.put(("progress", content))
                                 logging.debug(f"Received content: {content}")
                         except json.JSONDecodeError:
                             logging.warning(f"Malformed JSON line received: {line}")
                             continue  # Ignore malformed JSON lines
     except requests.RequestException as e:
         error_msg = f"Failed to send to Ollama API: {e}"
-        response_queue.put(error_msg)
+        response_queue.put(("error", error_msg))
         logging.error(error_msg)
     finally:
         # Signal that the API streaming is done
-        response_queue.put(None)
+        response_queue.put(("complete", None))
         logging.info("Ollama API streaming ended.")
+
+# ======================= Tool Call Handling ===============================
+def load_functions_module():
+    """Load the functions module for tool handling."""
+    try:
+        import functions  # Assuming you have a functions.py module
+        return functions
+    except ImportError as e:
+        logging.error(f"Failed to load functions module: {e}")
+        return None
+
+def perform_inference(user_input):
+    """Placeholder for performing inference with user input."""
+    # Implement your inference logic here
+    logging.info(f"Performing inference with user input: {user_input}")
+    # Example response
+    return "Inference result based on user input."
+
+def handle_tool_call(tool_call, functions, tts_handler, config):
+    """
+    Execute the tool function based on the tool_call dictionary.
+
+    Args:
+        tool_call (dict): Contains 'function' with 'name' and 'arguments'.
+        functions (module): The loaded functions module.
+        tts_handler (TTSHandler): The TTS handler instance.
+        config (dict): Configuration dictionary.
+
+    Returns:
+        str: Response from the tool function or error message.
+    """
+    try:
+        # Extract function information
+        function_info = tool_call.get("function", {})
+        function_name = function_info.get("name")
+        arguments = tool_call.get("arguments", {})
+
+        # Debug: Print the incoming tool_call to see what is being passed
+        logging.debug(f"Tool call received: {json.dumps(tool_call, indent=2)}")
+        logging.debug(f"Extracted function name: {function_name}")
+
+        # Ensure the function name is present
+        if not function_name:
+            return "Error: No function name provided in tool call."
+
+        # Check if the function exists in the functions module
+        if functions and hasattr(functions, function_name):
+            function_to_call = getattr(functions, function_name)
+            try:
+                logging.debug(f"Executing '{function_name}' with arguments: {arguments}")
+                # Execute the function with arguments
+                result = function_to_call(arguments)
+                return handle_result(result)
+            except Exception as e:
+                logging.error(f"Error while executing '{function_name}': {e}")
+                return f"Error: {e}"
+        else:
+            return f"Error: Function '{function_name}' not found."
+    except Exception as e:
+        logging.error(f"Error executing tool '{function_name}': {e}")
+        return f"Error executing tool '{function_name}': {e}"
+
+def handle_result(result):
+    """
+    Process the result returned by the tool function.
+    Depending on the type of result, return a string or a formatted output.
+
+    Args:
+        result (Any): The result returned by the tool function.
+
+    Returns:
+        str: The processed output to be sent back to the orchestrator or displayed.
+    """
+    # If the result is a string, return it directly
+    if isinstance(result, str):
+        return result
+
+    # If the result is a dictionary, format it as a pretty-printed JSON
+    elif isinstance(result, dict):
+        try:
+            return json.dumps(result, indent=2)
+        except (TypeError, ValueError):
+            return f"Error: Unable to format dictionary result: {result}"
+
+    # If the result is a list, convert it into a human-readable format
+    elif isinstance(result, list):
+        try:
+            return "\n".join(map(str, result))
+        except Exception as e:
+            return f"Error: Unable to format list result: {e}"
+
+    # If the result is of any other type, convert it to string
+    else:
+        return str(result)
+
+def send_tool_response(tool_response, perform_inference_func):
+    """
+    Send the tool's response back to the Ollama API to continue the conversation.
+
+    Args:
+        tool_response (str): The response from the executed tool.
+        perform_inference_func (function): The function to perform inference with new user input.
+    """
+    try:
+        perform_inference_func(user_input=tool_response)
+        logging.info(f"Sent tool response to Ollama API: {tool_response}")
+    except Exception as e:
+        logging.error(f"Failed to send tool response: {e}")
 
 # ======================= Curses Menu System ==============================
 class Menu:
     """Handles the configuration menu within the curses interface."""
-    def __init__(self, stdscr, config, tts_handler, chat_history):
+    def __init__(self, stdscr, config, tts_handler, chat_history, progress_queue=None):
         self.stdscr = stdscr
         self.config = config
         self.tts_handler = tts_handler
@@ -481,9 +633,12 @@ class Menu:
             "Set TTS Voice",
             "Clear Chat History",
             "View Chat History",
+            "Select Model",  # New menu item
+            "Toggle Image Included Inference",
             "Back to Main"
         ]
         self.current_selection = 0
+        self.progress_queue = progress_queue  # Queue for progress updates
 
     def display_menu(self):
         """Display the configuration menu."""
@@ -492,8 +647,8 @@ class Menu:
         title = "Configuration Menu (Use Arrow Keys & Enter)"
         try:
             self.stdscr.addstr(1, w//2 - len(title)//2, title, curses.A_BOLD | curses.A_UNDERLINE)
-        except curses.error:
-            pass  # Handle window too small
+        except curses.error as e:
+            logging.error(f"Curses error in display_menu: {e}")
 
         for idx, item in enumerate(self.menu_items):
             x = w//2 - 30
@@ -543,6 +698,10 @@ class Menu:
                     self.clear_chat_history()
                 elif selected_item == "View Chat History":
                     self.view_chat_history()
+                elif selected_item == "Select Model":  # Handle new menu item
+                    self.select_model()
+                elif selected_item == "Toggle Image Included Inference":  # Handle existing menu item
+                    self.toggle_image_included_inference()
                 elif selected_item == "Back to Main":
                     break
 
@@ -662,7 +821,7 @@ class Menu:
             self.show_message("Chat history is disabled.")
             return
         confirm = self.get_input("Are you sure you want to clear chat history? (y/n):", "n")
-        if confirm.lower() == 'y':
+        if confirm and confirm.lower() == 'y':
             try:
                 with open(CHAT_HISTORY_FILE, 'w') as f:
                     json.dump([], f, indent=4)
@@ -689,6 +848,99 @@ class Menu:
         display_text = "\n".join([f"{entry['role'].capitalize()}: {entry['content']}" for entry in history_to_display])
         self.show_message(f"Chat History:\n{display_text}")
 
+    def toggle_image_included_inference(self):
+        """Toggle the Image-Included Inference feature."""
+        self.config["image_included_inference"] = not self.config.get("image_included_inference", True)
+        save_config(self.config)
+        status = "enabled" if self.config["image_included_inference"] else "disabled"
+        self.show_message(f"Image-Included Inference {status}.")
+        if self.tts_handler and self.config.get("tts_enabled", False):
+            self.tts_handler.speak(f"Image-included inference {status}.")
+
+    def select_model(self):
+        """Fetch available models from Ollama API and allow user to select one."""
+        # Initialize a queue to receive progress updates
+        progress_queue = Queue()
+        # Start a thread to fetch available models
+        fetch_thread = threading.Thread(
+            target=check_and_list_models,
+            args=(progress_queue,),
+            name="ModelFetchThread",
+            daemon=True
+        )
+        fetch_thread.start()
+
+        # Collect messages from progress_queue
+        models = []
+        while fetch_thread.is_alive() or not progress_queue.empty():
+            try:
+                msg_type, message = progress_queue.get(timeout=0.1)
+                if msg_type == "status":
+                    self.show_message(message)
+                    if self.tts_handler and self.config.get("tts_enabled", False):
+                        self.tts_handler.speak(message)
+                elif msg_type == "error":
+                    self.show_message(message)
+                    if self.tts_handler and self.config.get("tts_enabled", False):
+                        self.tts_handler.speak("Failed to fetch available models.")
+            except Empty:
+                pass
+
+        # After fetching, retrieve the models
+        models = check_and_list_models(progress_queue)
+        if not models:
+            self.show_message("No models available or failed to fetch models.")
+            if self.tts_handler and self.config.get("tts_enabled", False):
+                self.tts_handler.speak("No models available or failed to fetch models.")
+            return
+
+        # Display models in a sub-menu
+        selected_model = self.model_selection_submenu(models)
+        if selected_model:
+            # Update configuration with the selected model
+            self.config["model"] = selected_model
+            save_config(self.config)
+            self.show_message(f"Selected model: {selected_model}")
+            if self.tts_handler and self.config.get("tts_enabled", False):
+                self.tts_handler.speak(f"Selected model: {selected_model}")
+            # Reset conversation history for the new model
+            self.reset_conversation()
+
+    def model_selection_submenu(self, models):
+        """Display a sub-menu with the list of models and allow user to select one."""
+        current_selection = 0
+        while True:
+            self.stdscr.clear()
+            h, w = self.stdscr.getmaxyx()
+            title = "Select a Model (Use Arrow Keys & Enter, 'b' to go back)"
+            try:
+                self.stdscr.addstr(1, w//2 - len(title)//2, title, curses.A_BOLD | curses.A_UNDERLINE)
+            except curses.error as e:
+                logging.error(f"Curses error in model_selection_submenu: {e}")
+
+            for idx, model in enumerate(models):
+                x = w//2 - 30
+                y = 3 + idx
+                if y >= h - 2:
+                    break  # Prevent writing beyond the window
+                if idx == current_selection:
+                    self.stdscr.attron(curses.color_pair(1))
+                    self.stdscr.addstr(y, x, f"> {model}")
+                    self.stdscr.attroff(curses.color_pair(1))
+                else:
+                    self.stdscr.addstr(y, x, f"  {model}")
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key == curses.KEY_UP and current_selection > 0:
+                current_selection -= 1
+            elif key == curses.KEY_DOWN and current_selection < len(models) - 1:
+                current_selection += 1
+            elif key in [curses.KEY_ENTER, 10, 13]:
+                return models[current_selection]
+            elif key in [ord('b'), ord('B')]:
+                return None
+
     def get_available_flite_voices(self):
         """Retrieve available flite voices."""
         try:
@@ -710,8 +962,8 @@ class Menu:
         try:
             self.stdscr.addstr(h//2 - 1, w//2 - len(prompt_str)//2, prompt_str)
             self.stdscr.addstr(h//2, w//2 - 10, "> ")
-        except curses.error:
-            pass  # Handle window too small
+        except curses.error as e:
+            logging.error(f"Curses error in get_input: {e}")
         self.stdscr.refresh()
         # Create a window for input
         input_width = min(len(default) + 20, w - (w//2 - 10) - 4)
@@ -723,7 +975,8 @@ class Menu:
         try:
             # Disable echoing for the window since Textbox handles it
             user_input = box.edit().strip()
-        except curses.error:
+        except curses.error as e:
+            logging.error(f"Curses error in get_input during box.edit(): {e}")
             user_input = ""
         return user_input if user_input else default
 
@@ -741,20 +994,70 @@ class Menu:
             self.stdscr.addstr(h//2 + 2, w//2 - 10, "Press any key to continue.")
             self.stdscr.refresh()
             self.stdscr.getch()
-        except curses.error:
-            pass  # Ignore if the string is too long for the window
+        except curses.error as e:
+            logging.error(f"Curses error in show_message: {e}")
+
+    def reset_conversation(self):
+        """Reset the conversation history after model switch."""
+        self.chat_history = load_chat_history(self.config)
+        self.show_message("Conversation history reset for the new model.")
+        if self.tts_handler and self.config.get("tts_enabled", False):
+            self.tts_handler.speak("Conversation history reset for the new model.")
+
+# ======================= Health Check Display ============================
+def display_health_status(stdscr, is_healthy):
+    """Display the health status of the Ollama API."""
+    h, w = stdscr.getmaxyx()
+    status = "Healthy" if is_healthy else "Unhealthy"
+    color = curses.color_pair(2) if is_healthy else curses.color_pair(3)
+    try:
+        stdscr.addstr(0, 0, f"Ollama API Health: {status}", color)
+    except curses.error as e:
+        logging.error(f"Curses error in display_health_status: {e}")
 
 # ======================= Main curses display loop with Menu Integration =========================
 def main(stdscr):
     """Main function to handle the curses interface and voice assistant operations."""
+    temp_dir = tempfile.gettempdir()  # Define temp_dir here
     # Initialize curses settings
     curses.curs_set(0)  # Hide cursor
     stdscr.clear()
     stdscr.nodelay(True)  # Make getch() non-blocking
     stdscr.timeout(100)   # Set timeout for screen refresh rate
 
+    # Initialize color pairs for health status
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Healthy
+    curses.init_pair(3, curses.COLOR_RED, curses.COLOR_BLACK)    # Unhealthy
+
     # Load or create configuration
     config = load_config()
+
+    # Ensure frames directory exists
+    if not os.path.exists(FRAMES_DIR):
+        os.makedirs(FRAMES_DIR)
+        logging.info(f"Created frames directory at '{FRAMES_DIR}'.")
+
+    # Check and list models using a thread
+    progress_queue = Queue()
+    download_thread = threading.Thread(
+        target=check_and_list_models,
+        args=(progress_queue,),
+        name="ModelFetchThread",
+        daemon=True
+    )
+    download_thread.start()
+
+    # Display initial model fetching status
+    stdscr.clear()
+    h, w = stdscr.getmaxyx()
+    loading_message = "Fetching available models..."
+    try:
+        stdscr.addstr(h//2, w//2 - len(loading_message)//2, loading_message, curses.A_BOLD)
+    except curses.error as e:
+        logging.error(f"Curses error in main during initial loading message: {e}")
+    stdscr.refresh()
 
     # Load chat history
     chat_history = load_chat_history(config)
@@ -774,6 +1077,7 @@ def main(stdscr):
         stdscr.addstr(0, 0, f"Failed to import Vosk: {e}")
         stdscr.refresh()
         stdscr.getch()
+        logging.error(f"Failed to import Vosk: {e}")
         return
 
     # Initialize Queues for inter-thread communication
@@ -804,6 +1108,11 @@ def main(stdscr):
     )
     speech_thread.start()
 
+    # Load functions module once
+    functions = load_functions_module()
+    if functions is None:
+        logging.error("No functions module loaded. Tool calls will not work.")
+
     # Variables to handle API responses
     api_thread = None
     ollama_response = ""
@@ -822,10 +1131,31 @@ def main(stdscr):
 
     try:
         while True:
+            # Handle model fetching progress
+            try:
+                while True:
+                    msg_type, message = progress_queue.get_nowait()
+                    if msg_type == "status":
+                        stdscr.clear()
+                        h, w = stdscr.getmaxyx()
+                        status_message = f"Status: {message}"
+                        try:
+                            stdscr.addstr(1, w//2 - len(status_message)//2, status_message, curses.A_BOLD)
+                        except curses.error as e:
+                            logging.error(f"Curses error in main during status update: {e}")
+                        stdscr.refresh()
+                        if tts_handler and config.get("tts_enabled", False):
+                            tts_handler.speak(message)
+                    elif msg_type == "error":
+                        display_error(stdscr, message, tts_handler, config)
+            except Empty:
+                pass
+
             # Check for user input
             try:
                 key = stdscr.getch()
-            except:
+            except Exception as e:
+                logging.error(f"Error getting user input: {e}")
                 key = -1
 
             if key != -1:
@@ -894,12 +1224,12 @@ def main(stdscr):
                     # ==== End of Clearing ====
 
                     # Determine which endpoint to use based on configuration
-                    endpoint = config.get("default_endpoint", "generate")
+                    endpoint = config.get("default_endpoint", "chat")
 
                     # Prepare the data payload based on endpoint
                     if endpoint == "generate":
                         data = {
-                            "model": config.get("model", "llama3.2:1b"),
+                            "model": config.get("model", "llava"),
                             "prompt": accumulated_text.strip(),
                             "stream": config.get("stream", True),
                             "format": config.get("format", "json"),
@@ -925,7 +1255,7 @@ def main(stdscr):
                             data["tools"] = config["tools"]
                     elif endpoint == "chat":
                         data = {
-                            "model": config.get("model", "llama3.2:1b"),
+                            "model": config.get("model", "llava"),
                             "messages": chat_history,
                             "stream": config.get("stream", True),
                             "format": config.get("format", "json"),
@@ -956,13 +1286,39 @@ def main(stdscr):
                         last_speech_time = None
                         continue
 
-                    # Send accumulated_text to Ollama API
-                    # Append a new entry for Ollama's response
-                    conversation_log.append({"role": "assistant", "content": ""})
-                    assistant_entry_index = len(conversation_log) - 1
+                    # Capture camera frame for inference and save to 'frames' directory
+                    image_path = None
+                    if config.get("image_included_inference", True):
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        image_filename = f"inference_frame_{timestamp}.jpg"
+                        image_path = os.path.join(temp_dir, image_filename)
+                        logging.info(f"Capturing camera frame to '{image_path}'...")
+                        try:
+                            # Execute libcamera-still to capture a frame with 180-degree rotation
+                            subprocess.run(['libcamera-still', '-o', image_path, '--width', '640', '--height', '480', '--rotation', '180', '-t', '1'], check=True, stdout=SUBPROCESS_STDERR, stderr=SUBPROCESS_STDERR)
+                            logging.info(f"Captured frame saved to '{image_path}'.")
+                            
+                            # Save the image to 'frames' directory with timestamped name
+                            frames_image_path = os.path.join(FRAMES_DIR, f"{timestamp}.jpg")
+                            shutil.copy(image_path, frames_image_path)
+                            logging.info(f"Image saved to frames directory at '{frames_image_path}'.")
+                            
+                            if tts_handler and config.get("tts_enabled", False):
+                                tts_handler.speak(f"Captured a frame for inference at {timestamp}.")
+                            # Display a message about the captured frame
+                            conversation_log.append({"role": "assistant", "content": f"Captured a frame for inference at {timestamp}."})
+                        except subprocess.CalledProcessError as e:
+                            error_msg = f"Failed to capture camera frame: {e}"
+                            conversation_log.append({"role": "error", "content": error_msg})
+                            logging.error(error_msg)
+                            accumulated_text = ""
+                            last_speech_time = None
+                            continue
+
+                    # Send accumulated_text and image_path to Ollama API
                     api_thread = threading.Thread(
                         target=send_to_ollama_api_stream,
-                        args=(endpoint, data, response_queue, stop_event, config, chat_history),
+                        args=(endpoint, data, response_queue, stop_event, config, chat_history, image_path),
                         name="OllamaAPIThread",
                         daemon=True
                     )
@@ -973,22 +1329,18 @@ def main(stdscr):
             # Check if any new API response tokens are available
             try:
                 while True:
-                    token = response_queue.get_nowait()
-                    if token is None:
-                        # API response is complete
-                        break
-                    elif token.startswith("Failed to send to Ollama API:"):
-                        conversation_log.append({"role": "error", "content": token})
-                    else:
-                        ollama_response += token
-                        logging.debug(f"Received token: {token}")
-                        # Append token to the assistant's last message
-                        if 'assistant_entry_index' in locals():
-                            conversation_log[assistant_entry_index]['content'] += token
+                    msg_type, message = response_queue.get_nowait()
+                    if msg_type == "progress":
+                        # Append to the last assistant message or create a new one
+                        if conversation_log and conversation_log[-1]['role'] == 'assistant':
+                            conversation_log[-1]['content'] += message
+                        else:
+                            conversation_log.append({"role": "assistant", "content": message})
+                        logging.debug(f"Received token: {message}")
 
                         # ==== Sentence Chunking and TTS Playback ====
                         # Append token to tts_buffer
-                        tts_buffer += token
+                        tts_buffer += message
                         # Check for sentence-ending punctuation
                         sentences = []
                         while True:
@@ -1005,6 +1357,28 @@ def main(stdscr):
                             if sentence:
                                 tts_handler.speak(sentence)
                         # ==== End of TTS Playback ====
+                    elif msg_type == "error":
+                        conversation_log.append({"role": "error", "content": message})
+                        logging.error(f"API Error: {message}")
+                    elif msg_type == "complete":
+                        # API response is complete
+                        # Set api_thread to None to indicate it's done
+                        api_thread = None
+                        # Check if a tool call is needed
+                        if conversation_log and conversation_log[-1]['role'] == 'assistant':
+                            assistant_content = conversation_log[-1]['content']
+                            try:
+                                response_json = json.loads(assistant_content)
+                                if 'tool_call' in response_json:
+                                    tool_call = response_json['tool_call']
+                                    if functions:
+                                        tool_response = handle_tool_call(tool_call, functions, tts_handler, config)
+                                        # Append the tool response as a new assistant message
+                                        conversation_log.append({"role": "assistant", "content": tool_response})
+                                        # Send the tool response back to Ollama API
+                                        send_tool_response(tool_response, perform_inference=perform_inference)
+                            except json.JSONDecodeError:
+                                pass  # Not a JSON response, continue normally
             except Empty:
                 pass
 
@@ -1055,15 +1429,16 @@ def main(stdscr):
             for idx, line in enumerate(display_lines):
                 try:
                     stdscr.addstr(idx, 0, line[:width-1])
-                except curses.error:
+                except curses.error as e:
+                    logging.error(f"Curses error while adding string to window: {e}")
                     pass  # Ignore if the string is too long for the window
 
             # Instructions at the bottom
             instruction = "Press 'M' for Menu | 'Q' to Quit."
             try:
                 stdscr.addstr(height-1, 0, instruction[:width-1], curses.A_BOLD)
-            except curses.error:
-                pass  # Ignore if the string is too long for the window
+            except curses.error as e:
+                logging.error(f"Curses error while adding instruction: {e}")
 
             # Refresh the screen
             stdscr.refresh()
@@ -1077,7 +1452,8 @@ def main(stdscr):
             stdscr.addstr(h//2, w//2 - len(error_message)//2, error_message, curses.A_BOLD)
             stdscr.refresh()
             stdscr.getch()
-        except curses.error:
+        except curses.error as e:
+            logging.error(f"Curses error while displaying error message: {e}")
             pass  # If even this fails, just exit
         logging.error(f"Unhandled exception: {e}")
     finally:
@@ -1088,6 +1464,9 @@ def main(stdscr):
             api_thread.join()
         if tts_handler:
             tts_handler.stop()
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logging.info("Cleaned up temporary files.")
 
 def display_error(stdscr, message, tts_handler=None, config=None):
     """Display an error message in the curses interface and optionally speak it."""
@@ -1106,8 +1485,20 @@ def display_error(stdscr, message, tts_handler=None, config=None):
         # Speak the error message if TTS is enabled
         if tts_handler and config.get("tts_enabled", False):
             tts_handler.speak("An error occurred. Please check the logs for details.")
-    except curses.error:
+    except curses.error as e:
+        logging.error(f"Curses error in display_error: {e}")
         pass  # If even this fails, just exit
+
+# ======================= Health Check Display ============================
+def display_health_status(stdscr, is_healthy):
+    """Display the health status of the Ollama API."""
+    h, w = stdscr.getmaxyx()
+    status = "Healthy" if is_healthy else "Unhealthy"
+    color = curses.color_pair(2) if is_healthy else curses.color_pair(3)
+    try:
+        stdscr.addstr(0, 0, f"Ollama API Health: {status}", color)
+    except curses.error as e:
+        logging.error(f"Curses error in display_health_status: {e}")
 
 # ======================= Entry Point ======================================
 if __name__ == "__main__":

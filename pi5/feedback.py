@@ -1124,7 +1124,7 @@ def main(stdscr):
     MAX_CONVERSATION_LINES = 100  # Adjust as needed
 
     # Define a regex pattern to detect sentence endings
-    sentence_end_pattern = re.compile(r'([.!?])')  # Matches ., !, or ?
+    sentence_end_pattern = re.compile(r'([.!?,\n])')  # Matches ., !, ?, ,, or newline
 
     # Initialize TTS buffer for sentence chunking
     tts_buffer = ""

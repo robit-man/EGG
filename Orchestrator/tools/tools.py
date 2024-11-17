@@ -66,7 +66,6 @@ def ensure_required_files():
         print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} '{FUNCTIONS_FILE}' not found. Downloading from {FUNCTIONS_FILE_URL}.")
         download_file(FUNCTIONS_FILE_URL, FUNCTIONS_FILE)
 
-ensure_required_files()
 
 
 # Default configuration
@@ -78,7 +77,7 @@ default_config = {
     'output_format': 'chunk',       # Options: 'streaming', 'chunk'
     'port_range': '6200-6300',
     'orchestrator_host': 'localhost',
-    'orchestrator_ports': '6000-6010',  # Updated to handle multiple ports
+    'orchestrator_ports': '6000-6099',  # Updated to handle multiple ports
     'route': '/tools',
     'script_uuid': '',              # Initialize as empty; will be set in read_config()
     'system_prompt': BASE_SYSTEM_PROMPT,
@@ -130,10 +129,22 @@ def read_config():
     # Ensure script_uuid is set
     if 'script_uuid' in config and config['script_uuid']:
         script_uuid = config['script_uuid']
+    
     else:
         script_uuid = str(uuid.uuid4())
         config['script_uuid'] = script_uuid
         write_config()  # Save updated config with the new UUID
+
+    if config['use_tools'] is True:
+        ensure_required_files()
+
+        # Initialize global functions module
+        functions = load_functions()
+        if not functions:
+            exit(1)  # Exit if functions module couldn't be loaded
+
+        # Initialize tools mapping
+        setup_tools()
 
     # Debug: Print the loaded configuration
     print(f"{COLOR_GREEN}[Debug]{COLOR_RESET} Configuration Loaded:")
@@ -384,6 +395,60 @@ def check_ollama_api():
     except Exception as e:
         print(f"{COLOR_RED}[Error]{COLOR_RESET} Unexpected error while checking Ollama API: {e}")
         return False
+
+
+# Function to check if the required model is available
+def check_and_download_model():
+    """
+    Checks if the required model is available locally. If not, attempts to pull it from the Ollama API.
+    """
+    model_name = config.get('model_name', 'llama3.2')  # Default model name
+    model_name_sanitized = re.sub(r'[^\w.-]', '_', model_name)  # Sanitize model name for filenames
+    ollama_models_dir = os.path.expanduser("~/.ollama/models/")
+    model_path = os.path.join(ollama_models_dir, model_name_sanitized)
+
+    # Check if the model exists locally
+    if not os.path.exists(model_path):
+        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} Model '{model_name}' not found in {ollama_models_dir}. Attempting to pull...")
+
+        # API endpoint and payload
+        pull_url = f"{OLLAMA_URL}pull"
+        payload = {
+            "name": model_name,
+            "stream": True  # Enable streaming to track progress
+        }
+
+        try:
+            # Send the POST request to pull the model
+            response = requests.post(pull_url, json=payload, stream=True)
+
+            if response.status_code == 200:
+                print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Streaming pull progress for model '{model_name}':")
+                for line in response.iter_lines():
+                    if line:
+                        progress = json.loads(line.decode('utf-8'))
+                        print(json.dumps(progress, indent=2))
+                        if progress.get("status") == "success":
+                            print(f"{COLOR_GREEN}[Success]{COLOR_RESET} Model '{model_name}' pulled successfully.")
+                            return
+            else:
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to pull model '{model_name}'. Status code: {response.status_code}")
+                print(f"Response: {response.text}")
+                exit(1)
+
+        except requests.exceptions.Timeout:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Request to pull the model '{model_name}' timed out.")
+            exit(1)
+        except requests.exceptions.ConnectionError:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection error occurred while contacting Ollama API.")
+            exit(1)
+        except Exception as e:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Exception during model pull: {e}")
+            traceback.print_exc()
+            exit(1)
+    else:
+        print(f"{COLOR_GREEN}[Info]{COLOR_RESET} Model '{model_name}' is already available.")
+
 
 # Function to register with the orchestrator
 def register_with_orchestrator(port):
@@ -972,9 +1037,6 @@ functions = load_functions()
 if not functions:
     exit(1)  # Exit if functions module couldn't be loaded
 
-# Initialize tools mapping
-setup_tools()
-
 # Main function
 def main():
 
@@ -983,6 +1045,8 @@ def main():
 
     # Parse command-line arguments
     parse_args()
+
+    check_and_download_model()
 
     # Write updated config to file (redundant if parse_args already does)
     # write_config(config)

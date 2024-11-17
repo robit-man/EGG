@@ -697,10 +697,57 @@ def send_exit(client_socket):
         print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to send exit acknowledgment to {client_socket.getpeername()}: {e}")
         traceback.print_exc()
 
-# Function to perform inference by sending a request to the Ollama API
-import requests
-import json
-import threading
+# Function to check if the required model is available
+def check_and_download_model():
+    """
+    Checks if the required model is available locally. If not, attempts to pull it from the Ollama API.
+    """
+    model_name = config.get('model_name', 'llama3.2')  # Default model name
+    model_name_sanitized = re.sub(r'[^\w.-]', '_', model_name)  # Sanitize model name for filenames
+    ollama_models_dir = os.path.expanduser("~/.ollama/models/")
+    model_path = os.path.join(ollama_models_dir, model_name_sanitized)
+
+    # Check if the model exists locally
+    if not os.path.exists(model_path):
+        print(f"{COLOR_YELLOW}[Warning]{COLOR_RESET} Model '{model_name}' not found in {ollama_models_dir}. Attempting to pull...")
+
+        # API endpoint and payload
+        pull_url = f"{OLLAMA_URL}pull"
+        payload = {
+            "name": model_name,
+            "stream": True  # Enable streaming to track progress
+        }
+
+        try:
+            # Send the POST request to pull the model
+            response = requests.post(pull_url, json=payload, stream=True)
+
+            if response.status_code == 200:
+                print(f"{COLOR_BLUE}[Info]{COLOR_RESET} Streaming pull progress for model '{model_name}':")
+                for line in response.iter_lines():
+                    if line:
+                        progress = json.loads(line.decode('utf-8'))
+                        print(json.dumps(progress, indent=2))
+                        if progress.get("status") == "success":
+                            print(f"{COLOR_GREEN}[Success]{COLOR_RESET} Model '{model_name}' pulled successfully.")
+                            return
+            else:
+                print(f"{COLOR_RED}[Error]{COLOR_RESET} Failed to pull model '{model_name}'. Status code: {response.status_code}")
+                print(f"Response: {response.text}")
+                exit(1)
+
+        except requests.exceptions.Timeout:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Request to pull the model '{model_name}' timed out.")
+            exit(1)
+        except requests.exceptions.ConnectionError:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Connection error occurred while contacting Ollama API.")
+            exit(1)
+        except Exception as e:
+            print(f"{COLOR_RED}[Error]{COLOR_RESET} Exception during model pull: {e}")
+            traceback.print_exc()
+            exit(1)
+    else:
+        print(f"{COLOR_GREEN}[Info]{COLOR_RESET} Model '{model_name}' is already available.")
 
 # Function to perform inference by sending a request to the Ollama API
 def perform_inference(user_input):
@@ -1000,6 +1047,9 @@ def main():
 
     # Parse command-line arguments
     parse_args()
+
+    # Check and download the model if necessary
+    check_and_download_model()
 
     # Write updated config to file (redundant if parse_args already does)
     # write_config(config)

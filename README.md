@@ -1,4 +1,4 @@
-# 🥚 EGG - Exocortical Generalized Gateway
+# 🥚 EGG - Experimental Generalized Gateway
 ## Telepresence + Inference at the edge
 
 <img src="https://github.com/user-attachments/assets/58ca5637-7819-4e6d-8d7b-121a936afb14" alt="Egg Transparent" width="500"/> <img src="https://github.com/user-attachments/assets/42caf09c-1e7b-42bd-9255-e3171ebd5006" alt="Sm0l Egg" width="200"/>

@@ -30,6 +30,16 @@ You will need to install an NVME ssd to ensure adequate storage for the installa
 
 ### Basic Configuration after install
 
+Initial updates and upgrades
+```bash
+sudo apt update
+```
+```bash
+apt list --upgradable
+```
+```bash
+sudo apt upgrade
+```
 Install pip3 and jtop
 ```bash
 sudo apt update && sudo apt install -y python3-pip && sudo pip3 install -U jetson-stats

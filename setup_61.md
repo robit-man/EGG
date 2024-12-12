@@ -17,7 +17,8 @@ Now gather yourself, and perform these following tasks with great care and consi
 
 ### Physical Setup of Orin
 You will need to install an NVME ssd to ensure adequate storage for the installation and boot device.
-![image](https://github.com/user-attachments/assets/3790218b-feba-4016-96f6-01edc1eba4a3)
+
+![orinNVME](https://github.com/user-attachments/assets/4a9ed275-1d36-4456-8ad1-0045955ed395)
 
 ### Install Jetpack 6.1 via Jetpack SDK Manager
 Log into the sdk using nvidia credentials.

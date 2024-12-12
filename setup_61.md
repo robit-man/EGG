@@ -16,12 +16,12 @@ Now gather yourself, and perform these following tasks with great care and consi
 <a href="https://developer.nvidia.com/sdk-manager" target="_blank">Follow This Guide</a>, to select a desired host and install the manager.
 
 
-### Physical Setup of Orin
+### Physical Setup of [Orin](https://developer.nvidia.com/embedded/learn/get-started-jetson-agx-orin-devkit)
 You will need to install an NVME ssd to ensure adequate storage for the installation and boot device.
 
 <img src="https://github.com/user-attachments/assets/4a9ed275-1d36-4456-8ad1-0045955ed395" alt="Sm0l Egg" width="300"/>
 
-### Install Jetpack 6.1 via Jetpack SDK Manager
+### Install Jetpack 6.1 via [Jetpack SDK Manager](https://developer.nvidia.com/sdk-manager)
 1. Log into the sdk using nvidia credentials.
 2. Download and Install jetpack 6.1 to the same storage device you are running your host OS from, ensure at least 100Gb Free Space.
 3. Once prompted, select your orin from the list of devices connected.
@@ -40,7 +40,7 @@ apt list --upgradable
 ```bash
 sudo apt upgrade
 ```
-Install pip3 and jtop
+Install pip3 and jtop ([Jetson Stats](https://pypi.org/project/jetson-stats/))
 ```bash
 sudo apt update && sudo apt install -y python3-pip && sudo pip3 install -U jetson-stats
 ```
@@ -60,7 +60,7 @@ Reboot When Prompted
 
 
 
-### Install the Chromium browser
+### Install the [Chromium](https://www.chromium.org/getting-involved/download-chromium/) browser
 
 Ensure your system is up to date:
 ```bash
@@ -75,7 +75,7 @@ After installation, you can launch Chromium by typing:
 chromium-browser
 ```
 
-### Install Nomachine Remote Desktop
+### Install [Nomachine](https://downloads.nomachine.com/download/?id=115&distro=ARM) Remote Desktop
 
 Move to a directory where you want to download the file:
 ```bash
@@ -94,7 +94,7 @@ Once installed, check if NoMachine is available:
 sudo systemctl status nxserver
 ```
 
-### Install Jetson Containers
+### Install [Jetson Containers](https://github.com/dusty-nv/jetson-containers)
 Clone the containers repo
 ```bash
 git clone https://github.com/dusty-nv/jetson-containers
@@ -108,7 +108,7 @@ automatically pull & run any container
 jetson-containers run $(autotag l4t-pytorch)
 ```
 
-### Install Langflow
+### Install [Langflow](https://github.com/langflow-ai/langflow)
 
 Install with pip (Python 3.10 to 3.12):
 ```bash

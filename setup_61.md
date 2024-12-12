@@ -64,4 +64,10 @@ Once installed, check if NoMachine is available:
 sudo systemctl status nxserver
 ```
 
-###  
+### Install Langflow
+
+Install with pip (Python 3.10 to 3.12):
+```bash
+pip install langflow
+```
+

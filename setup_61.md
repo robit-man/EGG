@@ -22,13 +22,26 @@ You will need to install an NVME ssd to ensure adequate storage for the installa
 <img src="https://github.com/user-attachments/assets/4a9ed275-1d36-4456-8ad1-0045955ed395" alt="Sm0l Egg" width="300"/>
 
 ### Install Jetpack 6.1 via Jetpack SDK Manager
-Log into the sdk using nvidia credentials.
-Download and Install jetpack 6.1 to the same storage device you are running your host OS from, ensure at least 100Gb Free Space.
-Once prompted, select your orin from the list of devices connected.
-Select NVME as the install target! Do NOT Select EMMC
-Keep The Desktop active on the host machine during install, as it may take some time.
+1. Log into the sdk using nvidia credentials.
+2. Download and Install jetpack 6.1 to the same storage device you are running your host OS from, ensure at least 100Gb Free Space.
+3. Once prompted, select your orin from the list of devices connected.
+4. Select NVME as the install target! Do NOT Select EMMC
+5. Keep The Desktop active on the host machine during install, as it may take some time.
 
-
+### Basic Configuration after install
+Change the screen timeout to 'never'
+```bash
+gsettings set org.gnome.desktop.session idle-delay 0
+```
+Change the user account settings for automatic login
+```bash
+sudo sed -i '/^#  AutomaticLoginEnable = true/c\AutomaticLoginEnable = true' /etc/gdm3/custom.conf && sudo sed -i "/^#  AutomaticLogin = user/c\AutomaticLogin = $(whoami)" /etc/gdm3/custom.conf
+```
+Change the performance of the Orin to MAXN
+```bash
+sudo nvpmodel -m 0
+```
+Reboot When Prompted
 
 ### Install the Chromium browser
 

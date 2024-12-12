@@ -94,6 +94,20 @@ Once installed, check if NoMachine is available:
 sudo systemctl status nxserver
 ```
 
+### Install Jetson Containers
+Clone the containers repo
+```bash
+git clone https://github.com/dusty-nv/jetson-containers
+```
+# install the container tools
+```bash
+bash jetson-containers/install.sh
+```
+automatically pull & run any container
+```bash
+jetson-containers run $(autotag l4t-pytorch)
+```
+
 ### Install Langflow
 
 Install with pip (Python 3.10 to 3.12):

@@ -99,7 +99,7 @@ Clone the containers repo
 ```bash
 git clone https://github.com/dusty-nv/jetson-containers
 ```
-# install the container tools
+install the container tools
 ```bash
 bash jetson-containers/install.sh
 ```

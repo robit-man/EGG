@@ -120,4 +120,5 @@ Install with pip (Python 3.10 to 3.12):
 ```bash
 pip3 install langflow
 ```
+Takes a very long time due to telemetry lib versioning opentelemetry-sdk :D 
 

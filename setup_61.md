@@ -13,7 +13,8 @@ Consider the beginning and the end, the cosmic microwave background hinting at t
 Now gather yourself, and perform these following tasks with great care and consideration, and please share feedback via issues!
 
 ### Install Jetpack SDK Manager on a host system
-[Follow This Guide](https://developer.nvidia.com/sdk-manager), to select a desired host and install the manager.
+<a href="https://developer.nvidia.com/sdk-manager" target="_blank">Follow This Guide</a>, to select a desired host and install the manager.
+
 
 ### Physical Setup of Orin
 You will need to install an NVME ssd to ensure adequate storage for the installation and boot device.

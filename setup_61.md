@@ -112,6 +112,6 @@ jetson-containers run $(autotag l4t-pytorch)
 
 Install with pip (Python 3.10 to 3.12):
 ```bash
-pip install langflow
+pip3 install langflow
 ```
 

@@ -12,6 +12,22 @@ Consider the beginning and the end, the cosmic microwave background hinting at t
 
 Now gather yourself, and perform these following tasks with great care and consideration, and please share feedback via issues!
 
+### Install Jetpack SDK Manager on a host system
+[Follow This Guide](https://developer.nvidia.com/sdk-manager), to select a desired host and install the manager.
+
+### Physical Setup of Orin
+You will need to install an NVME ssd to ensure adequate storage for the installation and boot device.
+![image](https://github.com/user-attachments/assets/3790218b-feba-4016-96f6-01edc1eba4a3)
+
+### Install Jetpack 6.1 via Jetpack SDK Manager
+Log into the sdk using nvidia credentials.
+Download and Install jetpack 6.1 to the same storage device you are running your host OS from, ensure at least 100Gb Free Space.
+Once prompted, select your orin from the list of devices connected.
+Select NVME as the install target! Do NOT Select EMMC
+Keep The Desktop active on the host machine during install, as it may take some time.
+
+
+
 ### Install the Chromium browser
 
 Ensure your system is up to date:

@@ -30,7 +30,7 @@ You will need to install an NVME ssd to ensure adequate storage for the installa
 
 ### Basic Configuration after install
 
-Initial updates and upgrades
+Initial updates and upgrades.
 ```bash
 sudo apt update
 ```
@@ -44,19 +44,19 @@ Install pip3 and jtop ([Jetson Stats](https://pypi.org/project/jetson-stats/))
 ```bash
 sudo apt update && sudo apt install -y python3-pip && sudo pip3 install -U jetson-stats
 ```
-Change the screen timeout to 'never'
+Change the screen timeout to 'never'.
 ```bash
 gsettings set org.gnome.desktop.session idle-delay 0
 ```
-Change the user account settings for automatic login
+Change the user account settings for automatic login.
 ```bash
 sudo sed -i '/^#  AutomaticLoginEnable = true/c\AutomaticLoginEnable = true' /etc/gdm3/custom.conf && sudo sed -i "/^#  AutomaticLogin = user/c\AutomaticLogin = $(whoami)" /etc/gdm3/custom.conf
 ```
-Change the performance of the Orin to MAXN
+Change the performance of the Orin to MAXN.
 ```bash
 sudo nvpmodel -m 0
 ```
-Reboot When Prompted
+Reboot when prompted.
 
 
 
@@ -106,6 +106,12 @@ bash jetson-containers/install.sh
 automatically pull & run any container
 ```bash
 jetson-containers run $(autotag l4t-pytorch)
+```
+
+### Install [Ollama](https://ollama.com/download/linux)
+This pulls the latest install script and runs it
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
 ```
 
 ### Install [Langflow](https://github.com/langflow-ai/langflow)

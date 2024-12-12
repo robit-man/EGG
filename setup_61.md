@@ -122,3 +122,7 @@ pip3 install langflow
 ```
 Takes a very long time due to pip [handling of arbitrary versioning](https://pip.pypa.io/en/stable/topics/dependency-resolution/#possible-ways-to-reduce-backtracking) for opentelemetry
 
+### Install [tmux](https://github.com/tmux/tmux)
+```bash
+sudo apt install tmux
+```

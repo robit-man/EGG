@@ -23,7 +23,7 @@ You will need to install an NVME ssd to ensure adequate storage for the installa
 
 ### Install Jetpack 6.1 via [Jetpack SDK Manager](https://developer.nvidia.com/sdk-manager)
 1. Log into the sdk using nvidia credentials.
-2. Download and Install jetpack 6.1 to the same storage device you are running your host OS from, ensure at least 100Gb Free Space.
+2. Download and Install [Jetpack 6.1](https://developer.nvidia.com/blog/nvidia-jetpack-6-1-boosts-performance-and-security-through-camera-stack-optimizations-and-introduction-of-firmware-tpm/) to the same storage device you are running your host OS from, ensure at least 100Gb Free Space.
 3. Once prompted, select your orin from the list of devices connected.
 4. Select NVME as the install target! Do NOT Select EMMC
 5. Keep The Desktop active on the host machine during install, as it may take some time.

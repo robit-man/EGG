@@ -29,6 +29,11 @@ You will need to install an NVME ssd to ensure adequate storage for the installa
 5. Keep The Desktop active on the host machine during install, as it may take some time.
 
 ### Basic Configuration after install
+
+Install pip3 and jtop
+```bash
+sudo apt update && sudo apt install -y python3-pip && sudo pip3 install -U jetson-stats
+```
 Change the screen timeout to 'never'
 ```bash
 gsettings set org.gnome.desktop.session idle-delay 0
@@ -42,6 +47,8 @@ Change the performance of the Orin to MAXN
 sudo nvpmodel -m 0
 ```
 Reboot When Prompted
+
+
 
 ### Install the Chromium browser
 

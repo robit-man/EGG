@@ -6,9 +6,9 @@ If you are using jetpack 6.1, the container will likely need to be built from sc
 
 Download the following model files and place them in the folder with inference.py
 
-[Download Onnx](https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main/glados_piper_medium.onnx?download=true)
+[Download Onnx](https://github.com/robit-man/EGG/raw/refs/heads/main/voice/glados_piper_medium.onnx)
 
-[Download json](https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main/glados_piper_medium.onnx.json?download=true)
+[Download json](https://raw.githubusercontent.com/robit-man/EGG/refs/heads/main/voice/glados_piper_medium.onnx.json)
 
 you must then exit by typing 'exit' and re-run the jetson-containers using the following, and be sure to replace the host shared folder with where you place the 'inference.py' and onnx files so they are exposed to the container.
 ```bash

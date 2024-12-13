@@ -124,6 +124,10 @@ If taking more than an hour, cancel and try the following:
 ```bash
 pip install langflow --use-deprecated=legacy-resolver
 ```
+Then to run langflow:
+```bash
+python -m langflow run
+```
 
 ### Install [tmux](https://github.com/tmux/tmux)
 ```bash

@@ -15,9 +15,6 @@ Download the following model files and place them in the folder with inference.p
 </a>
 
 
-[Download glados_piper_medium.onnx.json](https://gist.githubusercontent.com/yourusername/gistid/raw/glados_piper_medium.onnx.json)
-
-
 you must then exit by typing 'exit' and re-run the jetson-containers using the following, and be sure to replace the host shared folder with where you place the 'inference.py' and onnx files so they are exposed to the container.
 ```bash
 jetson-containers run -v /path/on/host:/path/in/container $(autotag piper-tts)

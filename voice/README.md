@@ -6,7 +6,10 @@ If you are using jetpack 6.1, the container will likely need to be built from sc
 
 Download the following model files and place them in the folder with inference.py
 
-[Download Onnx](https://github.com/robit-man/EGG/raw/refs/heads/main/voice/glados_piper_medium.onnx)
+<a href="https://raw.githubusercontent.com/robit-man/EGG/refs/heads/main/voice/glados_piper_medium.onnx" download>
+    <img src="https://img.shields.io/badge/Download-glados_piper_medium.onnx.json-green" alt="Download glados_piper_medium.onnx">
+</a>
+
 <a href="https://raw.githubusercontent.com/robit-man/EGG/refs/heads/main/voice/glados_piper_medium.onnx.json" download>
     <img src="https://img.shields.io/badge/Download-glados_piper_medium.onnx.json-blue" alt="Download glados_piper_medium.onnx.json">
 </a>

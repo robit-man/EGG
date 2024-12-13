@@ -4,6 +4,10 @@ jetson-containers run $(autotag piper-tts)
 ```
 If you are using jetpack 6.1, the container will likely need to be built from scratch, however it will prompt you to do so if needed, and is a relatively straightforward automated process.
 
+Download the following model files and place them in the folder with inference.py
+[Download Onnx](https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main/glados_piper_medium.onnx?download=true)
+[Download json](https://huggingface.co/DavesArmoury/GLaDOS_TTS/resolve/main/glados_piper_medium.onnx.json?download=true)
+
 you must then exit by typing 'exit' and re-run the jetson-containers using the following, and be sure to replace the host shared folder with where you place the 'inference.py' and onnx files so they are exposed to the container.
 ```bash
 jetson-containers run -v /path/on/host:/path/in/container $(autotag piper-tts)

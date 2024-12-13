@@ -118,9 +118,12 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 Install with pip (Python 3.10 to 3.12):
 ```bash
-pip3 install langflow
+pip install langflow
 ```
-Takes a very long time due to pip [handling of arbitrary versioning](https://pip.pypa.io/en/stable/topics/dependency-resolution/#possible-ways-to-reduce-backtracking) for opentelemetry
+If taking more than an hour, cancel and try the following:
+```bash
+pip install langflow --use-deprecated=legacy-resolver
+```
 
 ### Install [tmux](https://github.com/tmux/tmux)
 ```bash

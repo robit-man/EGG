@@ -1,4 +1,9 @@
-Run the following in terminal as one line (copy and paste)
+### Make sure you have installed jetson containers
+```bash
+git clone https://github.com/dusty-nv/jetson-containers && bash jetson-containers/install.sh
+```
+
+### Run the following in terminal as one line (copy and paste)
 ```bash
 mkdir -p voice && \
 curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx -o voice/glados_piper_medium.onnx && \

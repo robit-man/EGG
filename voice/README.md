@@ -11,3 +11,9 @@ curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_
 curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/inference.py -o voice/inference.py && \
 jetson-containers run -v "$(pwd)/voice":/app/voice -v "$(pwd)/inference.py":/app/inference.py "$(autotag piper-tts)" python3 /app/inference.py
 ```
+Enter password if prompted
+
+### Pull and run the client example with user input
+```bash
+mkdir -p voice && curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/client.py -o voice/client.py && python3 voice/client.py
+```

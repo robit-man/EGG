@@ -237,6 +237,41 @@ thread_lock = threading.Lock()
 tts_queue = None
 tts_stop_flag = False
 tts_thread = None
+tts_thread_lock = threading.Lock()
+
+def synthesize_and_play(prompt):
+    prompt = prompt.strip()
+    if not prompt:
+        return
+    try:
+        payload = {"prompt": prompt}
+        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
+            if response.status_code != 200:
+                print(f"Warning: TTS received status code {response.status_code}")
+                try:
+                    error_msg = response.json().get('error', 'No error message provided.')
+                    print(f"TTS error: {error_msg}")
+                except:
+                    print("No JSON error message provided for TTS.")
+                return
+
+            # Play audio using aplay
+            aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
+                                     stdin=subprocess.PIPE)
+            try:
+                for chunk in response.iter_content(chunk_size=4096):
+                    if tts_stop_flag:
+                        break
+                    if chunk:
+                        aplay.stdin.write(chunk)
+            except BrokenPipeError:
+                print("Warning: aplay subprocess terminated unexpectedly.")
+            finally:
+                # Close aplay even if stopped early
+                aplay.stdin.close()
+                aplay.wait()
+    except Exception as e:
+        print(f"Unexpected error during TTS: {e}")
 
 def tts_worker():
     global tts_stop_flag
@@ -257,63 +292,31 @@ def tts_worker():
 
 def start_tts_thread():
     global tts_queue, tts_thread, tts_stop_flag
-    tts_stop_flag = False
-    tts_queue = Queue()
-    tts_thread = threading.Thread(target=tts_worker, daemon=True)
-    tts_thread.start()
+    with tts_thread_lock:
+        if tts_thread and tts_thread.is_alive():
+            # Already running
+            return
+        tts_stop_flag = False
+        tts_queue = Queue()
+        tts_thread = threading.Thread(target=tts_worker, daemon=True)
+        tts_thread.start()
 
 def stop_tts_thread():
     global tts_stop_flag, tts_thread, tts_queue
-    if tts_thread and tts_thread.is_alive():
-        tts_stop_flag = True
-        # Flush queue
-        with tts_queue.mutex:
-            tts_queue.queue.clear()
-        tts_thread.join()
-    tts_stop_flag = False
-    tts_queue = None
-    tts_thread = None
+    with tts_thread_lock:
+        if tts_thread and tts_thread.is_alive():
+            tts_stop_flag = True
+            # Flush queue
+            with tts_queue.mutex:
+                tts_queue.queue.clear()
+            tts_thread.join()
+        tts_stop_flag = False
+        tts_queue = None
+        tts_thread = None
 
 def enqueue_sentence_for_tts(sentence):
     if tts_queue and not tts_stop_flag:
         tts_queue.put(sentence)
-
-def synthesize_and_play(prompt):
-    prompt = prompt.strip()
-    if not prompt:
-        return
-    try:
-        payload = {"prompt": prompt}
-        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
-            if response.status_code != 200:
-                print(f"Warning: TTS received status code {response.status_code}")
-                try:
-                    error_msg = response.json().get('error', 'No error message provided.')
-                    print(f"TTS error: {error_msg}")
-                except:
-                    print("No JSON error message provided for TTS.")
-                return
-
-            # Check stop condition before playing each chunk?
-            # If we want to stop mid-audio, we'd need non-blocking
-            # For simplicity, if tts_stop_flag is set mid-playback, we can end early
-            # We do this by reading chunks and checking tts_stop_flag
-            aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
-                                     stdin=subprocess.PIPE)
-            try:
-                for chunk in response.iter_content(chunk_size=4096):
-                    if tts_stop_flag:
-                        break
-                    if chunk:
-                        aplay.stdin.write(chunk)
-            except BrokenPipeError:
-                print("Warning: aplay subprocess terminated unexpectedly.")
-            finally:
-                # Close aplay even if stopped early
-                aplay.stdin.close()
-                aplay.wait()
-    except Exception as e:
-        print(f"Unexpected error during TTS: {e}")
 
 #############################################
 # Step 8: Streaming the Output
@@ -445,6 +448,7 @@ def update_history(user_message, assistant_message):
 
 stop_flag = False
 current_thread = None
+inference_lock = threading.Lock()
 
 def inference_thread(user_message, result_holder):
     global stop_flag
@@ -455,21 +459,25 @@ def inference_thread(user_message, result_holder):
 def new_request(user_message):
     global stop_flag, current_thread
 
-    # Cancel ongoing inference if any
-    if current_thread and current_thread.is_alive():
-        stop_flag = True
-        current_thread.join()
-        stop_flag = False
+    with inference_lock:
+        # Cancel ongoing inference if any
+        if current_thread and current_thread.is_alive():
+            print("Interrupting current inference...")
+            stop_flag = True
+            current_thread.join()
+            stop_flag = False
 
-    # Cancel ongoing TTS
-    stop_tts_thread()
-    # Restart TTS thread (empty queue)
-    start_tts_thread()
+        # Cancel ongoing TTS
+        print("Stopping TTS thread...")
+        stop_tts_thread()
+        # Restart TTS thread (empty queue)
+        print("Starting new TTS thread...")
+        start_tts_thread()
 
-    # Start new inference thread
-    result_holder = []
-    current_thread = threading.Thread(target=inference_thread, args=(user_message, result_holder))
-    current_thread.start()
+        # Start new inference thread
+        result_holder = []
+        current_thread = threading.Thread(target=inference_thread, args=(user_message, result_holder))
+        current_thread.start()
 
     # Wait for inference to finish
     current_thread.join()
@@ -478,11 +486,15 @@ def new_request(user_message):
     return result
 
 #############################################
-# Step 12: Start Server
+# Step 12: Start Server with Enhanced Interrupt Handling
 #############################################
 
 HOST = CONFIG["host"]
 PORT = CONFIG["port"]
+
+# List to keep track of client threads
+client_threads = []
+client_threads_lock = threading.Lock()
 
 def handle_client_connection(client_socket, address):
     global stop_flag, current_thread
@@ -510,7 +522,10 @@ def handle_client_connection(client_socket, address):
         client_socket.close()
 
 def start_server():
+    global client_threads
+
     # Start TTS thread initially
+    print("Starting TTS thread...")
     start_tts_thread()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -525,16 +540,37 @@ def start_server():
 
     server.listen(5)
     print(f"Listening for incoming connections on {HOST}:{PORT}...")
+
     try:
         while True:
-            client_sock, addr = server.accept()
-            handle_client_connection(client_sock, addr)
-    except KeyboardInterrupt:
-        print("\nShutting down server.")
+            try:
+                client_sock, addr = server.accept()
+                client_thread = threading.Thread(target=handle_client_connection, args=(client_sock, addr))
+                client_thread.start()
+                with client_threads_lock:
+                    client_threads.append(client_thread)
+            except KeyboardInterrupt:
+                print("\nInterrupt received, shutting down server.")
+                break
+            except Exception as e:
+                print(f"Error accepting connections: {e}")
     finally:
-        # Stop TTS thread before exit
-        stop_tts_thread()
+        # Stop accepting new connections
         server.close()
+        print("Server socket closed.")
+
+        # Stop TTS thread
+        print("Stopping TTS thread...")
+        stop_tts_thread()
+
+        # Wait for all client threads to finish
+        print("Waiting for client threads to finish...")
+        with client_threads_lock:
+            for t in client_threads:
+                t.join()
+        print("All client threads have been terminated.")
+
+        print("Shutting down complete.")
 
 if __name__ == "__main__":
     start_server()

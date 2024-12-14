@@ -25,7 +25,7 @@ Bonus: For a quick look at a generic peripheral component that has baseline func
 
 **EGG** is a multi-modal data acquisition, inference, storage, processing, and training/fine-tuning system deployed at the edge. Built on the [NVIDIA Jetson AGX Orin](https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/) platform, EGG integrates various peripherals to deliver comprehensive AI capabilities.
 
-Currently undergoing testing and refactoring on **JetPack 6**, with a focus on the [Orchestrator](https://github.com/robit-man/EGG/tree/main/Orchestrator) system and the integration of additional peripherals. For detailed instructions, refer to the [Installation Guide](https://github.com/robit-man/EGG/blob/main/instructions_jp6_WIP.md).
+Currently undergoing testing and refactoring on **JetPack 6**, with a focus on the [Orchestrator](https://github.com/robit-man/EGG/tree/main/Orchestrator) system and the integration of additional peripherals. For detailed instructions, refer to the [Installation Guide](https://github.com/robit-man/EGG/blob/main/setup_6.md).
 
 ### Tested Systems
 

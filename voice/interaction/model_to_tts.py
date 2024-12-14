@@ -6,6 +6,8 @@ import socket
 import re
 import json
 import argparse
+import threading
+from queue import Queue
 
 #############################################
 # Step 1: Ensure we're running inside a venv #
@@ -175,6 +177,7 @@ def load_format_schema(fmt):
         print(f"Warning: Format file '{fmt}' not found. Ignoring format.")
         return None
 
+history_messages = safe_load_json_file(CONFIG["history"], [])
 tools_data = safe_load_json_file(CONFIG["tools"], None)
 format_schema = load_format_schema(CONFIG["format"])
 
@@ -197,19 +200,11 @@ def convert_numbers_to_words(text):
             return number_str
     return re.sub(r'\b\d+\b', replace_num, text)
 
-def load_history_messages():
-    # Load history messages each time we build the payload to ensure updated history
-    return safe_load_json_file(CONFIG["history"], [])
-
 def build_payload(user_message):
     messages = []
     if CONFIG["system"]:
         messages.append({"role": "system", "content": CONFIG["system"]})
-
-    # Reload the history each time to ensure we have the latest conversation
-    hist_msgs = load_history_messages()
-    messages.extend(hist_msgs)
-
+    messages.extend(history_messages)
     messages.append({"role": "user", "content": user_message})
 
     payload = {
@@ -232,7 +227,100 @@ def build_payload(user_message):
 
     return payload
 
+stop_flag = False
+thread_lock = threading.Lock()
+
+#############################################
+# Step 7: TTS Playback with Queue and Thread
+#############################################
+
+tts_queue = None
+tts_stop_flag = False
+tts_thread = None
+
+def tts_worker():
+    global tts_stop_flag
+    while not tts_stop_flag:
+        try:
+            sentence = tts_queue.get(timeout=0.1)
+        except:
+            # No item, just continue if not stopped
+            if tts_stop_flag:
+                break
+            continue
+
+        if tts_stop_flag:
+            break
+
+        # Play this sentence
+        synthesize_and_play(sentence)
+
+def start_tts_thread():
+    global tts_queue, tts_thread, tts_stop_flag
+    tts_stop_flag = False
+    tts_queue = Queue()
+    tts_thread = threading.Thread(target=tts_worker, daemon=True)
+    tts_thread.start()
+
+def stop_tts_thread():
+    global tts_stop_flag, tts_thread, tts_queue
+    if tts_thread and tts_thread.is_alive():
+        tts_stop_flag = True
+        # Flush queue
+        with tts_queue.mutex:
+            tts_queue.queue.clear()
+        tts_thread.join()
+    tts_stop_flag = False
+    tts_queue = None
+    tts_thread = None
+
+def enqueue_sentence_for_tts(sentence):
+    if tts_queue and not tts_stop_flag:
+        tts_queue.put(sentence)
+
+def synthesize_and_play(prompt):
+    prompt = prompt.strip()
+    if not prompt:
+        return
+    try:
+        payload = {"prompt": prompt}
+        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
+            if response.status_code != 200:
+                print(f"Warning: TTS received status code {response.status_code}")
+                try:
+                    error_msg = response.json().get('error', 'No error message provided.')
+                    print(f"TTS error: {error_msg}")
+                except:
+                    print("No JSON error message provided for TTS.")
+                return
+
+            # Check stop condition before playing each chunk?
+            # If we want to stop mid-audio, we'd need non-blocking
+            # For simplicity, if tts_stop_flag is set mid-playback, we can end early
+            # We do this by reading chunks and checking tts_stop_flag
+            aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
+                                     stdin=subprocess.PIPE)
+            try:
+                for chunk in response.iter_content(chunk_size=4096):
+                    if tts_stop_flag:
+                        break
+                    if chunk:
+                        aplay.stdin.write(chunk)
+            except BrokenPipeError:
+                print("Warning: aplay subprocess terminated unexpectedly.")
+            finally:
+                # Close aplay even if stopped early
+                aplay.stdin.close()
+                aplay.wait()
+    except Exception as e:
+        print(f"Unexpected error during TTS: {e}")
+
+#############################################
+# Step 8: Streaming the Output
+#############################################
+
 def chat_completion_stream(user_message):
+    global stop_flag
     payload = build_payload(user_message)
     headers = {"Content-Type": "application/json"}
 
@@ -240,6 +328,9 @@ def chat_completion_stream(user_message):
         with requests.post(OLLAMA_CHAT_URL, json=payload, headers=headers, stream=True) as r:
             r.raise_for_status()
             for line in r.iter_lines():
+                if stop_flag:
+                    print("Stream canceled due to new request.")
+                    break
                 if line:
                     obj = json.loads(line.decode('utf-8'))
                     msg = obj.get("message", {})
@@ -266,44 +357,11 @@ def chat_completion_nonstream(user_message):
         return ""
 
 #############################################
-# Step 7: TTS Integration with Sentence Splitting
-#############################################
-
-def synthesize_and_play(prompt):
-    prompt = prompt.strip()
-    if not prompt:
-        return
-    try:
-        payload = {"prompt": prompt}
-        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
-            if response.status_code != 200:
-                print(f"Warning: TTS received status code {response.status_code}")
-                try:
-                    error_msg = response.json().get('error', 'No error message provided.')
-                    print(f"TTS error: {error_msg}")
-                except:
-                    print("No JSON error message provided for TTS.")
-                return
-
-            aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
-                                     stdin=subprocess.PIPE)
-            try:
-                for chunk in response.iter_content(chunk_size=4096):
-                    if chunk:
-                        aplay.stdin.write(chunk)
-            except BrokenPipeError:
-                print("Warning: aplay subprocess terminated unexpectedly.")
-            finally:
-                aplay.stdin.close()
-                aplay.wait()
-    except Exception as e:
-        print(f"Unexpected error during TTS: {e}")
-
-#############################################
-# Step 8: Processing the model output
+# Step 9: Processing the model output
 #############################################
 
 def process_text(text):
+    global stop_flag
     processed_text = convert_numbers_to_words(text)
     sentence_endings = re.compile(r'[.?!]+')
 
@@ -311,31 +369,42 @@ def process_text(text):
         buffer = ""
         sentences = []
         for content, done in chat_completion_stream(processed_text):
+            if stop_flag:
+                # If stopped mid-way, just return what we have
+                break
             buffer += content
             while True:
+                if stop_flag:
+                    break
                 match = sentence_endings.search(buffer)
                 if not match:
                     break
                 end_index = match.end()
                 sentence = buffer[:end_index].strip()
                 buffer = buffer[end_index:].strip()
-                if sentence:
+                if sentence and not stop_flag:
+                    # Enqueue sentence for TTS immediately
                     sentences.append(sentence)
-                    synthesize_and_play(sentence)
-            if done:
+                    enqueue_sentence_for_tts(sentence)
+            if done or stop_flag:
                 break
 
-        leftover = buffer.strip()
-        if leftover:
-            sentences.append(leftover)
-            synthesize_and_play(leftover)
-
-        return " ".join(sentences)
+        if not stop_flag:
+            # If not stopped, handle leftover
+            leftover = buffer.strip()
+            if leftover:
+                sentences.append(leftover)
+                enqueue_sentence_for_tts(leftover)
+            return " ".join(sentences)
+        else:
+            # Stopped early
+            return " ".join(sentences)
     else:
         # Non-stream mode
         result = chat_completion_nonstream(processed_text)
         sentences = []
         buffer = result
+        sentence_endings = re.compile(r'[.?!]+')
         while True:
             match = sentence_endings.search(buffer)
             if not match:
@@ -344,18 +413,18 @@ def process_text(text):
             sentence = buffer[:end_index].strip()
             buffer = buffer[end_index:].strip()
             if sentence:
+                enqueue_sentence_for_tts(sentence)
                 sentences.append(sentence)
-                synthesize_and_play(sentence)
 
         leftover = buffer.strip()
         if leftover:
+            enqueue_sentence_for_tts(leftover)
             sentences.append(leftover)
-            synthesize_and_play(leftover)
 
         return " ".join(sentences)
 
 #############################################
-# Step 9: Update History File with New Messages
+# Step 10: Update History File with New Messages
 #############################################
 
 def update_history(user_message, assistant_message):
@@ -371,13 +440,52 @@ def update_history(user_message, assistant_message):
         print(f"Warning: Could not write to history file {CONFIG['history']}: {e}")
 
 #############################################
-# Step 10: Network server
+# Step 11: Handling Concurrent Requests and Cancellation
+#############################################
+
+stop_flag = False
+current_thread = None
+
+def inference_thread(user_message, result_holder):
+    global stop_flag
+    stop_flag = False
+    result = process_text(user_message)
+    result_holder.append(result)
+
+def new_request(user_message):
+    global stop_flag, current_thread
+
+    # Cancel ongoing inference if any
+    if current_thread and current_thread.is_alive():
+        stop_flag = True
+        current_thread.join()
+        stop_flag = False
+
+    # Cancel ongoing TTS
+    stop_tts_thread()
+    # Restart TTS thread (empty queue)
+    start_tts_thread()
+
+    # Start new inference thread
+    result_holder = []
+    current_thread = threading.Thread(target=inference_thread, args=(user_message, result_holder))
+    current_thread.start()
+
+    # Wait for inference to finish
+    current_thread.join()
+
+    result = result_holder[0] if result_holder else ""
+    return result
+
+#############################################
+# Step 12: Start Server
 #############################################
 
 HOST = CONFIG["host"]
 PORT = CONFIG["port"]
 
 def handle_client_connection(client_socket, address):
+    global stop_flag, current_thread
     print(f"Accepted connection from {address}")
     try:
         data = client_socket.recv(65536)
@@ -390,10 +498,10 @@ def handle_client_connection(client_socket, address):
             return
         print(f"Received prompt from {address}: {user_message}")
 
-        result = process_text(user_message)
+        result = new_request(user_message)
         client_socket.sendall(result.encode('utf-8'))
 
-        # Update history with this interaction
+        # Update history
         update_history(user_message, result)
 
     except Exception as e:
@@ -402,6 +510,9 @@ def handle_client_connection(client_socket, address):
         client_socket.close()
 
 def start_server():
+    # Start TTS thread initially
+    start_tts_thread()
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -421,6 +532,8 @@ def start_server():
     except KeyboardInterrupt:
         print("\nShutting down server.")
     finally:
+        # Stop TTS thread before exit
+        stop_tts_thread()
         server.close()
 
 if __name__ == "__main__":

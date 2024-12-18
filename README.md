@@ -6,8 +6,8 @@
 
 ## Quick Start
 
-[![Install Riva](https://img.shields.io/badge/Install%20Riva-blue?style=for-the-badge)](https://your-link-to-riva-install-script)
-[![Install Jetson Containers](https://img.shields.io/badge/Install%20Jetson%20Containers-orange?style=for-the-badge)](https://your-link-to-jetson-containers-install-script)
+[![Explore Piper Training](https://img.shields.io/badge/Explore%20Piper%20Training-blue?style=for-the-badge)](https://github.com/robit-man/piper-train-jetson)
+[![Jetpack 6.1 Setup](https://img.shields.io/badge/Setup%20Jetpack%206.1-orange?style=for-the-badge)](https://github.com/robit-man/EGG/blob/main/setup_61.md)
 [![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
 ### How to Install and Run
 

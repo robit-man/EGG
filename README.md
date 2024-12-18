@@ -13,7 +13,7 @@
 
 To install and run the Orchestrator, simply copy and paste the following command into your terminal:
 
-[![Copy Command](https://img.shields.io/badge/Copy%20and%20Run%20Command-brightgreen?style=for-the-badge)](#)
+[![Copy Command](https://img.shields.io/badge/Copy%20and%20Run%20Command-yellow?style=for-the-badge)](#)
 
 ```bash
 curl -O https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh && chmod +x install_and_run_orchestrator.sh && ./install_and_run_orchestrator.sh

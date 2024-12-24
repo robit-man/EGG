@@ -121,12 +121,12 @@ The Nilecam81 drivers are essential for camera functionality.
 ### 5.2. Extract and Install Firmware
 
 1. **Extract Firmware**:
-   - Extract the downloaded firmware to a designated folder on your system.
+   - Extract the downloaded firmware parent folder to the 'HOME' folder on your system, Wherein install_binaries.sh is inside the folder, and the parent folder is in the home directory!
 
 2. **Install Binaries**:
 
    ```bash
-   sudo bash install_binaries.sh 81
+   sudo -E ./install_binaries.sh 81
    ```
 3. **Install Deps**
    ```

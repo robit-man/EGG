@@ -81,7 +81,7 @@ Move to a directory where you want to download the file:
 ```bash
 cd ~/Downloads
 ```
-Use `curl` to download the package:
+Use `wget` to download the package:
 ```bash
 wget https://download.nomachine.com/download/8.14/Arm/nomachine_8.14.2_1_arm64.deb -O nomachine.deb
 ```

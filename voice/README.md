@@ -13,6 +13,13 @@ jetson-containers run -v $(pwd)/voice:/voice $(autotag piper-tts)
 ```
 Enter password if prompted
 
+make sure you have venv installed as well for some of the demos in interaction
+
+```
+sudo apt-get install libpython3-dev
+sudo apt-get install python3-venv
+```
+
 ### Pull and run the client example with user input
 ```bash
 mkdir -p voice && curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/client.py -o voice/client.py && python3 voice/client.py

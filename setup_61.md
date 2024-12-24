@@ -83,11 +83,11 @@ cd ~/Downloads
 ```
 Use `curl` to download the package:
 ```bash
-curl -O https://download.nomachine.com/download/8.14/Arm/nomachine_8.14.2_1_arm64.deb
+wget https://download.nomachine.com/download/8.14/Arm/nomachine_8.14.2_1_arm64.deb -O nomachine.deb
 ```
 Use `dpkg` to install the downloaded `.deb` file:
 ```bash
-sudo dpkg -i nomachine_8.14.2_1_arm64.deb
+sudo dpkg -i nomachine.deb
 ```
 Once installed, check if NoMachine is available:
 ```bash

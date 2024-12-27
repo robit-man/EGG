@@ -23,7 +23,19 @@ sudo apt-get install python3-venv
 ### Run the following in terminal to activate the two scripts inside the [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
 
 ```
-mkdir -p /home/$(whoami)/voice && git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && cd /tmp/EGG && git sparse-checkout set voice/interaction && cp -r voice/interaction/* /home/$(whoami)/voice/ && cd /home/$(whoami)/voice && gnome-terminal -- bash -c 'python3 input.py; exec bash' && gnome-terminal -- bash -c 'python3 model_to_tts.py; exec bash' && rm -rf /tmp/EGG
+mkdir -p /home/$(whoami)/voice && \
+if [ -f /home/$(whoami)/voice/input.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 input.py; exec bash' && \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 model_to_tts.py; exec bash'; \
+else \
+    git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && \
+    cd /tmp/EGG && git sparse-checkout set voice/interaction && \
+    cp -r voice/interaction/* /home/$(whoami)/voice/ && \
+    cd /home/$(whoami)/voice && \
+    gnome-terminal -- bash -c 'python3 input.py; exec bash' && \
+    gnome-terminal -- bash -c 'python3 model_to_tts.py; exec bash' && \
+    rm -rf /tmp/EGG; \
+fi
 ```
 
 ### Pull and run the client example with user input

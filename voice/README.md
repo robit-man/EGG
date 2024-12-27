@@ -9,7 +9,7 @@ mkdir -p voice && \
 curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx -o voice/glados_piper_medium.onnx && \
 curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx.json -o voice/glados_piper_medium.onnx.json && \
 curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/inference.py -o voice/inference.py && \
-jetson-containers run -v $(pwd)/voice:/voice $(autotag piper-tts)
+jetson-containers run -v $(pwd)/voice:/voice $(autotag piper-tts) bash -c "cd /voice && python3 inference.py"
 ```
 Enter password if prompted
 

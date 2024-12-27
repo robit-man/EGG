@@ -346,6 +346,7 @@ If NoMachine interferes with audio device settings, create a script to enforce d
      #!/bin/bash
      while true; do
        pactl set-default-source alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.multichannel-input
+       pactl set-default-sink alsa_output.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.iec958-stereo
        sleep 5
      done
      ```

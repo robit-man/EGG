@@ -3,6 +3,15 @@
 git clone https://github.com/dusty-nv/jetson-containers && bash jetson-containers/install.sh
 ```
 
+### Install Ollama if you havent
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+pull the model used in the model_to_tts.py
+```bash
+ollama pull llama3.2-vision
+```
+
 ### Run the following in terminal as one line (copy and paste)
 ```bash
 mkdir -p voice && \
@@ -15,14 +24,13 @@ Enter password if prompted
 
 make sure you have venv installed as well for some of the demos in interaction
 
-```
+```bash
 sudo apt-get install libpython3-dev
 sudo apt-get install python3-venv
 ```
 
 ### Run the following in terminal to activate the two scripts inside the [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
-
-```
+```bash
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/input.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
     gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 input.py; exec bash' && \

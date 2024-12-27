@@ -20,6 +20,12 @@ sudo apt-get install libpython3-dev
 sudo apt-get install python3-venv
 ```
 
+### Run the following in terminal to activate the two scripts inside the [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
+
+```
+mkdir -p /home/$(whoami)/voice && git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && cd /tmp/EGG && git sparse-checkout set voice/interaction && cp -r voice/interaction/* /home/$(whoami)/voice/ && cd /home/$(whoami)/voice && gnome-terminal -- bash -c 'python3 input.py; exec bash' && gnome-terminal -- bash -c 'python3 model_to_tts.py; exec bash' && rm -rf /tmp/EGG
+```
+
 ### Pull and run the client example with user input
 ```bash
 mkdir -p voice && curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/client.py -o voice/client.py && python3 voice/client.py

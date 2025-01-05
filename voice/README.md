@@ -41,7 +41,7 @@ else \
     cp -r voice/interaction/* /home/$(whoami)/voice/ && \
     cd /home/$(whoami)/voice && \
     gnome-terminal -- bash -c 'python3 input.py; exec bash' && \
-    gnome-terminal -- bash -c 'python3 model_to_tts.py --history chat.json --stream; exec bash' && \
+    gnome-terminal -- bash -c 'python3 model_to_tts.py --history --stream; exec bash' && \
     rm -rf /tmp/EGG; \
 fi
 ```

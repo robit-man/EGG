@@ -98,7 +98,13 @@ parser.add_argument("--stream", action="store_true", help="Enable streaming resp
 parser.add_argument("--format", type=str, help="Structured output format: 'json' or path to JSON schema file.")
 parser.add_argument("--system", type=str, help="System message override.")
 parser.add_argument("--raw", action="store_true", help="If set, use raw mode (no template).")
-parser.add_argument("--history", type=str, help="Path to a JSON file containing conversation history messages.")
+parser.add_argument(
+    "--history",
+    type=str,
+    nargs='?',
+    const="chat.json",
+    help="Path to a JSON file containing conversation history messages. Defaults to 'chat.json' if no path is provided."
+)
 parser.add_argument("--images", type=str, nargs='*', help="List of base64-encoded image files.")
 parser.add_argument("--tools", type=str, help="Path to a JSON file defining tools.")
 parser.add_argument("--option", action="append", help="Additional model parameters (e.g. --option temperature=0.7)")

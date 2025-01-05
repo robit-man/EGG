@@ -1,9 +1,9 @@
-### Make sure you have installed jetson containers
+### Install jetson containers
 ```bash
 git clone https://github.com/dusty-nv/jetson-containers && bash jetson-containers/install.sh
 ```
 
-### Install Ollama if you havent
+### Install Ollama
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ```

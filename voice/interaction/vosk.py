@@ -13,6 +13,8 @@ import time
 from queue import Queue, Empty
 import logging
 from pathlib import Path
+import math
+import struct
 
 # ======================= Configuration Constants =======================
 VENV_DIR = "vosk_venv"
@@ -21,6 +23,10 @@ VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-
 
 HOST = 'localhost'  # or the hostname/IP where the server runs
 PORT = 64162        # must match the port in the provided server script
+
+# Volume Activation Constants
+VOLUME_THRESHOLD = 1000  # Adjust this value based on your microphone sensitivity
+SILENCE_DURATION = 1.0  # Seconds of silence to deactivate listening
 
 # ======================= Logging Configuration ==========================
 logging.basicConfig(
@@ -109,7 +115,7 @@ def relaunch_in_venv():
         python_executable = os.path.join(VENV_DIR, "bin", "python")
     
     if not os.path.exists(python_executable):
-        logging.error(f"Pip executable not found at {python_executable}")
+        logging.error(f"Python executable not found at {python_executable}")
         sys.exit("Error: Python executable not found in the virtual environment.")
     
     logging.info("Relaunching the script within the virtual environment.")
@@ -178,77 +184,101 @@ def download_vosk_model():
         print(f"Error: Failed to extract Vosk model: {e}")
         sys.exit("Error: Failed to extract Vosk model.")
 
-# ======================= Speech Recognition Thread with Vosk ============
-def speech_recognition_thread(text_queue, stop_event):
-    """Thread function for speech recognition using Vosk."""
+# ======================= Speech Recognition Thread with Vosk and Volume Threshold ============
+def speech_recognition_thread(text_queue, stop_event, volume_threshold=500, silence_duration=1.0):
+    """Thread function for speech recognition using Vosk with volume threshold activation."""
     from vosk import Model, KaldiRecognizer, SetLogLevel
     import pyaudio
 
     SetLogLevel(-1)  # Suppress Vosk logs
 
-    while not stop_event.is_set():
-        try:
-            if not os.path.exists(VOSK_MODEL_PATH):
-                error_msg = f"Vosk model not found at {VOSK_MODEL_PATH}. Please download and place it accordingly."
-                text_queue.put(error_msg)
-                logging.error(error_msg)
-                return
+    # Constants for volume detection
+    CHUNK = 1024  # Number of audio frames per buffer
+    FORMAT = pyaudio.paInt16  # 16-bit int sampling
+    CHANNELS = 1  # Mono audio
+    RATE = 16000  # Sampling rate
+    THRESHOLD = volume_threshold  # Volume threshold
+    SILENCE_LIMIT = silence_duration  # Seconds of silence to stop recognition
 
-            model = Model(VOSK_MODEL_PATH)
-            recognizer = KaldiRecognizer(model, 16000)
+    p = pyaudio.PyAudio()
 
-            p = pyaudio.PyAudio()
+    try:
+        stream = p.open(format=FORMAT,
+                        channels=CHANNELS,
+                        rate=RATE,
+                        input=True,
+                        frames_per_buffer=CHUNK)
+        stream.start_stream()
+        logging.info("Microphone stream started.")
+        print("Microphone stream started.")
+    except Exception as e:
+        error_msg = f"Microphone error: {e}"
+        text_queue.put(('error', error_msg))
+        logging.error(error_msg)
+        p.terminate()
+        return
 
+    model = Model(VOSK_MODEL_PATH)
+    recognizer = KaldiRecognizer(model, RATE)
+
+    listening = False
+    silence_counter = 0
+    last_activity_time = time.time()
+
+    try:
+        logging.info("Speech recognition thread started.")
+        print("Listening for speech...")
+
+        while not stop_event.is_set():
             try:
-                stream = p.open(format=pyaudio.paInt16,
-                                channels=1,
-                                rate=16000,
-                                input=True,
-                                frames_per_buffer=4000)
-                stream.start_stream()
-            except Exception as e:
-                error_msg = f"Microphone error: {e}"
-                text_queue.put(error_msg)
-                logging.error(error_msg)
-                p.terminate()
-                time.sleep(5)  # Wait before retrying
-                continue  # Retry initializing the microphone
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                # Calculate RMS volume
+                rms = math.sqrt(sum([sample**2 for sample in struct.unpack("<" + "h"*CHUNK, data)]) / CHUNK)
 
-            logging.info("Speech recognition thread started.")
-            print("Listening... Speak into the microphone.")
+                # Send current audio level
+                text_queue.put(('level', rms))
 
-            while not stop_event.is_set():
-                try:
-                    data = stream.read(4000, exception_on_overflow=False)
+                if rms > THRESHOLD:
+                    if not listening:
+                        listening = True
+                        logging.info("Volume threshold exceeded. Starting recognition.")
+                        print("Speech detected. Starting recognition...")
+                    silence_counter = 0  # Reset silence counter
                     if recognizer.AcceptWaveform(data):
                         result = recognizer.Result()
                         result_json = json.loads(result)
                         text = result_json.get("text", "")
                         if text:
-                            text_queue.put(text)
+                            text_queue.put(('full', text))
                             logging.info(f"Recognized speech: {text}")
                     else:
                         partial = recognizer.PartialResult()
-                        # Optionally handle partial results
-                except Exception as e:
-                    error_msg = f"Speech Recognition error: {e}"
-                    text_queue.put(error_msg)
-                    logging.error(error_msg)
-                    break  # Exit the inner loop to restart recognition
+                        partial_json = json.loads(partial)
+                        partial_text = partial_json.get("partial", "")
+                        if partial_text:
+                            text_queue.put(('partial', partial_text))
+                            logging.debug(f"Partial recognition: {partial_text}")
+                else:
+                    if listening:
+                        silence_counter += CHUNK / RATE
+                        if silence_counter > SILENCE_LIMIT:
+                            listening = False
+                            recognizer.Reset()
+                            logging.info("Silence detected. Stopping recognition.")
+                            print("Silence detected. Stopping recognition...")
+            except Exception as e:
+                error_msg = f"Speech Recognition error: {e}"
+                text_queue.put(('error', error_msg))
+                logging.error(error_msg)
+                break  # Exit the loop to restart recognition
 
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            logging.info("Speech recognition stream closed.")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        logging.info("Microphone stream closed.")
+        print("Microphone stream closed.")
 
-        except Exception as e:
-            error_msg = f"Speech Recognition initialization error: {e}"
-            text_queue.put(error_msg)
-            logging.error(error_msg)
-        
-        # Wait before retrying to prevent rapid restarts
-        time.sleep(5)
-    
     logging.info("Speech recognition thread terminated.")
 
 # ======================= Socket Communication Functions ===================
@@ -299,34 +329,39 @@ def main():
     # Event to signal threads to stop
     stop_event = threading.Event()
 
-    # Start speech recognition thread
+    # Start speech recognition thread with volume threshold
     speech_thread = threading.Thread(
         target=speech_recognition_thread,
-        args=(text_queue, stop_event),
+        args=(text_queue, stop_event, VOLUME_THRESHOLD, SILENCE_DURATION),
         name="SpeechRecognitionThread",
         daemon=True
     )
     speech_thread.start()
 
     print("Voice Client Started. Speak into the microphone.")
+    print(f"Listening will activate when volume exceeds {VOLUME_THRESHOLD}.")
     print("Say 'exit' or 'quit' to terminate the client.\n")
 
     try:
         while not stop_event.is_set():
             try:
-                # Wait for recognized text with a timeout
-                text = text_queue.get(timeout=0.1)
-                if isinstance(text, str):
-                    if text.lower() in ['exit', 'quit']:
-                        print("Exiting Voice Client.")
-                        stop_event.set()
-                        break
-                    elif text.startswith("Speech Recognition error:"):
-                        print(f"Error: {text}")
-                        continue
-                    else:
-                        print(f"\nYou: {text}")
-                        send_and_receive(text)
+                # Wait for messages with a timeout
+                message = text_queue.get(timeout=0.1)
+                msg_type, content = message
+
+                if msg_type == 'level':
+                    # Report current audio level
+                    print(f"Audio Level: {content}")
+                elif msg_type == 'partial':
+                    # Report partial recognition
+                    print(f"Partial: {content}")
+                elif msg_type == 'full':
+                    # Report full recognition and send to server
+                    print(f"\nYou: {content}")
+                    send_and_receive(content)
+                elif msg_type == 'error':
+                    # Report errors
+                    print(f"Error: {content}")
             except Empty:
                 continue
     except KeyboardInterrupt:

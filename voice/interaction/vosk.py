@@ -16,7 +16,7 @@ from pathlib import Path
 
 # ======================= Configuration Constants =======================
 VENV_DIR = "vosk_venv"
-VOSK_MODEL_PATH = "models/vosk-model-small-en-us-0.15"  # Path to Vosk model
+VOSK_MODEL_PATH = "models/vosk-model-en-us-0.42-gigaspeech"  # Path to Vosk model
 VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip"  # URL to download the Vosk model
 
 HOST = 'localhost'  # or the hostname/IP where the server runs

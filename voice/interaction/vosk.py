@@ -25,7 +25,7 @@ HOST = 'localhost'  # or the hostname/IP where the server runs
 PORT = 64162        # must match the port in the provided server script
 
 # Volume Threshold for Filtering Recognition Results
-VOLUME_THRESHOLD = 500  # Adjust based on microphone sensitivity
+VOLUME_THRESHOLD = 650  # Adjust based on microphone sensitivity
 
 # Timeouts
 SENTENCE_TIMEOUT = 2.0  # Seconds after which to send the recognized sentence

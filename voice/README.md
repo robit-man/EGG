@@ -47,6 +47,13 @@ fi
 ```
 
 ### To run using VOSK for VOCAL input and model handler
+
+To modify the current model with a [new model from here](https://alphacephei.com/vosk/models)
+```
+VOSK_MODEL_PATH = "models/vosk-model-en-us-0.42-gigaspeech"  # Path to Vosk model
+VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip"  # URL to download the Vosk model
+```
+ 
 ```bash
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/vosk.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \

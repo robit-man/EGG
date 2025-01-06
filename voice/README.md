@@ -46,6 +46,23 @@ else \
 fi
 ```
 
+### To run using VOSK instead of  [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
+```bash
+mkdir -p /home/$(whoami)/voice && \
+if [ -f /home/$(whoami)/voice/input.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 input.py; exec bash' && \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 model_to_tts.py; exec bash'; \
+else \
+    git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && \
+    cd /tmp/EGG && git sparse-checkout set voice/interaction && \
+    cp -r voice/interaction/* /home/$(whoami)/voice/ && \
+    cd /home/$(whoami)/voice && \
+    gnome-terminal -- bash -c 'python3 vosk.py; exec bash' && \
+    gnome-terminal -- bash -c 'python3 model_to_tts.py --stream --history; exec bash' && \
+    rm -rf /tmp/EGG; \
+fi
+```
+
 ### Pull and run the client example with user input
 ```bash
 mkdir -p voice && curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/client.py -o voice/client.py && python3 voice/client.py

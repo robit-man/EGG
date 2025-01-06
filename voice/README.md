@@ -48,7 +48,7 @@ fi
 
 ### To run using VOSK for VOCAL input and model handler
 
-To modify the current model with a [new model from here](https://alphacephei.com/vosk/models)
+To [modify the current model](https://github.com/robit-man/EGG/blob/main/voice/interaction/vosk.py) with a [new model from here](https://alphacephei.com/vosk/models)
 ```
 VOSK_MODEL_PATH = "models/vosk-model-en-us-0.42-gigaspeech"  # Path to Vosk model
 VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip"  # URL to download the Vosk model

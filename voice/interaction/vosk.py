@@ -24,9 +24,13 @@ VOSK_MODEL_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-
 HOST = 'localhost'  # or the hostname/IP where the server runs
 PORT = 64162        # must match the port in the provided server script
 
-# Volume Activation Constants
-VOLUME_THRESHOLD = 1000  # Adjust this value based on your microphone sensitivity
-SILENCE_DURATION = 1.0  # Seconds of silence to deactivate listening
+# Volume Threshold for Filtering Recognition Results
+VOLUME_THRESHOLD = 500  # Adjust based on microphone sensitivity
+
+# Timeouts
+SENTENCE_TIMEOUT = 2.0  # Seconds after which to send the recognized sentence
+PARTIAL_TIMEOUT = 3.0    # Seconds after which to send the partial utterance
+RESET_TIMEOUT = 5.0      # Seconds of total inactivity to reset the recognition buffer
 
 # ======================= Logging Configuration ==========================
 logging.basicConfig(
@@ -184,21 +188,19 @@ def download_vosk_model():
         print(f"Error: Failed to extract Vosk model: {e}")
         sys.exit("Error: Failed to extract Vosk model.")
 
-# ======================= Speech Recognition Thread with Vosk and Volume Threshold ============
-def speech_recognition_thread(text_queue, stop_event, volume_threshold=500, silence_duration=1.0):
-    """Thread function for speech recognition using Vosk with volume threshold activation."""
+# ======================= Speech Recognition Thread ============================
+def speech_recognition_thread(partial_queue, final_queue, stop_event):
+    """Thread function for continuous speech recognition using Vosk."""
     from vosk import Model, KaldiRecognizer, SetLogLevel
     import pyaudio
 
     SetLogLevel(-1)  # Suppress Vosk logs
 
-    # Constants for volume detection
+    # Constants for audio stream
     CHUNK = 1024  # Number of audio frames per buffer
     FORMAT = pyaudio.paInt16  # 16-bit int sampling
     CHANNELS = 1  # Mono audio
     RATE = 16000  # Sampling rate
-    THRESHOLD = volume_threshold  # Volume threshold
-    SILENCE_LIMIT = silence_duration  # Seconds of silence to stop recognition
 
     p = pyaudio.PyAudio()
 
@@ -213,17 +215,13 @@ def speech_recognition_thread(text_queue, stop_event, volume_threshold=500, sile
         print("Microphone stream started.")
     except Exception as e:
         error_msg = f"Microphone error: {e}"
-        text_queue.put(('error', error_msg))
+        print(f"Error: {error_msg}")
         logging.error(error_msg)
         p.terminate()
         return
 
     model = Model(VOSK_MODEL_PATH)
     recognizer = KaldiRecognizer(model, RATE)
-
-    listening = False
-    silence_counter = 0
-    last_activity_time = time.time()
 
     try:
         logging.info("Speech recognition thread started.")
@@ -232,45 +230,34 @@ def speech_recognition_thread(text_queue, stop_event, volume_threshold=500, sile
         while not stop_event.is_set():
             try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
-                # Calculate RMS volume
-                rms = math.sqrt(sum([sample**2 for sample in struct.unpack("<" + "h"*CHUNK, data)]) / CHUNK)
 
-                # Send current audio level
-                text_queue.put(('level', rms))
+                # Calculate RMS (Root Mean Square) amplitude
+                rms = calculate_rms(data)
 
-                if rms > THRESHOLD:
-                    if not listening:
-                        listening = True
-                        logging.info("Volume threshold exceeded. Starting recognition.")
-                        print("Speech detected. Starting recognition...")
-                    silence_counter = 0  # Reset silence counter
+                if rms < VOLUME_THRESHOLD:
+                    # Considered as feedback or background noise; discard
+                    continue
+                else:
+                    # Process the audio chunk
                     if recognizer.AcceptWaveform(data):
                         result = recognizer.Result()
                         result_json = json.loads(result)
                         text = result_json.get("text", "")
                         if text:
-                            text_queue.put(('full', text))
-                            logging.info(f"Recognized speech: {text}")
+                            final_queue.put(text)
+                            logging.info(f"Recognized final sentence: {text}")
                     else:
                         partial = recognizer.PartialResult()
                         partial_json = json.loads(partial)
                         partial_text = partial_json.get("partial", "")
                         if partial_text:
-                            text_queue.put(('partial', partial_text))
-                            logging.debug(f"Partial recognition: {partial_text}")
-                else:
-                    if listening:
-                        silence_counter += CHUNK / RATE
-                        if silence_counter > SILENCE_LIMIT:
-                            listening = False
-                            recognizer.Reset()
-                            logging.info("Silence detected. Stopping recognition.")
-                            print("Silence detected. Stopping recognition...")
+                            partial_queue.put((partial_text, rms))
+                            logging.debug(f"Recognized partial text: {partial_text} (RMS: {rms})")
             except Exception as e:
                 error_msg = f"Speech Recognition error: {e}"
-                text_queue.put(('error', error_msg))
+                print(f"Error: {error_msg}")
                 logging.error(error_msg)
-                break  # Exit the loop to restart recognition
+                break  # Exit the loop to restart recognition if needed
 
     finally:
         stream.stop_stream()
@@ -280,6 +267,151 @@ def speech_recognition_thread(text_queue, stop_event, volume_threshold=500, sile
         print("Microphone stream closed.")
 
     logging.info("Speech recognition thread terminated.")
+
+def calculate_rms(audio_data):
+    """
+    Calculate the Root Mean Square (RMS) amplitude of the audio data.
+    """
+    # Unpack the binary data to integers
+    count = len(audio_data) // 2  # 2 bytes per sample for paInt16
+    format = "<" + "h" * count  # Little endian, signed short
+    samples = struct.unpack(format, audio_data)
+
+    # Compute RMS
+    sum_squares = sum(sample**2 for sample in samples)
+    rms = math.sqrt(sum_squares / count) if count > 0 else 0
+    return rms
+
+# ======================= Assembler Thread ================================
+def assembler_thread(partial_queue, final_queue, stop_event, send_function):
+    """
+    Thread function to assemble sentences and send to downstream API.
+    Handles real-time partial updates and sends only final sentences after a timeout.
+    Implements a 2-second inactivity timeout to send the latest recognized sentence.
+    Additionally, sends partial utterances after a 3-second delay.
+    Resets the recognition buffer if both RMS is above the threshold and the timeout is reached with no new words.
+    """
+    last_final_time = None
+    last_sentence = None
+
+    last_partial_time = None
+    last_partial_text = None
+
+    while not stop_event.is_set():
+        try:
+            # Handle partial results
+            try:
+                partial_text, rms = partial_queue.get_nowait()
+                if partial_text:
+                    last_partial_text = partial_text
+                    last_partial_time = time.time()
+                    # Clear the terminal
+                    clear_terminal()
+                    
+                    # Print the partial sentence with RMS
+                    print(f"Recognizing: {partial_text} (RMS: {rms})")
+            except Empty:
+                pass
+
+            # Handle final results
+            try:
+                final = final_queue.get_nowait()
+                if final:
+                    last_sentence = final
+                    last_final_time = time.time()
+                    # Clear the terminal
+                    clear_terminal()
+                    
+                    # Print the final sentence
+                    print(f"Recognized Sentence:\n{final}")
+                    logging.debug(f"Recognized sentence displayed: {final}")
+            except Empty:
+                pass
+
+            current_time = time.time()
+
+            # Check if 2-second timeout has passed since the last final recognition
+            if last_final_time and (current_time - last_final_time) > SENTENCE_TIMEOUT:
+                # Send the last recognized sentence to the LLM
+                send_function(last_sentence)
+                logging.info(f"Sent sentence to downstream API: {last_sentence}")
+                
+                # Reset last_sentence and last_final_time
+                last_sentence = None
+                last_final_time = None
+
+            # Check if 3-second timeout has passed since the last partial recognition
+            if last_partial_time and (current_time - last_partial_time) > PARTIAL_TIMEOUT:
+                if last_partial_text:
+                    # Send the partial utterance to the LLM
+                    send_function(last_partial_text)
+                    logging.info(f"Sent partial utterance to downstream API: {last_partial_text}")
+                    
+                    # Reset last_partial_text and last_partial_time
+                    last_partial_text = None
+                    last_partial_time = None
+
+            # Check for overall inactivity to reset recognition buffer
+            # Reset only if both RMS is above the threshold and timeout is reached with no new words
+            if (last_final_time or last_partial_time) and (current_time - max(filter(None, [last_final_time, last_partial_time])) ) > RESET_TIMEOUT:
+                # Reset the recognition buffer
+                clear_terminal()
+                print("No new speech detected for 5 seconds. Resetting recognition buffer.")
+                logging.info("No new speech detected for 5 seconds. Resetting recognition buffer.")
+                
+                # Clear queues
+                clear_queue(partial_queue)
+                clear_queue(final_queue)
+                
+                # Reset variables
+                last_sentence = None
+                last_final_time = None
+                last_partial_text = None
+                last_partial_time = None
+
+            time.sleep(0.1)  # Small delay to prevent high CPU usage
+
+        except Exception as e:
+            logging.error(f"Assembler Thread error: {e}")
+
+    # After stop_event is set, process any remaining final sentences
+    while not final_queue.empty():
+        try:
+            final = final_queue.get_nowait()
+            if final:
+                send_function(final)
+                logging.info(f"Sent sentence to downstream API: {final}")
+        except Empty:
+            break
+
+    # Process any remaining partial utterances
+    while not partial_queue.empty():
+        try:
+            partial_text, rms = partial_queue.get_nowait()
+            if partial_text:
+                send_function(partial_text)
+                logging.info(f"Sent partial utterance to downstream API: {partial_text}")
+        except Empty:
+            break
+
+def clear_terminal():
+    """
+    Clears the terminal screen.
+    """
+    if os.name == 'nt':
+        os.system('cls')
+    else:
+        os.system('clear')
+
+def clear_queue(q):
+    """
+    Clears all items from the given queue.
+    """
+    while not q.empty():
+        try:
+            q.get_nowait()
+        except Empty:
+            break
 
 # ======================= Socket Communication Functions ===================
 def send_and_receive(prompt):
@@ -324,52 +456,45 @@ def main():
     download_vosk_model()
 
     # Initialize Queues for inter-thread communication
-    text_queue = Queue()
+    partial_queue = Queue()
+    final_queue = Queue()
 
     # Event to signal threads to stop
     stop_event = threading.Event()
 
-    # Start speech recognition thread with volume threshold
+    # Start speech recognition thread
     speech_thread = threading.Thread(
         target=speech_recognition_thread,
-        args=(text_queue, stop_event, VOLUME_THRESHOLD, SILENCE_DURATION),
+        args=(partial_queue, final_queue, stop_event),
         name="SpeechRecognitionThread",
         daemon=True
     )
     speech_thread.start()
 
+    # Start assembler thread to assemble sentences and send
+    assembler = threading.Thread(
+        target=assembler_thread,
+        args=(partial_queue, final_queue, stop_event, send_and_receive),
+        name="AssemblerThread",
+        daemon=True
+    )
+    assembler.start()
+
     print("Voice Client Started. Speak into the microphone.")
-    print(f"Listening will activate when volume exceeds {VOLUME_THRESHOLD}.")
-    print("Say 'exit' or 'quit' to terminate the client.\n")
+    print("Recognizing speech in real-time with volume filtering.")
+    print("Press Ctrl+C to terminate the client.\n")
 
     try:
         while not stop_event.is_set():
-            try:
-                # Wait for messages with a timeout
-                message = text_queue.get(timeout=0.1)
-                msg_type, content = message
-
-                if msg_type == 'level':
-                    # Report current audio level
-                    print(f"Audio Level: {content}")
-                elif msg_type == 'partial':
-                    # Report partial recognition
-                    print(f"Partial: {content}")
-                elif msg_type == 'full':
-                    # Report full recognition and send to server
-                    print(f"\nYou: {content}")
-                    send_and_receive(content)
-                elif msg_type == 'error':
-                    # Report errors
-                    print(f"Error: {content}")
-            except Empty:
-                continue
+            # Keep the main thread alive to listen for termination commands
+            time.sleep(0.1)
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt received. Exiting Voice Client.")
     finally:
         # Signal threads to stop and wait for them to finish
         stop_event.set()
         speech_thread.join()
+        assembler.join()
         logging.info("Client terminated gracefully.")
 
 # ======================= Entry Point ======================================

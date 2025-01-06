@@ -46,7 +46,7 @@ else \
 fi
 ```
 
-### To run using VOSK instead of  [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
+### To run using VOSK instead for vocal input
 ```bash
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/vosk.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \

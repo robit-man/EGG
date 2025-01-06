@@ -46,7 +46,7 @@ else \
 fi
 ```
 
-### To run using VOSK for VOCAL input and model handler
+### To run using [VOSK](https://alphacephei.com/vosk/) for VOCAL input and model handler
 
 To [modify the current model](https://github.com/robit-man/EGG/blob/main/voice/interaction/vosk.py) with a [new model from here](https://alphacephei.com/vosk/models)
 ```

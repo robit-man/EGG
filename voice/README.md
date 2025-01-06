@@ -50,7 +50,7 @@ fi
 ```bash
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/input.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
-    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 input.py; exec bash' && \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 vosk.py; exec bash' && \
     gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 model_to_tts.py; exec bash'; \
 else \
     git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && \

@@ -29,7 +29,7 @@ sudo apt-get install libpython3-dev
 sudo apt-get install python3-venv
 ```
 
-### Run the following in terminal to activate the two scripts inside the [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
+### Run the following in terminal to activate TEXT input and model handler inside the [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
 ```bash
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/input.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
@@ -46,7 +46,7 @@ else \
 fi
 ```
 
-### To run using VOSK instead for vocal input
+### To run using VOSK for VOCAL input and model handler
 ```bash
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/vosk.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \

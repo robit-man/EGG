@@ -49,7 +49,7 @@ fi
 ### To run using VOSK instead of  [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
 ```bash
 mkdir -p /home/$(whoami)/voice && \
-if [ -f /home/$(whoami)/voice/input.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
+if [ -f /home/$(whoami)/voice/vosk.py ] && [ -f /home/$(whoami)/voice/model_to_tts.py ]; then \
     gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 vosk.py; exec bash' && \
     gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 model_to_tts.py; exec bash'; \
 else \

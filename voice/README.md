@@ -2,5 +2,5 @@
 
 one liner installs or bust! 🙈
 ```bash
-wget -q -O voice.sh https://raw.githubusercontent.com/robit-man/EGG/main/voice/voice.sh && chmod +x voice.sh && (crontab -l 2>/dev/null | grep -q "@reboot DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus gnome-terminal -- bash -c '$(pwd)/voice.sh; exec bash'" || (crontab -l 2>/dev/null; echo "@reboot DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus gnome-terminal -- bash -c '$(pwd)/voice.sh; exec bash'") | crontab -) && gnome-terminal -- bash -c "$(pwd)/voice.sh; exec bash"
+wget -q -O voice.sh https://raw.githubusercontent.com/robit-man/EGG/main/voice/voice.sh && chmod +x voice.sh && mkdir -p ~/.config/autostart && echo -e "[Desktop Entry]\nType=Application\nExec=gnome-terminal -- bash -c '$(pwd)/voice.sh; exec bash'\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\nName=VoiceScript\nComment=Run voice.sh at startup" > ~/.config/autostart/voice.sh.desktop && gnome-terminal -- bash -c "$(pwd)/voice.sh; exec bash"
 ```

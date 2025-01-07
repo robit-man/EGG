@@ -81,7 +81,7 @@ if [ -f "/home/$(whoami)/voice/audio_stream.py" ] && [ -f "/home/$(whoami)/voice
     sleep 2
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd /home/$(whoami)/voice && python3 model_to_tts.py --stream --history; exec bash"
     sleep 2
-    gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v \"$(pwd)/voice:/voice\" \"\$(autotag piper-tts)\" bash -c 'cd /voice && python3 inference.py'; exec bash"
+    gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag piper-tts) bash -c 'cd /voice && python3 inference.py'; exec bash"
     sleep 2
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd /voice && python3 whisper_server.py'; exec bash"
 else
@@ -96,7 +96,7 @@ else
     sleep 2
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && python3 model_to_tts.py --stream --history; exec bash"
     sleep 2
-    gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v \"$(pwd)/voice:/voice\" \"\$(autotag piper-tts)\" bash -c 'cd /voice && python3 inference.py'; exec bash"
+    gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag piper-tts) bash -c 'cd /voice && python3 inference.py'; exec bash"
     sleep 2
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd /voice && python3 whisper_server.py'; exec bash"
 

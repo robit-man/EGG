@@ -268,3 +268,5 @@ sudo docker run hello-world
    ```bash
    echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian stable stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
    ```
+
+### Continue inside piper to set up the [piper specific docker container](https://github.com/robit-man/EGG/tree/main/pi5/piper)

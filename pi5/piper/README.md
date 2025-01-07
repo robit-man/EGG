@@ -12,7 +12,7 @@ sudo docker run --name piper-tts -it piper-tts-rpi5
 
 Running with exposed shared folder
 ```bash
-sudo docker run -v /home/$(whoami)/shared:/p[t/shared -it piper-tts-rpi5
+sudo docker run -v /home/$(whoami)/voice:/opt/voice -it piper-tts-rpi5
 ```
 
 starting piper inside the container
@@ -22,5 +22,5 @@ piper -h
 
 testing
 ```bash
-echo "To address the elephant in the room: using text-to-speech technology isn’t just practical, it’s a lot of fun too!" | piper --model /opt/piper/voices/aru/medium/en_GB-aru-medium.onnx --output_file /opt/welcome.wav
+echo "Testing Speech Synthesis on a Raspberry Pi 5!" | piper --model /opt/voice/ --output_file /opt/voice/tempfile.wav
 ```

@@ -66,11 +66,16 @@ cd "$WHISPERCPP_DIR" || {
     echo "Failed to navigate to $WHISPERCPP_DIR. Exiting."
     exit 1
 }
+
 # Run the build command
 echo "Running the build command..."
 python3 -m build -w
 
 echo "Running the whl install command..."
 pip install dist/*.whl
+
+cd "examples/stream/"
+
+python stream.py
 
 echo "Setup and build process completed."

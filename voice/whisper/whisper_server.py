@@ -78,9 +78,10 @@ class AudioHandler(BaseHTTPRequestHandler):
                 audio = whisper.load_audio(temp_wav.name)
                 audio = whisper.pad_or_trim(audio)
                 
-                if MODEL_NAME is "large"
+                if MODEL_NAME == "large":
                     mel = whisper.log_mel_spectrogram(audio=audio, n_mels=128).to(model.device)
-                if MODEL_NAME == "medium" or MODEL_NAME == "small" or MODEL_NAME == "base" or MODEL_NAME == "tiny"
+                    
+                if MODEL_NAME in ["medium", "small", "base", "tiny"]:
                     mel = whisper.log_mel_spectrogram(audio).to(model.device)
 
                 # Detect language

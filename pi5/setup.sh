@@ -62,6 +62,10 @@ echo "Installing the 'build' package..."
 pip install --upgrade pip
 pip install build
 
+cd "$WHISPERCPP_DIR" || {
+    echo "Failed to navigate to $WHISPERCPP_DIR. Exiting."
+    exit 1
+}
 # Run the build command
 echo "Running the build command..."
 python3 -m build -w

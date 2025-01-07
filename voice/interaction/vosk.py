@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 import math
 import struct
+from collections import deque
 
 # ======================= Configuration Constants =======================
 VENV_DIR = "vosk_venv"
@@ -25,12 +26,15 @@ HOST = 'localhost'  # or the hostname/IP where the server runs
 PORT = 64162        # must match the port in the provided server script
 
 # Volume Threshold for Filtering Recognition Results
-VOLUME_THRESHOLD = 400  # Adjust based on microphone sensitivity
+VOLUME_THRESHOLD = 300  # Adjust based on microphone sensitivity
 
 # Timeouts
-SENTENCE_TIMEOUT = 2.0  # Seconds after which to send the recognized sentence
-PARTIAL_TIMEOUT = 3.0    # Seconds after which to send the partial utterance
-RESET_TIMEOUT = 5.0      # Seconds of total inactivity to reset the recognition buffer
+SENTENCE_TIMEOUT = 5.0  # Increased from 4.0 seconds
+PARTIAL_TIMEOUT = 5.0    # Increased from 4.0 seconds
+RESET_TIMEOUT = 7.0      # Increased from 6.0 seconds
+
+# Audio Chunk Size
+CHUNK = 8192  # Increased from 2048 for better chunking
 
 # ======================= Logging Configuration ==========================
 logging.basicConfig(
@@ -87,7 +91,9 @@ def install_dependencies():
         required_packages = [
             "vosk",
             "pyaudio",
-            "requests"
+            "requests",
+            "numpy",        # Added numpy for numerical operations
+            "noisereduce"   # Added noisereduce for noise reduction
         ]
         subprocess.check_call([pip_executable, "install"] + required_packages, stderr=subprocess.DEVNULL)
         logging.info("Dependencies installed successfully.")
@@ -199,19 +205,122 @@ def reset_recognition(partial_queue, final_queue, reset_event):
     logging.info("Recognition reset triggered.")
     print("Recognition has been reset.")
 
+# ======================= Audio Amplification Function ======================
+def amplify_audio(audio_data, gain=3):
+    """
+    Amplify the audio data by a specified gain factor.
+    
+    Parameters:
+        audio_data (bytes): The raw audio data to amplify.
+        gain (float): The amplification factor. Default is 1.5.
+    
+    Returns:
+        bytes: The amplified audio data.
+    """
+    import numpy as np
+    
+    # Convert bytes to numpy array of type int16
+    audio_np = np.frombuffer(audio_data, dtype=np.int16)
+    
+    # Apply gain
+    amplified = audio_np * gain
+    
+    # Prevent clipping by ensuring values stay within int16 range
+    amplified = np.clip(amplified, -32768, 32767)
+    
+    # Convert back to bytes
+    return amplified.astype(np.int16).tobytes()
+
+# ======================= Noise Reduction Function =========================
+def reduce_noise_audio(audio_data, sr=16000):
+    """
+    Reduce noise from the audio data using noisereduce library.
+    
+    Parameters:
+        audio_data (bytes): The raw audio data to reduce noise from.
+        sr (int): The sampling rate of the audio data. Default is 16000 Hz.
+    
+    Returns:
+        bytes: The noise-reduced audio data.
+    """
+    import numpy as np
+    import noisereduce as nr
+    
+    # Convert bytes to numpy array of type int16
+    audio_np = np.frombuffer(audio_data, dtype=np.int16)
+    
+    # Perform noise reduction
+    # Reduce 'prop_decrease' to retain more of the original signal
+    noise_reduced = nr.reduce_noise(y=audio_np, sr=sr, prop_decrease=0.8)  # Reduced from 1.0 to 0.8
+    
+    # Convert back to bytes
+    return noise_reduced.astype(np.int16).tobytes()
+
+# ======================= Playback Thread Function ==========================
+def playback_thread_function(playback_queue, stop_event):
+    """
+    Thread function to handle playback of audio data from the playback_queue.
+    """
+    import pyaudio
+    import logging
+
+    def play_audio(audio_data, rate=16000):
+        """
+        Play back the given audio data using pyaudio.
+
+        Parameters:
+            audio_data (bytes): The raw audio data to play.
+            rate (int): The sampling rate of the audio data. Default is 16000 Hz.
+        """
+        p = pyaudio.PyAudio()
+        
+        try:
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=1,
+                            rate=rate,
+                            output=True)
+            stream.write(audio_data)
+            # Calculate duration to wait based on audio length
+            duration = len(audio_data) / (2 * rate)  # 2 bytes per sample
+            time.sleep(duration)  # Ensure playback is complete before closing
+            stream.stop_stream()
+            stream.close()
+        except Exception as e:
+            logging.error(f"Failed to play audio: {e}")
+            print(f"Error: Failed to play audio: {e}")
+        finally:
+            p.terminate()
+
+    while not stop_event.is_set():
+        try:
+            # Wait for audio data to play, timeout to allow checking stop_event
+            audio_data = playback_queue.get(timeout=0.1)
+            if audio_data:
+                play_audio(audio_data)
+        except Empty:
+            continue
+        except Exception as e:
+            logging.error(f"Playback thread error: {e}")
+
+    logging.info("Playback thread terminated.")
+
 # ======================= Speech Recognition Thread ============================
-def speech_recognition_thread(partial_queue, final_queue, stop_event, reset_event):
+def speech_recognition_thread(partial_queue, final_queue, stop_event, reset_event, playback_queue, last_chunk_dict, last_chunk_lock):
     """Thread function for continuous speech recognition using Vosk."""
     from vosk import Model, KaldiRecognizer, SetLogLevel
     import pyaudio
+    import numpy as np
 
     SetLogLevel(-1)  # Suppress Vosk logs
 
     # Constants for audio stream
-    CHUNK = 1024  # Number of audio frames per buffer
+    CHUNK = 4096  # Increased from 2048 for better chunking
     FORMAT = pyaudio.paInt16  # 16-bit int sampling
     CHANNELS = 1  # Mono audio
     RATE = 16000  # Sampling rate
+
+    # Initialize sliding buffer with maxlen=3
+    sliding_buffer = deque(maxlen=3)
 
     p = pyaudio.PyAudio()
 
@@ -234,6 +343,9 @@ def speech_recognition_thread(partial_queue, final_queue, stop_event, reset_even
     model = Model(VOSK_MODEL_PATH)
     recognizer = KaldiRecognizer(model, RATE)
 
+    # Initialize the repetition flag
+    last_chunk_replayed = False
+
     try:
         logging.info("Speech recognition thread started.")
         print("Listening for speech...")
@@ -246,9 +358,17 @@ def speech_recognition_thread(partial_queue, final_queue, stop_event, reset_even
                 recognizer = KaldiRecognizer(model, RATE)
                 reset_event.clear()
                 logging.info("Recognizer re-instantiated successfully.")
+                last_chunk_replayed = False  # Reset the flag
 
             try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
+
+                # Update the sliding buffer
+                sliding_buffer.append(data)
+
+                # Store the last chunk in shared dictionary
+                with last_chunk_lock:
+                    last_chunk_dict['last_chunk'] = data
 
                 # Calculate RMS (Root Mean Square) amplitude
                 rms = calculate_rms(data)
@@ -257,22 +377,43 @@ def speech_recognition_thread(partial_queue, final_queue, stop_event, reset_even
                     # Considered as feedback or background noise; discard
                     continue
                 else:
-                    # Process the audio chunk
-                    if recognizer.AcceptWaveform(data):
+                    # Perform noise reduction
+                    noise_reduced_data = reduce_noise_audio(data, sr=RATE)
+
+                    # Amplify the audio data
+                    amplified_data = amplify_audio(noise_reduced_data, gain=3)  # Increased gain
+
+                    # Process the amplified audio chunk
+                    if recognizer.AcceptWaveform(amplified_data):
                         result = recognizer.Result()
                         result_json = json.loads(result)
                         text = result_json.get("text", "")
                         if text:
-                            # Extract confidence scores
-                            words = result_json.get("result", [])
-                            if words:
-                                confidences = [word.get("conf", 0) for word in words]
-                                avg_confidence = sum(confidences) / len(confidences)
-                            else:
-                                avg_confidence = 0
+                            # Put the recognized text with confidence 0 to indicate no filtering
+                            final_queue.put((text, 0))
+                            logging.info(f"Recognized final sentence: {text} (Confidence Not Filtered)")
 
-                            final_queue.put((text, avg_confidence))
-                            logging.info(f"Recognized final sentence: {text} (Avg Confidence: {avg_confidence})")
+                            # Concatenate buffered audio for playback
+                            buffered_audio = b''.join(sliding_buffer)
+                            playback_queue.put(buffered_audio)
+
+                            # Check if the last chunk has already been replayed
+                            if not last_chunk_replayed:
+                                # Re-send the last chunk to the recognizer to enhance recognition
+                                recognizer.AcceptWaveform(amplified_data)
+                                replay_result = recognizer.Result()
+                                replay_result_json = json.loads(replay_result)
+                                replay_text = replay_result_json.get("text", "")
+                                if replay_text:
+                                    final_queue.put((replay_text, 0))
+                                    logging.info(f"Re-recognized sentence after replay: {replay_text} (Confidence Not Filtered)")
+
+                                    # Enqueue the replayed audio for playback twice
+                                    playback_queue.put(amplified_data)
+                                    playback_queue.put(amplified_data)  # Repeat playback
+
+                                # Set the flag to prevent multiple replays
+                                last_chunk_replayed = True
                     else:
                         partial = recognizer.PartialResult()
                         partial_json = json.loads(partial)
@@ -310,13 +451,14 @@ def calculate_rms(audio_data):
     return rms
 
 # ======================= Assembler Thread ================================
-def assembler_thread(partial_queue, final_queue, stop_event, send_function, reset_event):
+def assembler_thread(partial_queue, final_queue, stop_event, send_function, reset_event, last_chunk_dict, last_chunk_lock, playback_queue):
     """
     Thread function to assemble sentences and send to downstream API.
     Handles real-time partial updates and sends only final sentences after a timeout.
-    Implements a 2-second inactivity timeout to send the latest recognized sentence.
-    Additionally, sends partial utterances after a 3-second delay.
+    Implements a 5-second inactivity timeout to send the latest recognized sentence.
+    Additionally, sends partial utterances after a 5-second delay.
     Resets the recognition buffer if a timeout is reached with no new words.
+    Also, repeats the final chunk upon timeout.
     """
     last_final_time = None
     last_sentence = None
@@ -350,19 +492,22 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function, rese
                     clear_terminal()
 
                     # Print the final sentence
-                    print(f"Recognized Sentence:\n{final}\n(Avg Confidence: {avg_confidence:.2f})")
-                    logging.debug(f"Recognized sentence displayed: {final} (Avg Confidence: {avg_confidence})")
+                    print(f"Recognized Sentence:\n{final}\n(Confidence Not Filtered)")
+                    logging.debug(f"Recognized sentence displayed: {final} (Confidence Not Filtered)")
             except Empty:
                 pass
 
             current_time = time.time()
 
-            # Check if 2-second timeout has passed since the last final recognition
+            # Check SENTENCE_TIMEOUT
             if last_final_time and (current_time - last_final_time) > SENTENCE_TIMEOUT:
                 if last_sentence:
-                    # Send the last recognized sentence to the LLM
+                    # Send the last recognized sentence to the server/API
                     send_function(last_sentence[0])
-                    logging.info(f"Sent sentence to downstream API: {last_sentence[0]} (Avg Confidence: {last_sentence[1]})")
+                    logging.info(f"Sent sentence to downstream API: {last_sentence[0]}")
+
+                    # Introduce a short delay before resetting
+                    time.sleep(0.2)  # 200 milliseconds
 
                     # Reset recognition after sending
                     reset_recognition(partial_queue, final_queue, reset_event)
@@ -371,12 +516,23 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function, rese
                     last_sentence = None
                     last_final_time = None
 
-            # Check if 3-second timeout has passed since the last partial recognition
+                    # Repeat the final chunk
+                    with last_chunk_lock:
+                        final_chunk = last_chunk_dict.get('last_chunk', None)
+                    if final_chunk:
+                        # Amplify the final chunk
+                        amplified_final_chunk = amplify_audio(reduce_noise_audio(final_chunk), gain=3)
+                        # Enqueue the final chunk for playback
+                        playback_queue.put(amplified_final_chunk)
+            # Check PARTIAL_TIMEOUT
             if last_partial_time and (current_time - last_partial_time) > PARTIAL_TIMEOUT:
                 if last_partial_text:
-                    # Send the partial utterance to the LLM
+                    # Send the partial utterance to the server/API
                     send_function(last_partial_text)
                     logging.info(f"Sent partial utterance to downstream API: {last_partial_text}")
+
+                    # Introduce a short delay before resetting
+                    time.sleep(0.2)  # 200 milliseconds
 
                     # Reset recognition after sending
                     reset_recognition(partial_queue, final_queue, reset_event)
@@ -385,13 +541,12 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function, rese
                     last_partial_text = None
                     last_partial_time = None
 
-            # Check for overall inactivity to reset recognition buffer
-            # Reset only if timeout is reached with no new words
+            # Check RESET_TIMEOUT
             if (last_final_time or last_partial_time) and (current_time - max(filter(None, [last_final_time, last_partial_time])) ) > RESET_TIMEOUT:
                 # Reset the recognition buffer
                 clear_terminal()
-                print("No new speech detected for 5 seconds. Resetting recognition buffer.")
-                logging.info("No new speech detected for 5 seconds. Resetting recognition buffer.")
+                print("No new speech detected for 7 seconds. Resetting recognition buffer.")
+                logging.info("No new speech detected for 7 seconds. Resetting recognition buffer.")
 
                 # Reset recognition after timeout
                 reset_recognition(partial_queue, final_queue, reset_event)
@@ -401,6 +556,15 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function, rese
                 last_final_time = None
                 last_partial_text = None
                 last_partial_time = None
+
+                # Repeat the final chunk
+                with last_chunk_lock:
+                    final_chunk = last_chunk_dict.get('last_chunk', None)
+                if final_chunk:
+                    # Amplify the final chunk
+                    amplified_final_chunk = amplify_audio(reduce_noise_audio(final_chunk), gain=3)
+                    # Enqueue the final chunk for playback
+                    playback_queue.put(amplified_final_chunk)
 
             time.sleep(0.1)  # Small delay to prevent high CPU usage
 
@@ -413,7 +577,7 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function, rese
             final, avg_confidence = final_queue.get_nowait()
             if final:
                 send_function(final)
-                logging.info(f"Sent sentence to downstream API: {final} (Avg Confidence: {avg_confidence})")
+                logging.info(f"Sent sentence to downstream API: {final}")
         except Empty:
             break
 
@@ -452,9 +616,11 @@ def send_and_receive(prompt):
     Handles sending the prompt to the server and receiving the response.
     """
     try:
+        logging.debug(f"Attempting to send prompt: {prompt}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
             s.sendall(prompt.encode('utf-8'))
+            logging.debug("Prompt sent successfully. Awaiting response...")
             # Receive the response from the server
             response = b""
             while True:
@@ -463,14 +629,21 @@ def send_and_receive(prompt):
                     break
                 response += part
             if response:
+                response_text = response.decode('utf-8')
                 print("\nServer Response:")
-                print(response.decode('utf-8'))
+                print(response_text)
+                logging.debug(f"Received response: {response_text}")
             else:
                 print("\nNo response received from the server.")
+                logging.warning("No response received from the server.")
     except ConnectionRefusedError:
-        print("\nError: Unable to connect to the server. Ensure that the server is running.")
+        error_msg = "Unable to connect to the server. Ensure that the server is running."
+        print(f"\nError: {error_msg}")
+        logging.error(error_msg)
     except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}")
+        error_msg = f"An unexpected error occurred: {e}"
+        print(f"\nError: {error_msg}")
+        logging.error(error_msg)
 
 # ======================= Recognition Reset Function ======================
 def reset_recognition(partial_queue, final_queue, reset_event):
@@ -502,6 +675,11 @@ def main():
     # Initialize Queues for inter-thread communication
     partial_queue = Queue()
     final_queue = Queue()
+    playback_queue = Queue()  # New playback queue
+
+    # Shared dictionary and lock to store the last chunk
+    last_chunk_dict = {}
+    last_chunk_lock = threading.Lock()
 
     # Event to signal threads to stop
     stop_event = threading.Event()
@@ -509,10 +687,10 @@ def main():
     # Event to signal a recognizer reset
     reset_event = threading.Event()
 
-    # Start speech recognition thread with reset_event
+    # Start speech recognition thread with reset_event and playback_queue
     speech_thread = threading.Thread(
         target=speech_recognition_thread,
-        args=(partial_queue, final_queue, stop_event, reset_event),
+        args=(partial_queue, final_queue, stop_event, reset_event, playback_queue, last_chunk_dict, last_chunk_lock),  # Pass playback_queue, last_chunk_dict, last_chunk_lock
         name="SpeechRecognitionThread",
         daemon=True
     )
@@ -521,14 +699,23 @@ def main():
     # Start assembler thread to assemble sentences and send
     assembler = threading.Thread(
         target=assembler_thread,
-        args=(partial_queue, final_queue, stop_event, send_and_receive, reset_event),
+        args=(partial_queue, final_queue, stop_event, send_and_receive, reset_event, last_chunk_dict, last_chunk_lock, playback_queue),  # Pass last_chunk_dict, last_chunk_lock, playback_queue
         name="AssemblerThread",
         daemon=True
     )
     assembler.start()
 
+    # Start playback thread
+    playback_thread = threading.Thread(
+        target=playback_thread_function,
+        args=(playback_queue, stop_event),
+        name="PlaybackThread",
+        daemon=True
+    )
+    playback_thread.start()
+
     print("Voice Client Started. Speak into the microphone.")
-    print("Recognizing speech in real-time with volume filtering.")
+    print("Recognizing speech in real-time with volume filtering, noise reduction, final word amplification, and chunk repetition.")
     print("Press Ctrl+C to terminate the client.\n")
 
     try:
@@ -542,6 +729,7 @@ def main():
         stop_event.set()
         speech_thread.join()
         assembler.join()
+        playback_thread.join()  # Ensure playback thread terminates
         logging.info("Client terminated gracefully.")
 
 # ======================= Entry Point ======================================

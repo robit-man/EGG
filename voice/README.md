@@ -29,7 +29,7 @@ sudo apt-get install libpython3-dev
 sudo apt-get install python3-venv
 ```
 
-## Now with Whisper Support!
+## Now with [Whisper](https://github.com/dusty-nv/jetson-containers/tree/master/packages/speech/whisper) Support!
 Run the following command to automatically pull and run the whisper jetson container and deploy the whisper server inside it, you may be prompted for a password
 ```bash
 mkdir -p /home/$(whoami)/voice && \

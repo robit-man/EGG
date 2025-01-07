@@ -6,6 +6,7 @@
 
 ## Quick Start
 
+[![Build A Big Egg!](https://img.shields.io/badge/Build%20A%20Big%20Egg!-red?style=for-the-badge)](https://github.com/robit-man/EGG/tree/main/hardware)
 [![Explore Piper Training](https://img.shields.io/badge/Explore%20Piper%20Training-blue?style=for-the-badge)](https://github.com/robit-man/piper-train-jetson)
 [![Jetpack 6.1 Setup](https://img.shields.io/badge/Setup%20Jetpack%206.1-orange?style=for-the-badge)](https://github.com/robit-man/EGG/blob/main/setup_61.md)
 [![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)

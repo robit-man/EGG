@@ -29,6 +29,24 @@ sudo apt-get install libpython3-dev
 sudo apt-get install python3-venv
 ```
 
+## Now with Whisper Support!
+Run the following command to automatically pull and run the whisper jetson container and deploy the whisper server inside it, you may be prompted for a password
+```bash
+mkdir -p /home/$(whoami)/voice && \
+if [ -f /home/$(whoami)/voice/audio_stream.py ] && [ -f /home/$(whoami)/voice/whisper_server.py ]; then \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 audio_stream.py; exec bash' && \
+    gnome-terminal -- bash -c "jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd .. && cd .. && cd voice && python3 whisper_server.py'; exec bash"; \
+else \
+    git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && \
+    cd /tmp/EGG && git sparse-checkout set voice/whisper && \
+    cp -r voice/whisper/* /home/$(whoami)/voice/ && \
+    cd /home/$(whoami)/voice && \
+    gnome-terminal -- bash -c 'python3 audio_stream.py; exec bash' && \
+    gnome-terminal -- bash -c "jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd .. && cd .. && cd voice && python3 whisper_server.py'; exec bash" && \
+    rm -rf /tmp/EGG; \
+fi
+```
+
 ### Run the following in terminal to activate TEXT input and model handler inside the [interaction](https://github.com/robit-man/EGG/tree/main/voice/interaction) folder
 ```bash
 mkdir -p /home/$(whoami)/voice && \

@@ -24,6 +24,16 @@ check_and_install_ollama() {
     fi
 }
 
+# Function to check if jtop is installed
+check_and_install_jtop() {
+    if ! command -v jtop &> /dev/null; then
+        echo "jtop not found. Installing jetson-stats..."
+        pip install jetson-stats
+    else
+        echo "jtop is installed."
+    fi
+}
+
 # Load or prompt for password if not already saved
 if [ ! -f ~/.tempaccess ]; then
     read -sp "Enter your password: " PASSWORD
@@ -40,11 +50,12 @@ if [ ! -f ~/.tempaccess ]; then
 
     # Check and install ollama if necessary
     check_and_install_ollama
-    
+
+    # Check and install jtop if necessary
+    check_and_install_jtop
 else
     PASSWORD=$(cat ~/.tempaccess)
 fi
-
 
 # Create a script to cache sudo privileges
 CACHE_SCRIPT="/tmp/cache_sudo.sh"
@@ -92,3 +103,8 @@ else
     # Clean up
     rm -rf /tmp/EGG
 fi
+
+# Run jtop in the current terminal
+echo "Launching jtop in the current terminal..."
+check_and_install_jtop
+jtop

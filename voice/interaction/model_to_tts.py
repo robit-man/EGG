@@ -8,6 +8,8 @@ import json
 import argparse
 import threading
 from queue import Queue
+import shutil
+import time
 
 #############################################
 # Step 1: Ensure we're running inside a venv #
@@ -26,12 +28,12 @@ def setup_venv():
         print("Creating virtual environment...")
         subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
 
-    pip_path = os.path.join(VENV_DIR, 'bin', 'pip') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'pip.exe')
+    pip_path = os.path.join(VENV_DIR, 'bin', 'pip')
     subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
 
 def relaunch_in_venv():
     # Relaunch inside venv python
-    python_path = os.path.join(VENV_DIR, 'bin', 'python') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'python.exe')
+    python_path = os.path.join(VENV_DIR, 'bin', 'python')
     os.execv(python_path, [python_path] + sys.argv)
 
 if not in_venv():
@@ -186,6 +188,145 @@ def load_format_schema(fmt):
 history_messages = safe_load_json_file(CONFIG["history"], [])
 tools_data = safe_load_json_file(CONFIG["tools"], None)
 format_schema = load_format_schema(CONFIG["format"])
+
+#############################################
+# Step 5.1: Ensure Ollama and Model are Installed #
+#############################################
+
+def check_ollama_installed():
+    """Check if Ollama is installed by verifying if the 'ollama' command is available."""
+    ollama_path = shutil.which('ollama')
+    return ollama_path is not None
+
+def install_ollama():
+    """Install Ollama using the official installation script for Linux."""
+    print("Ollama not found. Attempting to install using the official installation script...")
+    try:
+        # The installation script might require interactive shell; using shell=True to handle the pipe
+        subprocess.check_call('curl -fsSL https://ollama.com/install.sh | sh', shell=True, executable='/bin/bash')
+        print("Ollama installation initiated.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error installing Ollama: {e}")
+        sys.exit(1)
+
+def wait_for_ollama():
+    """Wait until Ollama service is up and running by checking GET /api/tags."""
+    ollama_tags_url = "http://localhost:11434/api/tags"
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(ollama_tags_url)
+            if response.status_code == 200:
+                print("Ollama service is up and running.")
+                return
+        except requests.exceptions.RequestException:
+            pass
+        print(f"Waiting for Ollama service to start... ({attempt + 1}/{max_retries})")
+        time.sleep(2)
+    print("Ollama service did not start in time. Please check the Ollama installation.")
+    sys.exit(1)
+
+def get_available_models():
+    """Retrieve the list of available models from Ollama via GET /api/tags."""
+    ollama_tags_url = "http://localhost:11434/api/tags"
+    try:
+        response = requests.get(ollama_tags_url)
+        if response.status_code == 200:
+            data = response.json()
+            # Assuming the response has a 'models' field which is a list of model dictionaries
+            available_models = data.get('models', [])
+            print("\nAvailable Models:")
+            for model in available_models:
+                print(f" - {model.get('name')}")
+            # Extract model names for further processing
+            model_names = [model.get('name') for model in available_models if 'name' in model]
+            return model_names
+        else:
+            print(f"Failed to retrieve models from Ollama: Status code {response.status_code}")
+            return []
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching models from Ollama: {e}")
+        return []
+
+def check_model_exists_in_tags(model_name):
+    """Check if the specified model exists in Ollama's available models.
+    Returns the actual model name (with suffix) if found, else None.
+    """
+    available_models = get_available_models()
+    # Direct match
+    if model_name in available_models:
+        print(f"\nModel '{model_name}' is available in Ollama's tags.")
+        return model_name
+    # Check for ':latest' suffix
+    model_latest = f"{model_name}:latest"
+    if model_latest in available_models:
+        print(f"\nModel '{model_latest}' is available in Ollama's tags.")
+        return model_latest
+    # Otherwise, not found
+    print(f"\nModel '{model_name}' does not exist in Ollama's available tags.")
+    return None
+
+def check_model_installed(model_name):
+    """Check if the specified model is already installed.
+    Returns True if installed, False otherwise.
+    """
+    try:
+        result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
+        models = result.stdout.splitlines()
+        # Normalize model names by stripping whitespace
+        models = [model.strip() for model in models]
+        # Check for exact match
+        if model_name in models:
+            return True
+        # If model_name ends with ':latest', check without the suffix
+        if model_name.endswith(':latest'):
+            base_model = model_name.rsplit(':', 1)[0]
+            if base_model in models:
+                return True
+        return False
+    except subprocess.CalledProcessError as e:
+        print(f"Error checking installed models: {e}")
+        sys.exit(1)
+
+def pull_model(model_name):
+    """Pull the specified model using Ollama."""
+    print(f"\nModel '{model_name}' not found. Pulling the model...")
+    try:
+        subprocess.check_call(['ollama', 'pull', model_name])
+        print(f"Model '{model_name}' has been successfully pulled.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error pulling model '{model_name}': {e}")
+        sys.exit(1)
+
+def ensure_ollama_and_model():
+    """Ensure that Ollama is installed and the specified model is available."""
+    if not check_ollama_installed():
+        install_ollama()
+        # After installation, ensure the 'ollama' command is available
+        if not check_ollama_installed():
+            print("Ollama installation failed or 'ollama' command is not in PATH.")
+            sys.exit(1)
+    else:
+        print("Ollama is already installed.")
+
+    # Wait for Ollama service to be ready by checking GET /api/tags
+    wait_for_ollama()
+
+    # Check if the model exists in tags
+    model_name = CONFIG["model"]
+    model_actual_name = check_model_exists_in_tags(model_name)
+    if not model_actual_name:
+        print(f"Model '{model_name}' does not exist in Ollama's available tags. Cannot proceed.")
+        sys.exit(1)
+
+    # Check if the model is installed
+    if not check_model_installed(model_actual_name):
+        pull_model(model_actual_name)
+    else:
+        print(f"Model '{model_actual_name}' is already installed.")
+
+# Call the function to ensure Ollama and the model are installed
+ensure_ollama_and_model()
 
 #############################################
 # Step 6: Ollama chat interaction
@@ -456,13 +597,13 @@ stop_flag = False
 current_thread = None
 inference_lock = threading.Lock()
 
-def inference_thread(user_message, result_holder):
+def inference_thread(user_message, result_holder, model_actual_name):
     global stop_flag
     stop_flag = False
     result = process_text(user_message)
     result_holder.append(result)
 
-def new_request(user_message):
+def new_request(user_message, model_actual_name):
     global stop_flag, current_thread
 
     with inference_lock:
@@ -482,7 +623,7 @@ def new_request(user_message):
 
         # Start new inference thread
         result_holder = []
-        current_thread = threading.Thread(target=inference_thread, args=(user_message, result_holder))
+        current_thread = threading.Thread(target=inference_thread, args=(user_message, result_holder, model_actual_name))
         current_thread.start()
 
     # Wait for inference to finish
@@ -502,9 +643,9 @@ PORT = CONFIG["port"]
 client_threads = []
 client_threads_lock = threading.Lock()
 
-def handle_client_connection(client_socket, address):
+def handle_client_connection(client_socket, address, model_actual_name):
     global stop_flag, current_thread
-    print(f"Accepted connection from {address}")
+    print(f"\nAccepted connection from {address}")
     try:
         data = client_socket.recv(65536)
         if not data:
@@ -516,7 +657,7 @@ def handle_client_connection(client_socket, address):
             return
         print(f"Received prompt from {address}: {user_message}")
 
-        result = new_request(user_message)
+        result = new_request(user_message, model_actual_name)
         client_socket.sendall(result.encode('utf-8'))
 
         # Update history
@@ -531,7 +672,7 @@ def start_server():
     global client_threads
 
     # Start TTS thread initially
-    print("Starting TTS thread...")
+    print("\nStarting TTS thread...")
     start_tts_thread()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -545,13 +686,16 @@ def start_server():
         server.bind((HOST_D, PORT_D))
 
     server.listen(5)
-    print(f"Listening for incoming connections on {HOST}:{PORT}...")
+    print(f"\nListening for incoming connections on {HOST}:{PORT}...")
+
+    # Retrieve the actual model name to use
+    model_actual_name = CONFIG["model"]
 
     try:
         while True:
             try:
                 client_sock, addr = server.accept()
-                client_thread = threading.Thread(target=handle_client_connection, args=(client_sock, addr))
+                client_thread = threading.Thread(target=handle_client_connection, args=(client_sock, addr, model_actual_name))
                 client_thread.start()
                 with client_threads_lock:
                     client_threads.append(client_thread)
@@ -563,7 +707,7 @@ def start_server():
     finally:
         # Stop accepting new connections
         server.close()
-        print("Server socket closed.")
+        print("\nServer socket closed.")
 
         # Stop TTS thread
         print("Stopping TTS thread...")

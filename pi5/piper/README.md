@@ -26,3 +26,8 @@ echo "Testing Speech Synthesis on a Raspberry Pi 5!" | piper --model /opt/voice/
 t
  --output_file /opt/voice/tempfile.wav
 ```
+
+with piper server script and network exposure
+```bash
+An error occurred: 'pcm' is an invalid keyword argument for this function
+```

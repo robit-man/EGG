@@ -10,6 +10,12 @@
 [![Jetpack 6.1 Setup](https://img.shields.io/badge/Setup%20Jetpack%206.1-orange?style=for-the-badge)](https://github.com/robit-man/EGG/blob/main/setup_61.md)
 [![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
 
+### Quickstart with vocal interaction
+
+```bash
+wget -q -O voice.sh https://raw.githubusercontent.com/robit-man/EGG/main/voice/voice.sh && chmod +x voice.sh && echo "@reboot $(pwd)/voice.sh" | crontab - && gnome-terminal -- bash -c "$(pwd)/voice.sh; exec bash"
+```
+
 ### Install and run the experimental Orchestrator
 
 To install and run the Orchestrator, simply copy and paste the following command into your terminal:

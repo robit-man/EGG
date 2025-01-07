@@ -1,0 +1,169 @@
+[build-system]
+requires = ["setuptools>=65", "setuptools_scm[toml]>=7", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whispercpp"
+description = "whispercpp: Pybind11 bindings for whisper.cpp"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.setuptools_scm]
+write_to = "src/whispercpp/__about__.py"
+git_describe_command = "git describe --tags --first-parent"
+version_scheme = "post-release"
+fallback_version = "0.0.0"
+
+[tool.setuptools.exclude-package-data]
+whispercpp = ["*.cc", "*.h", "BUILD", "*.o"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["whispercpp*"]
+
+[tool.setuptools.package-data]
+whispercpp = ["py.typed", "*.so", "*.pyi"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "-rfEX",
+    "-vvv",
+    "--cov=src/whispercpp",
+    "--cov-report=term-missing",
+    "--ignore=extern",
+    "--ignore-glob=bazel-*",
+]
+python_files = ["test_*.py", "*_test.py"]
+testpaths = ["tests", "examples"]
+
+[tool.coverage.paths]
+source = ["src"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["src/whispercpp/"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 2
+exclude_lines = [
+    "\\#\\s*pragma: no cover",
+    "^\\s*def __repr__",
+    "^\\s*raise AssertionError",
+    "^\\s*raise NotImplementedError",
+    "^\\s*except ImportError",
+    "if __name__ == .__main__.:",
+    "^\\s*if ((_)?t\\.)?TYPE_CHECKING:",
+    "^\\s*@(t\\.)?overload( |$)",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.ruff]
+# similar to black's
+line-length = 88
+# We ignore E501 (line too long) here because we keep user-visible strings on one line.
+ignore = ["E501"]
+exclude = ["bazel-*/", "venv", "typings", "extern"]
+target-version = "py311"
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.ruff.isort]
+lines-after-imports = 2
+
+[tool.black]
+line-length = 88
+exclude = '''
+(
+  /(
+      \.eggs
+    | \.git
+    | \.tox
+    | \.venv
+    | \.build
+    | venv
+    | _build
+    | build
+    | extern
+    | bazel-*
+    | lib
+    | dist
+  )/
+)
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+length_sort = true
+force_single_line = true
+order_by_type = true
+known_first_party = "bentoml"
+force_alphabetical_sort_within_sections = true
+skip_glob = [
+    "test/*",
+    "venv/*",
+    "lib/*",
+    "bazel-*",
+    "extern/*",
+    "dist/*",
+    "build/*",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+exclude = [
+    "bazel-*",
+    "extern",
+    "venv",
+    "node_modules",
+    "nix",
+    "setup.py",
+    "examples/bentoml/locustfile.py",
+]
+typeCheckingMode = "strict"
+analysis.useLibraryCodeForTypes = true
+enableTypeIgnoreComments = true
+
+[tool.cibuildwheel]
+test-requires = "pytest"
+test-command = "pytest {project}/tests"
+build-verbosity = "3"
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-i686-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+manylinux-ppc64le-image = "manylinux_2_28"
+manylinux-s390x-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+# NOTE: 10.9 for C++11 support
+environment = { RUNNER_OS = "MacOS", CC = "gcc", MACOSX_DEPLOYMENT_TARGET = "10.9" }
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+environment = { RUNNER_OS = "Linux", CC = "gcc" }

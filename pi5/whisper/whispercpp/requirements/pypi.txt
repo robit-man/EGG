@@ -1,0 +1,12 @@
+ruff
+black
+bazel-runfiles==0.19.0
+isort
+numpy
+pytest
+pytest-cov
+pytest-xdist[psutil]
+pytest-asyncio
+build
+virtualenv
+twine

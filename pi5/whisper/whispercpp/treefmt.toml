@@ -1,0 +1,22 @@
+# One CLI to format the code tree - https://github.com/numtide/treefmt
+
+[formatter.python]
+command = "sh"
+options = ["-eucx", """
+black .
+isort .
+ruff --fix .
+""", "--"]
+includes = ["*.py"]
+excludes = ["extern"]
+
+[formatter.nix]
+command = "nixfmt"
+includes = ["*.nix"]
+excludes = ["nix/sources.nix", "extern"]
+
+[formatter.clang-format]
+command = "clang-format"
+options = ["-i", "--style=file:./.clang-format"]
+includes = ["*.c", "*.cpp", "*.cc", "*.h", "*.hpp"]
+excludes = ["extern/*"]

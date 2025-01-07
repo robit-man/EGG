@@ -1,0 +1,21 @@
+{% extends bento_base_template %}
+{% set bento__buildkit_frontend="docker/dockerfile-upstream:master" %}
+
+{% block SETUP_BENTO_COMPONENTS %}
+
+USER bentoml
+
+RUN mkdir -p /home/bentoml/.local/share/whispercpp
+
+USER root
+
+WORKDIR /tmp
+RUN git clone https://github.com/AIWintermuteAI/whispercpp.git
+RUN pip install build
+RUN cd /tmp/whispercpp && python3 -m build -w
+RUN cd /tmp/whispercpp && pip install dist/*.whl
+WORKDIR /home/bentoml/bento
+
+{{ super() }}
+
+{% endblock %}

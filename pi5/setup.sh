@@ -70,4 +70,7 @@ cd "$WHISPERCPP_DIR" || {
 echo "Running the build command..."
 python3 -m build -w
 
+echo "Running the whl install command..."
+pip install dist/*.whl
+
 echo "Setup and build process completed."

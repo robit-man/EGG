@@ -1,0 +1,63 @@
+# Use a specific, stable version of Ubuntu
+FROM ubuntu:24.04 AS main
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Replace default shell with bash
+RUN rm /bin/sh && ln -s /bin/bash /bin/sh
+
+# Set the path for the code directory
+ENV CODE_PATH=/opt
+
+# Update and install necessary packages in one layer, clean up in the same layer
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata \
+    build-essential apt-utils vim bzip2 tar gzip git curl wget python3 python3-pip cmake ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up Python pip configuration
+RUN echo $'[global]\nbreak-system-packages = true' > /etc/pip.conf
+
+# Upgrade pip
+RUN pip install --quiet --upgrade pip --ignore-installed
+
+# Clone the Piper TTS repository
+RUN git clone https://github.com/rhasspy/piper.git $CODE_PATH/piper
+WORKDIR $CODE_PATH/piper
+# Use a tested version of Piper
+RUN git checkout tags/2023.11.14-2
+
+# Install and configure Piper Phonemize
+WORKDIR $CODE_PATH/piper/lib
+RUN mkdir -p Linux-arm64/piper_phonemize
+WORKDIR Linux-arm64/piper_phonemize
+# Use a tested version of Piper Phonemize
+RUN wget https://github.com/rhasspy/piper-phonemize/releases/download/v1.1.0/libpiper_phonemize-arm64.tar.gz \
+    && tar -xf libpiper_phonemize-arm64.tar.gz \
+    && rm libpiper_phonemize-arm64.tar.gz \
+    && cp -r $CODE_PATH/piper/lib/Linux-arm64/piper_phonemize/lib/espeak-ng-data /usr/share/espeak-ng-data
+
+# Build and test Piper
+WORKDIR $CODE_PATH/piper
+RUN cmake -Bbuild -DCMAKE_INSTALL_PREFIX=install
+RUN cmake --build build --config Release
+RUN cmake --install build
+WORKDIR build
+RUN ctest --config Release
+
+# Create a short alias for Piper
+RUN echo "alias piper='$CODE_PATH/piper/build/piper'" >> ~/.bashrc \
+    && source ~/.bashrc
+
+# Create model directory and add sample voices
+RUN mkdir -p $CODE_PATH/piper/voices/aru/medium
+
+# Create a list file with each URL on a new line
+RUN echo -e "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/aru/medium/en_GB-aru-medium.onnx\n \
+https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/aru/medium/en_GB-aru-medium.onnx.json\n \
+https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/aru/medium/MODEL_CARD" > aru_medium_model_file_urls.txt
+
+# Download all URLs listed in the file
+RUN wget -i aru_medium_model_file_urls.txt -P $CODE_PATH/piper/voices/aru/medium
+
+# Return to the code path
+WORKDIR $CODE_PATH

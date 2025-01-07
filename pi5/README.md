@@ -189,3 +189,82 @@ If your Bluetooth speaker connects but fails to act as a sound device, here are 
    In the *Playback* or *Output Devices* tab, select your Bluetooth speaker as the audio output.
 
 6. **Reboot and Retry:** Sometimes a full reboot helps after setting these configurations.
+
+## Docker Setup
+
+For the **Raspberry Pi 5 (ARM64 architecture)**, follow these steps to properly install Docker. The Pi 5 is ARM-based, and the Docker packages for ARM64 must be used.
+
+---
+
+### 1. **Update System and Install Prerequisites**
+Update your system and install necessary tools:
+```bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y ca-certificates curl gnupg lsb-release
+```
+
+---
+
+### 2. **Add Docker’s Official GPG Key**
+Create the keyrings directory and add Docker's GPG key:
+```bash
+sudo mkdir -m 0755 -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+```
+
+---
+
+### 3. **Set Up Docker Repository**
+For Raspberry Pi OS, which is based on Debian, use the following repository setup for ARM64 architecture:
+```bash
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+```
+
+> Replace `$(lsb_release -cs)` with your specific Debian release codename if necessary (e.g., `bullseye` for Raspberry Pi OS 11).
+
+---
+
+### 4. **Update and Install Docker**
+Update the package list and install Docker:
+```bash
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+---
+
+### 5. **Enable and Start Docker**
+Ensure Docker starts automatically:
+```bash
+sudo systemctl enable docker
+sudo systemctl start docker
+```
+
+---
+
+### 6. **Verify Installation**
+Check Docker's version and run a test container:
+```bash
+docker --version
+sudo docker run hello-world
+```
+
+---
+
+### Additional Notes for Raspberry Pi 5:
+1. **Running Docker Without `sudo`:**
+   Add your user to the `docker` group to run Docker commands without `sudo`:
+   ```bash
+   sudo usermod -aG docker $USER
+   newgrp docker
+   ```
+
+2. **ARM-Specific Images:**
+   Ensure you use Docker images built for ARM64 architecture. Many images on Docker Hub already support ARM64.
+
+3. **Troubleshooting Release Mismatch:**
+   If you encounter issues with the release codename in `$(lsb_release -cs)`, use `bullseye` or `stable` directly:
+   ```bash
+   echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian stable stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+   ```

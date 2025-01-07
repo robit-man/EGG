@@ -25,7 +25,7 @@ HOST = 'localhost'  # or the hostname/IP where the server runs
 PORT = 64162        # must match the port in the provided server script
 
 # Volume Threshold for Filtering Recognition Results
-VOLUME_THRESHOLD = 650  # Adjust based on microphone sensitivity
+VOLUME_THRESHOLD = 400  # Adjust based on microphone sensitivity
 
 # Timeouts
 SENTENCE_TIMEOUT = 2.0  # Seconds after which to send the recognized sentence
@@ -188,8 +188,19 @@ def download_vosk_model():
         print(f"Error: Failed to extract Vosk model: {e}")
         sys.exit("Error: Failed to extract Vosk model.")
 
+# ======================= Recognition Reset Function ======================
+def reset_recognition(partial_queue, final_queue, reset_event):
+    """
+    Clears both partial and final queues and signals the recognizer to reset.
+    """
+    clear_queue(partial_queue)
+    clear_queue(final_queue)
+    reset_event.set()
+    logging.info("Recognition reset triggered.")
+    print("Recognition has been reset.")
+
 # ======================= Speech Recognition Thread ============================
-def speech_recognition_thread(partial_queue, final_queue, stop_event):
+def speech_recognition_thread(partial_queue, final_queue, stop_event, reset_event):
     """Thread function for continuous speech recognition using Vosk."""
     from vosk import Model, KaldiRecognizer, SetLogLevel
     import pyaudio
@@ -228,6 +239,14 @@ def speech_recognition_thread(partial_queue, final_queue, stop_event):
         print("Listening for speech...")
 
         while not stop_event.is_set():
+            # Check if a reset has been signaled
+            if reset_event.is_set():
+                logging.info("Reset event detected. Re-instantiating recognizer.")
+                print("Re-instantiating recognizer...")
+                recognizer = KaldiRecognizer(model, RATE)
+                reset_event.clear()
+                logging.info("Recognizer re-instantiated successfully.")
+
             try:
                 data = stream.read(CHUNK, exception_on_overflow=False)
 
@@ -244,8 +263,16 @@ def speech_recognition_thread(partial_queue, final_queue, stop_event):
                         result_json = json.loads(result)
                         text = result_json.get("text", "")
                         if text:
-                            final_queue.put(text)
-                            logging.info(f"Recognized final sentence: {text}")
+                            # Extract confidence scores
+                            words = result_json.get("result", [])
+                            if words:
+                                confidences = [word.get("conf", 0) for word in words]
+                                avg_confidence = sum(confidences) / len(confidences)
+                            else:
+                                avg_confidence = 0
+
+                            final_queue.put((text, avg_confidence))
+                            logging.info(f"Recognized final sentence: {text} (Avg Confidence: {avg_confidence})")
                     else:
                         partial = recognizer.PartialResult()
                         partial_json = json.loads(partial)
@@ -283,13 +310,13 @@ def calculate_rms(audio_data):
     return rms
 
 # ======================= Assembler Thread ================================
-def assembler_thread(partial_queue, final_queue, stop_event, send_function):
+def assembler_thread(partial_queue, final_queue, stop_event, send_function, reset_event):
     """
     Thread function to assemble sentences and send to downstream API.
     Handles real-time partial updates and sends only final sentences after a timeout.
     Implements a 2-second inactivity timeout to send the latest recognized sentence.
     Additionally, sends partial utterances after a 3-second delay.
-    Resets the recognition buffer if both RMS is above the threshold and the timeout is reached with no new words.
+    Resets the recognition buffer if a timeout is reached with no new words.
     """
     last_final_time = None
     last_sentence = None
@@ -307,7 +334,7 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function):
                     last_partial_time = time.time()
                     # Clear the terminal
                     clear_terminal()
-                    
+
                     # Print the partial sentence with RMS
                     print(f"Recognizing: {partial_text} (RMS: {rms})")
             except Empty:
@@ -315,16 +342,16 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function):
 
             # Handle final results
             try:
-                final = final_queue.get_nowait()
+                final, avg_confidence = final_queue.get_nowait()
                 if final:
-                    last_sentence = final
+                    last_sentence = (final, avg_confidence)
                     last_final_time = time.time()
                     # Clear the terminal
                     clear_terminal()
-                    
+
                     # Print the final sentence
-                    print(f"Recognized Sentence:\n{final}")
-                    logging.debug(f"Recognized sentence displayed: {final}")
+                    print(f"Recognized Sentence:\n{final}\n(Avg Confidence: {avg_confidence:.2f})")
+                    logging.debug(f"Recognized sentence displayed: {final} (Avg Confidence: {avg_confidence})")
             except Empty:
                 pass
 
@@ -332,13 +359,17 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function):
 
             # Check if 2-second timeout has passed since the last final recognition
             if last_final_time and (current_time - last_final_time) > SENTENCE_TIMEOUT:
-                # Send the last recognized sentence to the LLM
-                send_function(last_sentence)
-                logging.info(f"Sent sentence to downstream API: {last_sentence}")
-                
-                # Reset last_sentence and last_final_time
-                last_sentence = None
-                last_final_time = None
+                if last_sentence:
+                    # Send the last recognized sentence to the LLM
+                    send_function(last_sentence[0])
+                    logging.info(f"Sent sentence to downstream API: {last_sentence[0]} (Avg Confidence: {last_sentence[1]})")
+
+                    # Reset recognition after sending
+                    reset_recognition(partial_queue, final_queue, reset_event)
+
+                    # Reset last_sentence and last_final_time
+                    last_sentence = None
+                    last_final_time = None
 
             # Check if 3-second timeout has passed since the last partial recognition
             if last_partial_time and (current_time - last_partial_time) > PARTIAL_TIMEOUT:
@@ -346,23 +377,25 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function):
                     # Send the partial utterance to the LLM
                     send_function(last_partial_text)
                     logging.info(f"Sent partial utterance to downstream API: {last_partial_text}")
-                    
+
+                    # Reset recognition after sending
+                    reset_recognition(partial_queue, final_queue, reset_event)
+
                     # Reset last_partial_text and last_partial_time
                     last_partial_text = None
                     last_partial_time = None
 
             # Check for overall inactivity to reset recognition buffer
-            # Reset only if both RMS is above the threshold and timeout is reached with no new words
+            # Reset only if timeout is reached with no new words
             if (last_final_time or last_partial_time) and (current_time - max(filter(None, [last_final_time, last_partial_time])) ) > RESET_TIMEOUT:
                 # Reset the recognition buffer
                 clear_terminal()
                 print("No new speech detected for 5 seconds. Resetting recognition buffer.")
                 logging.info("No new speech detected for 5 seconds. Resetting recognition buffer.")
-                
-                # Clear queues
-                clear_queue(partial_queue)
-                clear_queue(final_queue)
-                
+
+                # Reset recognition after timeout
+                reset_recognition(partial_queue, final_queue, reset_event)
+
                 # Reset variables
                 last_sentence = None
                 last_final_time = None
@@ -377,10 +410,10 @@ def assembler_thread(partial_queue, final_queue, stop_event, send_function):
     # After stop_event is set, process any remaining final sentences
     while not final_queue.empty():
         try:
-            final = final_queue.get_nowait()
+            final, avg_confidence = final_queue.get_nowait()
             if final:
                 send_function(final)
-                logging.info(f"Sent sentence to downstream API: {final}")
+                logging.info(f"Sent sentence to downstream API: {final} (Avg Confidence: {avg_confidence})")
         except Empty:
             break
 
@@ -439,6 +472,17 @@ def send_and_receive(prompt):
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}")
 
+# ======================= Recognition Reset Function ======================
+def reset_recognition(partial_queue, final_queue, reset_event):
+    """
+    Clears both partial and final queues and signals the recognizer to reset.
+    """
+    clear_queue(partial_queue)
+    clear_queue(final_queue)
+    reset_event.set()
+    logging.info("Recognition reset triggered.")
+    print("Recognition has been reset.")
+
 # ======================= Main Speech Recognition and Communication Loop ==
 def main():
     # Setup virtual environment
@@ -462,10 +506,13 @@ def main():
     # Event to signal threads to stop
     stop_event = threading.Event()
 
-    # Start speech recognition thread
+    # Event to signal a recognizer reset
+    reset_event = threading.Event()
+
+    # Start speech recognition thread with reset_event
     speech_thread = threading.Thread(
         target=speech_recognition_thread,
-        args=(partial_queue, final_queue, stop_event),
+        args=(partial_queue, final_queue, stop_event, reset_event),
         name="SpeechRecognitionThread",
         daemon=True
     )
@@ -474,7 +521,7 @@ def main():
     # Start assembler thread to assemble sentences and send
     assembler = threading.Thread(
         target=assembler_thread,
-        args=(partial_queue, final_queue, stop_event, send_and_receive),
+        args=(partial_queue, final_queue, stop_event, send_and_receive, reset_event),
         name="AssemblerThread",
         daemon=True
     )

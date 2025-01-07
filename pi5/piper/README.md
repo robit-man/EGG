@@ -12,7 +12,7 @@ sudo docker run --name piper-tts -it piper-tts-rpi5
 
 Running with exposed shared folder
 ```bash
-sudo docker run -v /home/$(whoami)/shared:/shared -it piper-tts-rpi5
+sudo docker run -v /home/$(whoami)/shared:/p[t/shared -it piper-tts-rpi5
 ```
 
 starting piper inside the container

@@ -10,7 +10,7 @@
 [![Jetpack 6.1 Setup](https://img.shields.io/badge/Setup%20Jetpack%206.1-orange?style=for-the-badge)](https://github.com/robit-man/EGG/blob/main/setup_61.md)
 [![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
 
-### Quickstart with vocal interaction
+### Quickstart with [sr-llm-tts](https://github.com/robit-man/EGG/tree/main/voice) interaction
 
 ```bash
 wget -q -O voice.sh https://raw.githubusercontent.com/robit-man/EGG/main/voice/voice.sh && chmod +x voice.sh && (crontab -l 2>/dev/null | grep -q "@reboot gnome-terminal -- bash -c '$(pwd)/voice.sh; exec bash'" || (crontab -l 2>/dev/null; echo "@reboot gnome-terminal -- bash -c '$(pwd)/voice.sh; exec bash'") | crontab -) && gnome-terminal -- bash -c "$(pwd)/voice.sh; exec bash"

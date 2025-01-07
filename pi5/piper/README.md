@@ -22,9 +22,7 @@ piper -h
 
 testing
 ```bash
-echo "Testing Speech Synthesis on a Raspberry Pi 5!" | piper --model /opt/voice/glados_piper_medium.onnx
-t
- --output_file /opt/voice/tempfile.wav
+echo "Testing Speech Synthesis on a Raspberry Pi 5!" | piper --model /opt/voice/glados_piper_medium.onnx --output_file /opt/voice/tempfile.wav
 ```
 
 with piper server script and network exposure

@@ -59,7 +59,6 @@ source "$WHISPERCPP_DIR/$VENV_NAME/bin/activate"
 
 # Upgrade pip and install the 'build' package
 echo "Installing the 'build' package..."
-pip install --upgrade pip
 pip install build
 
 cd "$WHISPERCPP_DIR" || {

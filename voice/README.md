@@ -35,6 +35,7 @@ Run the following command to automatically pull and run the whisper jetson conta
 mkdir -p /home/$(whoami)/voice && \
 if [ -f /home/$(whoami)/voice/audio_stream.py ] && [ -f /home/$(whoami)/voice/whisper_server.py ]; then \
     gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 audio_stream.py; exec bash' && \
+    gnome-terminal -- bash -c 'cd /home/$(whoami)/voice && python3 model_to_tts.py; exec bash' && \
     gnome-terminal -- bash -c "jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd .. && cd .. && cd voice && python3 whisper_server.py'; exec bash"; \
 else \
     git clone --depth=1 --filter=blob:none --sparse https://github.com/robit-man/EGG.git /tmp/EGG && \
@@ -42,6 +43,7 @@ else \
     cp -r voice/whisper/* /home/$(whoami)/voice/ && \
     cd /home/$(whoami)/voice && \
     gnome-terminal -- bash -c 'python3 audio_stream.py; exec bash' && \
+    gnome-terminal -- bash -c 'python3 model_to_tts.py --stream --history; exec bash' && \
     gnome-terminal -- bash -c "jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd .. && cd .. && cd voice && python3 whisper_server.py'; exec bash" && \
     rm -rf /tmp/EGG; \
 fi

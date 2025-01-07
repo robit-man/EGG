@@ -29,5 +29,5 @@ t
 
 with piper server script and network exposure
 ```bash
-An error occurred: 'pcm' is an invalid keyword argument for this function
+sudo docker run --network host -v /home/$(whoami)/voice:/opt/voice -w /opt/voice -it piper-tts-rpi5 python3 voice_server.py
 ```

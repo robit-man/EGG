@@ -12,13 +12,13 @@ import whisper
 import torch
 
 # Configuration
-MODEL_NAME = "medium"          # Whisper model size: tiny, base, small, medium, large
+MODEL_NAME = "large"          # Whisper model size: tiny, base, small, medium, large
 MODEL_DIR = "models"           # Directory to store the Whisper model
 AUDIO_SAMPLE_RATE = 16000      # Whisper expects 16kHz audio
 CHANNELS = 1                   # Mono audio
 PORT_AUDIO = 64167             # Updated Port to receive audio streams
 PORT_SEND = 64162              # Port to send consolidated transcriptions
-TIMEOUT = 5                    # Timeout in seconds to wait before sending transcription
+TIMEOUT = 1                    # Timeout in seconds to wait before sending transcription
 
 # Global variables to store the latest transcription and last received time
 latest_transcription = ""

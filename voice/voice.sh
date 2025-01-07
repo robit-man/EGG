@@ -36,7 +36,7 @@ curl -L https://raw.githubusercontent.com/robit-man/EGG/main/voice/inference.py 
 if [ -f "/home/$(whoami)/voice/audio_stream.py" ] && [ -f "/home/$(whoami)/voice/whisper_server.py" ]; then
     # Run commands in GNOME terminals with sudo privileges cached
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd /home/$(whoami)/voice && python3 audio_stream.py; exec bash"
-    gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd /home/$(whoami)/voice && python3 model_to_tts.py; exec bash"
+    gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd /home/$(whoami)/voice && python3 model_to_tts.py --stream --history; exec bash"
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v \"$(pwd)/voice:/voice\" \"\$(autotag piper-tts)\" bash -c 'cd /voice && python3 inference.py'; exec bash"
     gnome-terminal -- bash -c "bash $CACHE_SCRIPT && jetson-containers run -v /home/$(whoami)/voice:/voice \$(autotag whisper) bash -c 'cd /voice && python3 whisper_server.py'; exec bash"
 else

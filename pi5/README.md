@@ -1,5 +1,4 @@
-![mini-egg](https://github.com/user-attachments/assets/42caf09c-1e7b-42bd-9255-e3171ebd5006)
-
+<img src="https://github.com/user-attachments/assets/42caf09c-1e7b-42bd-9255-e3171ebd5006" alt="Sm0l Egg" width="200"/>
 
 
 # MINI EGG

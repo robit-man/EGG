@@ -6,21 +6,23 @@ TARGET_DIR="/home/$(whoami)/voice"
 WHISPERCPP_DIR="whispercpp"
 VENV_NAME="whisper"
 
-# Clone the repository or update it if it already exists
+# Clone the repository if the target directory doesn't exist
 if [ ! -d "$TARGET_DIR" ]; then
     echo "Cloning repository into $TARGET_DIR..."
-    git clone --depth=1 --branch=main $REPO_URL "$TARGET_DIR"
+    git clone --depth=1 --branch=main $REPO_URL /tmp/EGG
+    mkdir -p "$TARGET_DIR"
+    cp -r /tmp/EGG/pi5/whisper/$WHISPERCPP_DIR "$TARGET_DIR"
+    rm -rf /tmp/EGG
 else
-    echo "$TARGET_DIR already exists. Pulling updates..."
-    cd "$TARGET_DIR" || exit
-    git fetch origin
-    git reset --hard origin/main
-    cd ..
+    echo "$TARGET_DIR already exists. Ensuring whispercpp is up to date..."
+    git clone --depth=1 --branch=main $REPO_URL /tmp/EGG
+    cp -r /tmp/EGG/pi5/whisper/$WHISPERCPP_DIR "$TARGET_DIR"
+    rm -rf /tmp/EGG
 fi
 
 # Check and navigate to the whispercpp directory
-if [ -d "$TARGET_DIR/pi5/whisper/$WHISPERCPP_DIR" ]; then
-    cd "$TARGET_DIR/pi5/whisper/$WHISPERCPP_DIR" || exit
+if [ -d "$TARGET_DIR/$WHISPERCPP_DIR" ]; then
+    cd "$TARGET_DIR/$WHISPERCPP_DIR" || exit
 else
     echo "Failed to find whispercpp directory. Exiting."
     exit 1

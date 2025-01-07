@@ -1,5 +1,29 @@
 #!/bin/bash
 
+# Function to check if jetson-containers is installed
+check_and_install_jetson_containers() {
+    if ! command -v jetson-containers &> /dev/null; then
+        echo "jetson-containers not found. Installing jetson-containers..."
+        # Clone the repository and install jetson-containers
+        git clone https://github.com/dusty-nv/jetson-containers
+        bash jetson-containers/install.sh
+        rm -rf jetson-containers
+    else
+        echo "jetson-containers is installed."
+    fi
+}
+
+# Function to check if ollama is installed
+check_and_install_ollama() {
+    if ! command -v ollama &> /dev/null; then
+        echo "ollama not found. Installing ollama..."
+        # Install ollama
+        curl -fsSL https://ollama.com/install.sh | sh
+    else
+        echo "ollama is installed."
+    fi
+}
+
 # Load or prompt for password if not already saved
 if [ ! -f ~/.tempaccess ]; then
     read -sp "Enter your password: " PASSWORD
@@ -7,13 +31,20 @@ if [ ! -f ~/.tempaccess ]; then
     echo "$PASSWORD" > ~/.tempaccess
     chmod 600 ~/.tempaccess
     
-# Ensure required packages are installed
-sudo apt-get update && \
-sudo apt-get install -y libpython3-dev python3-venv
+    # Ensure required packages are installed
+    sudo apt-get update && \
+    sudo apt-get install -y libpython3-dev python3-venv curl
+    
+    # Check and install jetson-containers if necessary
+    check_and_install_jetson_containers
 
+    # Check and install ollama if necessary
+    check_and_install_ollama
+    
 else
     PASSWORD=$(cat ~/.tempaccess)
 fi
+
 
 # Create a script to cache sudo privileges
 CACHE_SCRIPT="/tmp/cache_sudo.sh"

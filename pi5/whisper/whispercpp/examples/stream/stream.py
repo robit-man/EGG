@@ -13,8 +13,18 @@ class StreamTranscriber:
         self.target_port = target_port
 
     def clean_text(self, text: str) -> str:
-        """Remove text inside square brackets."""
-        return re.sub(r"\[.*?\]", "", text).strip()
+        """
+        Remove text inside square brackets and ensure the text contains valid characters.
+        Only return text if it has meaningful content (e.g., alphanumeric or linguistic characters).
+        """
+        # Remove content inside square brackets
+        cleaned = re.sub(r"\[.*?\]", "", text).strip()
+        
+        # Check if the cleaned text contains meaningful characters (letters, digits, etc.)
+        if not re.search(r"[a-zA-Z0-9]", cleaned):
+            return ""  # Return empty string if no meaningful content remains
+        
+        return cleaned
 
     def send_to_server(self, text: str):
         """Send cleaned transcribed text to the server."""
@@ -36,6 +46,7 @@ class StreamTranscriber:
             data.append(cur_segment)
             self.send_to_server(cur_segment)  # Send transcription downstream
             segment += 1
+        
 
     def main(self, **kwargs: t.Any):
         transcription: t.Iterator[str] | None = None

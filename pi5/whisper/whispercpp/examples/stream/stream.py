@@ -36,14 +36,6 @@ class StreamTranscriber:
             data.append(cur_segment)
             self.send_to_server(cur_segment)  # Send transcription downstream
             segment += 1
-        if "hey toaster" in cur_segment.lower() and not self.paused:
-            self.transcriber.pause_audio()
-            self.paused = True
-            print("Stopping")
-            time.sleep(5)
-            self.transcriber.resume_audio()
-            self.paused = False
-            print("Resumed")
 
     def main(self, **kwargs: t.Any):
         transcription: t.Iterator[str] | None = None

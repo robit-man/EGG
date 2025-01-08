@@ -41,40 +41,33 @@ else
     exit 1
 fi
 
-# Create a Python virtual environment if it doesn't exist
+# Check if the virtual environment exists
 if [ ! -d "$VENV_NAME" ]; then
     echo "Creating virtual environment..."
     python3 -m venv "$VENV_NAME" --system-site-packages
+    echo "Activating the virtual environment..."
+    source "$VENV_NAME/bin/activate"
+
+    # Install necessary packages
+    echo "Installing required packages..."
+    pip install --upgrade pip
+    pip install build
 else
-    echo "Virtual environment already exists. Skipping creation."
+    echo "Virtual environment already exists. Activating it..."
+    source "$VENV_NAME/bin/activate"
 fi
 
-# Navigate back to /voice/ and activate the virtual environment explicitly
-cd "$TARGET_DIR" || {
-    echo "Failed to navigate to $TARGET_DIR. Exiting."
+# Navigate to examples/stream and run stream.py
+if [ -d "examples/stream" ]; then
+    cd "examples/stream" || {
+        echo "Failed to navigate to examples/stream directory. Exiting."
+        exit 1
+    }
+    echo "Running stream.py..."
+    python stream.py
+else
+    echo "examples/stream directory not found. Exiting."
     exit 1
-}
-echo "Activating the virtual environment..."
-source "$WHISPERCPP_DIR/$VENV_NAME/bin/activate"
+fi
 
-# Upgrade pip and install the 'build' package
-echo "Installing the 'build' package..."
-pip install build
-
-cd "$WHISPERCPP_DIR" || {
-    echo "Failed to navigate to $WHISPERCPP_DIR. Exiting."
-    exit 1
-}
-
-# Run the build command
-echo "Running the build command..."
-python3 -m build -w
-
-echo "Running the whl install command..."
-pip install dist/*.whl
-
-cd "examples/stream/"
-
-python stream.py
-
-echo "Setup and build process completed."
+echo "Process completed."

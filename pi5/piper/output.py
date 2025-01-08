@@ -3,6 +3,7 @@ import subprocess
 import sys
 import socket
 import time
+import numpy as np
 
 # Configuration
 VENV_DIR = "output_venv"  # Virtual environment directory
@@ -11,9 +12,13 @@ LISTEN_PORT = 6353        # Port to receive raw audio data (matches RAW_AUDIO_PO
 
 # ALSA Playback configuration
 PCM_DEVICE = "default"  # ALSA device for playback
-CHUNK = 1024  # Buffer size
-RATE = 22050  # Ensure this matches the output format of piper
+CHUNK = 4096            # Buffer size (in bytes). Increased for better processing.
+RATE = 22050            # Ensure this matches the output format of piper
 CHANNELS = 1
+
+# Audio Processing Configuration
+VOLUME = 0.5  # Volume control factor (1.0 = original volume). Adjust as needed
+PITCH = 1.0   # Pitch control factor (1.0 = original pitch). Adjust as needed
 
 def is_venv():
     """Check if the script is running inside a virtual environment."""
@@ -33,7 +38,8 @@ def install_dependencies():
     pip_executable = os.path.join(VENV_DIR, "bin", "pip")
     print("Installing dependencies in the virtual environment...")
     subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
-    subprocess.run([pip_executable, "install", "pyalsaaudio"], check=True)
+    subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy"], check=True)
+    print("Please install pysoundtouch manually by following the provided instructions.")
 
 def activate_venv():
     """Activate the virtual environment by modifying sys.path."""
@@ -58,9 +64,24 @@ def setup_virtual_environment():
         activate_venv()
 
 def handle_client_connection(client_socket):
-    """Handle the incoming client connection and play audio."""
+    """Handle the incoming client connection and play audio with volume and optional pitch control."""
     try:
         import alsaaudio
+        # Attempt to import pysoundtouch
+        try:
+            from pysoundtouch import SoundTouch
+            soundtouch_available = True
+            print("pysoundtouch successfully imported. Pitch shifting will be applied.")
+        except ImportError:
+            soundtouch_available = False
+            print("pysoundtouch not found. Pitch shifting will be disabled.")
+
+        if soundtouch_available and PITCH != 1.0:
+            # Initialize SoundTouch for pitch shifting
+            st = SoundTouch(RATE, CHANNELS)
+            st.set_pitch(PITCH)
+            st.set_speed(1.0)  # Keep speed constant
+            st.set_rate(1.0)    # Keep rate constant
 
         # Setup ALSA for playback
         audio_out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK)
@@ -69,6 +90,8 @@ def handle_client_connection(client_socket):
         audio_out.setformat(alsaaudio.PCM_FORMAT_S16_LE)
         audio_out.setperiodsize(CHUNK)
 
+        buffer = b""
+
         while True:
             # Receive raw audio data
             data = client_socket.recv(CHUNK)
@@ -76,8 +99,49 @@ def handle_client_connection(client_socket):
                 print("Client disconnected.")
                 break
 
-            # Play the raw audio data using ALSA
-            audio_out.write(data)
+            buffer += data
+
+            # Process in larger blocks (e.g., 16384 bytes)
+            if len(buffer) >= 16384:
+                # Convert byte data to numpy array
+                audio_samples = np.frombuffer(buffer, dtype=np.int16).astype(np.float32)
+
+                # Apply volume control
+                audio_samples *= VOLUME
+                audio_samples = np.clip(audio_samples, -32768, 32767)  # Prevent clipping
+
+                # Convert back to int16 after volume adjustment
+                processed_samples = audio_samples.astype(np.int16).tobytes()
+
+                # Apply pitch shifting if available
+                if soundtouch_available and PITCH != 1.0:
+                    st.put_samples(processed_samples)
+                    shifted_samples = st.receive_samples(len(processed_samples))
+                    if shifted_samples:
+                        audio_out.write(shifted_samples)
+                else:
+                    # Play the processed audio data using ALSA
+                    audio_out.write(processed_samples)
+
+                # Clear the buffer
+                buffer = b""
+
+        # Flush remaining samples
+        if buffer:
+            audio_samples = np.frombuffer(buffer, dtype=np.int16).astype(np.float32)
+            audio_samples *= VOLUME
+            audio_samples = np.clip(audio_samples, -32768, 32767)
+            processed_samples = audio_samples.astype(np.int16).tobytes()
+
+            if soundtouch_available and PITCH != 1.0:
+                st.put_samples(processed_samples)
+                while True:
+                    shifted_samples = st.receive_samples(len(processed_samples))
+                    if not shifted_samples:
+                        break
+                    audio_out.write(shifted_samples)
+            else:
+                audio_out.write(processed_samples)
 
     except Exception as e:
         print(f"Error in client connection: {e}")

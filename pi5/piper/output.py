@@ -8,17 +8,20 @@ import numpy as np
 # Configuration
 VENV_DIR = "output_venv"  # Virtual environment directory
 LISTEN_HOST = "0.0.0.0"   # Listen on all interfaces
-LISTEN_PORT = 6353        # Port to receive raw audio data (matches RAW_AUDIO_PORT in voice_server.py)
+LISTEN_PORT = 6353        # Port to receive raw audio data
 
 # ALSA Playback configuration
 PCM_DEVICE = "default"  # ALSA device for playback
-CHUNK = 4096            # Buffer size (in bytes). Increased for better processing.
-RATE = 22050            # Ensure this matches the output format of piper
+CHUNK = 8192            # Buffer size (in bytes). Increased for better processing.
+RATE = 22050            # Ensure this matches the output format of your audio source
 CHANNELS = 1
 
 # Audio Processing Configuration
-VOLUME = 0.5  # Volume control factor (1.0 = original volume). Adjust as needed
-PITCH = 1.0   # Pitch control factor (1.0 = original pitch). Adjust as needed
+VOLUME = 0.8  # Volume control factor (1.0 = original volume). Adjust as needed
+PITCH = 1.2   # Pitch control factor (1.0 = original pitch). Adjust as needed
+
+# Pitch Shifting Configuration
+MAX_PITCH_SHIFT = 2.0  # Maximum pitch shift factor to prevent excessive artifacts
 
 def is_venv():
     """Check if the script is running inside a virtual environment."""
@@ -36,19 +39,30 @@ def create_venv():
 def install_dependencies():
     """Install required Python packages in the virtual environment."""
     pip_executable = os.path.join(VENV_DIR, "bin", "pip")
+    if not os.path.exists(pip_executable):
+        pip_executable = os.path.join(VENV_DIR, "Scripts", "pip.exe")  # For Windows
     print("Installing dependencies in the virtual environment...")
     subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
-    subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy"], check=True)
-    print("Please install pysoundtouch manually by following the provided instructions.")
+    subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy", "librosa"], check=True)
 
 def activate_venv():
     """Activate the virtual environment by modifying sys.path."""
-    venv_site_packages = os.path.join(VENV_DIR, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+    if sys.platform == "win32":
+        venv_site_packages = os.path.join(
+            VENV_DIR, "Lib", "site-packages"
+        )
+    else:
+        venv_site_packages = os.path.join(
+            VENV_DIR, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+        )
     sys.path.insert(0, venv_site_packages)
 
 def relaunch_in_venv():
     """Relaunch the current script within the virtual environment."""
-    python_executable = os.path.join(VENV_DIR, "bin", "python")
+    if sys.platform == "win32":
+        python_executable = os.path.join(VENV_DIR, "Scripts", "python.exe")
+    else:
+        python_executable = os.path.join(VENV_DIR, "bin", "python")
     if not os.path.exists(python_executable):
         sys.exit("Error: Python executable not found in the virtual environment.")
     subprocess.check_call([python_executable] + sys.argv)
@@ -64,24 +78,10 @@ def setup_virtual_environment():
         activate_venv()
 
 def handle_client_connection(client_socket):
-    """Handle the incoming client connection and play audio with volume and optional pitch control."""
+    """Handle the incoming client connection and play audio with volume and pitch control."""
     try:
         import alsaaudio
-        # Attempt to import pysoundtouch
-        try:
-            from pysoundtouch import SoundTouch
-            soundtouch_available = True
-            print("pysoundtouch successfully imported. Pitch shifting will be applied.")
-        except ImportError:
-            soundtouch_available = False
-            print("pysoundtouch not found. Pitch shifting will be disabled.")
-
-        if soundtouch_available and PITCH != 1.0:
-            # Initialize SoundTouch for pitch shifting
-            st = SoundTouch(RATE, CHANNELS)
-            st.set_pitch(PITCH)
-            st.set_speed(1.0)  # Keep speed constant
-            st.set_rate(1.0)    # Keep rate constant
+        import librosa
 
         # Setup ALSA for playback
         audio_out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK)
@@ -101,47 +101,77 @@ def handle_client_connection(client_socket):
 
             buffer += data
 
-            # Process in larger blocks (e.g., 16384 bytes)
-            if len(buffer) >= 16384:
+            # Process in larger blocks (e.g., 32768 bytes)
+            PROCESS_BUFFER_SIZE = 32768
+            while len(buffer) >= PROCESS_BUFFER_SIZE:
+                # Extract a block from the buffer
+                block = buffer[:PROCESS_BUFFER_SIZE]
+                buffer = buffer[PROCESS_BUFFER_SIZE:]
+
                 # Convert byte data to numpy array
-                audio_samples = np.frombuffer(buffer, dtype=np.int16).astype(np.float32)
+                audio_samples = np.frombuffer(block, dtype=np.int16).astype(np.float32)
 
                 # Apply volume control
                 audio_samples *= VOLUME
                 audio_samples = np.clip(audio_samples, -32768, 32767)  # Prevent clipping
 
-                # Convert back to int16 after volume adjustment
-                processed_samples = audio_samples.astype(np.int16).tobytes()
+                # Normalize audio for librosa
+                audio_normalized = audio_samples / 32768.0
 
-                # Apply pitch shifting if available
-                if soundtouch_available and PITCH != 1.0:
-                    st.put_samples(processed_samples)
-                    shifted_samples = st.receive_samples(len(processed_samples))
-                    if shifted_samples:
-                        audio_out.write(shifted_samples)
+                # Calculate number of semitones for pitch shift
+                if PITCH != 1.0:
+                    n_steps = 12 * np.log2(PITCH)
                 else:
-                    # Play the processed audio data using ALSA
-                    audio_out.write(processed_samples)
+                    n_steps = 0
 
-                # Clear the buffer
-                buffer = b""
+                # Apply pitch control if needed
+                if n_steps != 0:
+                    try:
+                        audio_shifted = librosa.effects.pitch_shift(y=audio_normalized, sr=RATE, n_steps=n_steps)
+                        # Ensure the audio is still in the correct range
+                        audio_shifted = np.clip(audio_shifted, -1.0, 1.0)
+                        # Convert back to int16
+                        processed_samples = (audio_shifted * 32768).astype(np.int16).tobytes()
+                    except TypeError as te:
+                        print(f"TypeError during pitch shifting: {te}")
+                        print("Check the number and type of arguments passed to pitch_shift.")
+                        # Fallback to volume-adjusted samples
+                        processed_samples = audio_samples.astype(np.int16).tobytes()
+                    except Exception as e:
+                        print(f"Error during pitch shifting: {e}")
+                        # Fallback to volume-adjusted samples
+                        processed_samples = audio_samples.astype(np.int16).tobytes()
+                else:
+                    # No pitch shifting needed
+                    processed_samples = audio_samples.astype(np.int16).tobytes()
+
+                # Play the processed audio data using ALSA
+                audio_out.write(processed_samples)
 
         # Flush remaining samples
         if buffer:
             audio_samples = np.frombuffer(buffer, dtype=np.int16).astype(np.float32)
             audio_samples *= VOLUME
             audio_samples = np.clip(audio_samples, -32768, 32767)
-            processed_samples = audio_samples.astype(np.int16).tobytes()
 
-            if soundtouch_available and PITCH != 1.0:
-                st.put_samples(processed_samples)
-                while True:
-                    shifted_samples = st.receive_samples(len(processed_samples))
-                    if not shifted_samples:
-                        break
-                    audio_out.write(shifted_samples)
+            if PITCH != 1.0:
+                n_steps = 12 * np.log2(PITCH)
+                try:
+                    audio_normalized = audio_samples / 32768.0
+                    audio_shifted = librosa.effects.pitch_shift(y=audio_normalized, sr=RATE, n_steps=n_steps)
+                    audio_shifted = np.clip(audio_shifted, -1.0, 1.0)
+                    processed_samples = (audio_shifted * 32768).astype(np.int16).tobytes()
+                except TypeError as te:
+                    print(f"TypeError during pitch shifting: {te}")
+                    print("Check the number and type of arguments passed to pitch_shift.")
+                    processed_samples = audio_samples.astype(np.int16).tobytes()
+                except Exception as e:
+                    print(f"Error during pitch shifting: {e}")
+                    processed_samples = audio_samples.astype(np.int16).tobytes()
             else:
-                audio_out.write(processed_samples)
+                processed_samples = audio_samples.astype(np.int16).tobytes()
+
+            audio_out.write(processed_samples)
 
     except Exception as e:
         print(f"Error in client connection: {e}")

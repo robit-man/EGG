@@ -591,9 +591,6 @@ else:
     HOST = CONFIG["host"]
     PORT = CONFIG["port"]
     
-    # List to keep track of client threads (no longer needed as we're handling clients sequentially)
-    # Removed client_threads and associated logic
-    
     def start_server():
         # Start TTS and Ollama worker threads
         logging.info("Starting TTS Worker...")
@@ -671,24 +668,7 @@ else:
                     # Send back the response to the client
                     client_sock.sendall(response_content.encode('utf-8'))
     
-                    # Enqueue the response to the TTS worker for synthesis
-                    if response_content:
-                        # Split the response into sentences before enqueuing to TTS
-                        sentence_endings = re.compile(r'[.?!]+')
-                        buffer = response_content
-                        while True:
-                            match = sentence_endings.search(buffer)
-                            if not match:
-                                break
-                            end_index = match.end()
-                            sentence = buffer[:end_index].strip()
-                            buffer = buffer[end_index:].strip()
-                            if sentence:
-                                tts_queue.put(sentence)
-                        # Handle leftover
-                        leftover = buffer.strip()
-                        if leftover:
-                            tts_queue.put(leftover)
+                    # **Removed: Enqueuing sentences to tts_queue from the main thread**
     
                     # Update history
                     update_history(user_message, response_content)

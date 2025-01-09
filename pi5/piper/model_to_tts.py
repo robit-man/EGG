@@ -213,6 +213,8 @@ else:
     # Step 7: Ensure Ollama and Model are Installed #
     #############################################
     
+    MAX_PULL_ATTEMPTS = 3  # Maximum number of attempts to pull the model
+    
     def check_ollama_installed():
         """Check if Ollama is installed by verifying if the 'ollama' command is available."""
         ollama_path = shutil.which('ollama')
@@ -309,14 +311,23 @@ else:
             sys.exit(1)
     
     def pull_model(model_name):
-        """Pull the specified model using Ollama."""
-        logging.info(f"\nModel '{model_name}' not found. Pulling the model...")
-        try:
-            subprocess.check_call(['ollama', 'pull', model_name])
-            logging.info(f"Model '{model_name}' has been successfully pulled.")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error pulling model '{model_name}': {e}")
-            sys.exit(1)
+        """Pull the specified model using Ollama with retry logic."""
+        logging.info(f"\nModel '{model_name}' not found. Attempting to pull the model...")
+        attempts = 0
+        while attempts < MAX_PULL_ATTEMPTS:
+            try:
+                subprocess.check_call(['ollama', 'pull', model_name])
+                logging.info(f"Model '{model_name}' has been successfully pulled.")
+                return True
+            except subprocess.CalledProcessError as e:
+                attempts += 1
+                logging.error(f"Attempt {attempts}: Error pulling model '{model_name}': {e}")
+                if attempts < MAX_PULL_ATTEMPTS:
+                    logging.info("Retrying to pull the model...")
+                    time.sleep(2)  # Wait before retrying
+                else:
+                    logging.error(f"Failed to pull model '{model_name}' after {MAX_PULL_ATTEMPTS} attempts.")
+                    return False
     
     def ensure_ollama_and_model():
         """Ensure that Ollama is installed and the specified model is available."""
@@ -341,7 +352,10 @@ else:
     
         # Check if the model is installed
         if not check_model_installed(model_actual_name):
-            pull_model(model_actual_name)
+            # Attempt to pull the model with retry logic
+            pull_successful = pull_model(model_actual_name)
+            if not pull_successful:
+                logging.warning(f"Proceeding as if model '{model_actual_name}' is installed despite failed pull attempts.")
         else:
             logging.info(f"Model '{model_actual_name}' is already installed.")
     
@@ -415,7 +429,7 @@ else:
         while True:
             try:
                 request_id, user_message = ollama_queue.get(timeout=1)  # Wait for 1 second
-                if request_id is None:
+                if request_id is None and user_message is None:
                     logging.info("Ollama Worker: Received shutdown signal.")
                     break
                 logging.info(f"Ollama Worker: Processing message: {user_message}")

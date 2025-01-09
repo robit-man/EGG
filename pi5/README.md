@@ -49,6 +49,12 @@ Now we automate the activation across reboots
 mkdir -p ~/.config/autostart && echo -e "[Desktop Entry]\nType=Application\nName=Feedback Script\nExec=lxterminal -e python3 /home/egg/feedback.py\nStartupNotify=false\nTerminal=false" > ~/.config/autostart/feedback.desktop
 ```
 
+## Whisper curl
+
+```bash
+curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/setup.sh -o setup.sh && bash setup.sh || (echo "Using cached setup.sh" && bash setup.sh)
+```
+
 ## Debugging
 
 Set Full Send Bless Mode for max fan across reboots:

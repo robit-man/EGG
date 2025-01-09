@@ -19,6 +19,9 @@ CHANNELS = 1
 # Audio Processing Configuration
 VOLUME = 0.5  # Volume control factor (1.0 = original volume). Adjust as needed
 
+# Maximum number of pip install attempts
+MAX_PIP_ATTEMPTS = 3
+
 def is_venv():
     """Check if the script is running inside a virtual environment."""
     return (
@@ -33,14 +36,36 @@ def create_venv():
         subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
 
 def install_dependencies():
-    """Install required Python packages in the virtual environment."""
+    """Install required Python packages in the virtual environment with retry logic."""
     if sys.platform == "win32":
         pip_executable = os.path.join(VENV_DIR, "Scripts", "pip.exe")
     else:
         pip_executable = os.path.join(VENV_DIR, "bin", "pip")
+    
+    # Ensure pip executable exists
+    if not os.path.exists(pip_executable):
+        print("pip executable not found in the virtual environment.")
+        return False
+
     print("Installing dependencies in the virtual environment...")
-    subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
-    subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy"], check=True)
+    attempts = 0
+    while attempts < MAX_PIP_ATTEMPTS:
+        try:
+            # Upgrade pip first
+            subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
+            # Install required packages
+            subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy"], check=True)
+            print("Dependencies installed successfully.")
+            return True
+        except subprocess.CalledProcessError as e:
+            attempts += 1
+            print(f"Pip install attempt {attempts} failed: {e}")
+            if attempts < MAX_PIP_ATTEMPTS:
+                print("Retrying pip install...")
+                time.sleep(2)  # Wait before retrying
+            else:
+                print("Maximum pip install attempts reached. Skipping installation.")
+                return False
 
 def activate_venv():
     """Activate the virtual environment by modifying sys.path."""
@@ -69,10 +94,24 @@ def setup_virtual_environment():
     """Ensure that the virtual environment is set up and dependencies are installed."""
     if not is_venv():
         create_venv()
-        install_dependencies()
+        install_successful = install_dependencies()
+        if not install_successful:
+            print("Proceeding without installing dependencies. Ensure they are already installed.")
         relaunch_in_venv()
     else:
         activate_venv()
+        # Optionally, verify if dependencies are installed
+        try:
+            import alsaaudio
+            import numpy
+        except ImportError as e:
+            print(f"Missing dependencies: {e}")
+            print("Attempting to install dependencies...")
+            install_successful = install_dependencies()
+            if not install_successful:
+                print("Proceeding without installing dependencies. Ensure they are already installed.")
+            else:
+                print("Dependencies installed successfully.")
 
 def handle_client_connection(client_socket):
     """Handle the incoming client connection and play audio with volume control."""

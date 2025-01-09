@@ -13,22 +13,22 @@ CLONE_DIR="/tmp/EGG"
 # Target directory where all scripts will reside
 TARGET_DIR="/home/$(whoami)/voice"
 
-# Virtual environment name
+# Virtual environment name and path
 VENV_NAME="whisper"
+VENV_DIR="$TARGET_DIR/$VENV_NAME"
 
-# Directories and scripts
+# whispercpp directory
 WHISPERCPP_DIR="whispercpp"
-PIPER_DIR="piper"
 
-# Scripts to manage
-SCRIPTS=(
+# Additional scripts and Dockerfile
+ADDITIONAL_FILES=(
     "piper/output.py"
     "piper/model_to_tts.py"
     "piper/voice_server.py"
+    "piper/dockerfile"
 )
 
 # Docker details
-DOCKERFILE_SOURCE="piper/dockerfile"
 DOCKERFILE_TARGET="$TARGET_DIR/dockerfile"
 DOCKER_IMAGE_NAME="piper-tts-rpi5"
 
@@ -67,6 +67,31 @@ EOF
     fi
 }
 
+# Function to download individual files using curl
+download_file() {
+    local url="$1"
+    local dest="$2"
+    echo "Downloading $(basename "$dest")..."
+    curl -sSL "$url" -o "$dest"
+    chmod +x "$dest"
+}
+
+# Function to build Docker image if not exists
+build_docker_image() {
+    if ! sudo docker image inspect "$DOCKER_IMAGE_NAME" > /dev/null 2>&1; then
+        echo "Building Docker image '$DOCKER_IMAGE_NAME'..."
+        sudo docker build -t "$DOCKER_IMAGE_NAME" -f "$DOCKERFILE_TARGET" "$TARGET_DIR"
+    else
+        echo "Docker image '$DOCKER_IMAGE_NAME' already exists. Skipping build."
+    fi
+}
+
+# Function to run Docker container
+run_docker_container() {
+    echo "Running Docker container for voice_server.py..."
+    open_new_terminal "sudo docker run --network host -v '$TARGET_DIR':'/opt/voice' -w '/opt/voice' -it '$DOCKER_IMAGE_NAME' python3 voice_server.py"
+}
+
 # --------------------------- Setup Steps ---------------------------
 
 echo "Starting setup..."
@@ -74,99 +99,105 @@ echo "Starting setup..."
 # Create target directory if it doesn't exist
 mkdir -p "$TARGET_DIR"
 
-# Clone the repository if it hasn't been cloned yet
-if [ ! -d "$CLONE_DIR/.git" ]; then
-    echo "Cloning repository from $REPO_URL into $CLONE_DIR..."
-    git clone --depth=1 --branch="$REPO_BRANCH" "$REPO_URL" "$CLONE_DIR"
-else
-    echo "Repository already cloned. Pulling latest changes..."
-    git -C "$CLONE_DIR" pull
-fi
+# Flag to determine if we need to clone the repository
+NEED_CLONE=false
 
-# Copy whispercpp directory
+# Check if whispercpp directory exists
 if [ ! -d "$TARGET_DIR/$WHISPERCPP_DIR" ]; then
-    echo "Copying $WHISPERCPP_DIR to $TARGET_DIR..."
-    cp -r "$CLONE_DIR/pi5/whisper/$WHISPERCPP_DIR" "$TARGET_DIR/"
-else
-    echo "$WHISPERCPP_DIR already exists in $TARGET_DIR. Skipping copy."
+    NEED_CLONE=true
+    echo "whispercpp directory does not exist. Will clone repository."
 fi
 
-# Copy additional scripts
-for script in "${SCRIPTS[@]}"; do
-    SCRIPT_SOURCE="$CLONE_DIR/pi5/$script"
-    SCRIPT_TARGET="$TARGET_DIR/$(basename "$script")"
-    
-    if [ ! -f "$SCRIPT_TARGET" ]; then
-        echo "Copying $(basename "$script") to $TARGET_DIR..."
-        cp "$SCRIPT_SOURCE" "$SCRIPT_TARGET"
-        chmod +x "$SCRIPT_TARGET"
-    else
-        echo "$(basename "$script") already exists in $TARGET_DIR. Skipping copy."
+# Check if any additional files are missing
+for file in "${ADDITIONAL_FILES[@]}"; do
+    BASENAME=$(basename "$file")
+    if [ ! -f "$TARGET_DIR/$BASENAME" ]; then
+        NEED_CLONE=true
+        echo "$BASENAME is missing. Will clone repository."
+        break
     fi
 done
 
-# Copy Dockerfile
-if [ ! -f "$DOCKERFILE_TARGET" ]; then
-    echo "Copying dockerfile to $TARGET_DIR..."
-    cp "$CLONE_DIR/pi5/$DOCKERFILE_SOURCE" "$DOCKERFILE_TARGET"
+# Clone the repository if needed
+if [ "$NEED_CLONE" = true ]; then
+    echo "Cloning repository from $REPO_URL into $CLONE_DIR..."
+    git clone --depth=1 --branch="$REPO_BRANCH" "$REPO_URL" "$CLONE_DIR"
+
+    # Copy whispercpp directory
+    if [ ! -d "$TARGET_DIR/$WHISPERCPP_DIR" ]; then
+        echo "Copying $WHISPERCPP_DIR to $TARGET_DIR..."
+        cp -r "$CLONE_DIR/pi5/whisper/$WHISPERCPP_DIR" "$TARGET_DIR/"
+    fi
+
+    # Copy additional scripts and Dockerfile
+    for file in "${ADDITIONAL_FILES[@]}"; do
+        SRC="$CLONE_DIR/pi5/$file"
+        DEST="$TARGET_DIR/$(basename "$file")"
+        if [ ! -f "$DEST" ]; then
+            echo "Copying $(basename "$file") to $TARGET_DIR..."
+            cp "$SRC" "$DEST"
+            chmod +x "$DEST"
+        else
+            echo "$(basename "$file") already exists in $TARGET_DIR. Skipping copy."
+        fi
+    done
+
+    # Cleanup temporary repository
+    echo "Cleaning up temporary repository clone..."
+    rm -rf "$CLONE_DIR"
 else
-    echo "Dockerfile already exists in $TARGET_DIR. Skipping copy."
+    echo "All necessary files already exist. Skipping cloning."
 fi
 
-# Remove the cloned repository from /tmp
-echo "Cleaning up temporary repository clone..."
-rm -rf "$CLONE_DIR"
-
 # Navigate to the target directory
-cd "$TARGET_DIR" || { echo "Failed to navigate to $TARGET_DIR. Exiting."; exit 1; }
+cd "$TARGET_DIR" || {
+    echo "Failed to navigate to $TARGET_DIR. Exiting."
+    exit 1
+}
 
 # Set up the Python virtual environment if it doesn't exist
-if [ ! -d "$TARGET_DIR/$VENV_NAME" ]; then
+if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment '$VENV_NAME'..."
-    python3 -m venv "$VENV_NAME" --system-site-packages
+    python3 -m venv "$VENV_DIR" --system-site-packages
     echo "Activating virtual environment..."
-    source "$VENV_NAME/bin/activate"
-    
+    source "$VENV_DIR/bin/activate"
+
     echo "Upgrading pip..."
     pip install --upgrade pip
-    
+
     echo "Installing required packages..."
     pip install build
-    
+
     deactivate
 else
     echo "Virtual environment '$VENV_NAME' already exists. Skipping creation."
 fi
 
 # Function to activate virtual environment and run a Python script
-run_python_script() {
+run_stream_py() {
     local script_path="$1"
-    echo "Running $script_path in a new terminal..."
-    open_new_terminal "source '$TARGET_DIR/$VENV_NAME/bin/activate' && python3 '$script_path'"
+    echo "Running stream.py in a new terminal with virtual environment..."
+    open_new_terminal "source '$VENV_DIR/bin/activate' && python3 '$script_path'"
 }
 
 # Run stream.py
-STREAM_SCRIPT_DIR="$TARGET_DIR/$WHISPERCPP_DIR/examples/stream"
-STREAM_SCRIPT="$STREAM_SCRIPT_DIR/stream.py"
+STREAM_SCRIPT="$TARGET_DIR/$WHISPERCPP_DIR/examples/stream/stream.py"
 
 if [ -f "$STREAM_SCRIPT" ]; then
     echo "Running stream.py..."
-    open_new_terminal "source '$TARGET_DIR/$VENV_NAME/bin/activate' && python3 '$STREAM_SCRIPT'"
+    run_stream_py "$STREAM_SCRIPT"
 else
     echo "stream.py not found at $STREAM_SCRIPT. Skipping."
 fi
 
-# Run additional Python scripts
-for script in "${SCRIPTS[@]}"; do
-    SCRIPT_PATH="$TARGET_DIR/$(basename "$script")"
-    
+# Run output.py and model_to_tts.py in separate terminals
+for script in "output.py" "model_to_tts.py"; do
+    SCRIPT_PATH="$TARGET_DIR/$script"
     if [ -f "$SCRIPT_PATH" ]; then
-        # Skip voice_server.py as it runs via Docker
-        if [ "$(basename "$script")" != "voice_server.py" ]; then
-            run_python_script "$SCRIPT_PATH"
-        fi
+        echo "Running $script in a new terminal..."
+        open_new_terminal "python3 '$SCRIPT_PATH'"
     else
-        echo "Script $SCRIPT_PATH does not exist. Skipping."
+        echo "$script not found at $SCRIPT_PATH. Skipping."
     fi
 done
 
@@ -174,17 +205,11 @@ done
 VOICE_SERVER_SCRIPT="$TARGET_DIR/voice_server.py"
 
 if [ -f "$VOICE_SERVER_SCRIPT" ] && [ -f "$DOCKERFILE_TARGET" ]; then
-    # Check if Docker image exists
-    if ! sudo docker image inspect "$DOCKER_IMAGE_NAME" > /dev/null 2>&1; then
-        echo "Building Docker image '$DOCKER_IMAGE_NAME'..."
-        sudo docker build -t "$DOCKER_IMAGE_NAME" -f "$DOCKERFILE_TARGET" "$TARGET_DIR"
-    else
-        echo "Docker image '$DOCKER_IMAGE_NAME' already exists. Skipping build."
-    fi
-    
+    # Build Docker image if not exists
+    build_docker_image
+
     # Run Docker container
-    echo "Running Docker container for voice_server.py..."
-    open_new_terminal "sudo docker run --network host -v '$TARGET_DIR':'/opt/voice' -w '/opt/voice' -it '$DOCKER_IMAGE_NAME' python3 voice_server.py"
+    run_docker_container
 else
     echo "voice_server.py or Dockerfile not found. Skipping Docker setup."
 fi
@@ -194,4 +219,3 @@ echo "Configuring autostart..."
 add_to_autostart
 
 echo "Setup completed successfully."
-

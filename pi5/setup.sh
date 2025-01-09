@@ -15,10 +15,11 @@ TARGET_DIR="/home/$(whoami)/voice"
 
 # Virtual environment name and path
 VENV_NAME="whisper"
-VENV_DIR="$TARGET_DIR/$VENV_NAME"
 
 # whispercpp directory
 WHISPERCPP_DIR="whispercpp"
+
+VENV_DIR="$TARGET_DIR/$WHISPERCPP_DIR/$VENV_NAME"
 
 # Additional scripts and Dockerfile
 ADDITIONAL_FILES=(

@@ -73,18 +73,19 @@ else:
     
     DEFAULT_CONFIG = {
         "model": "llama3.2:3b",
-        "stream": False,
+        "stream": True,
         "format": None,
-        "system": None,
+        "system": "You are a highly efficient and curious small language model running on a Raspberry Pi 5. Your primary goal is to provide clear, concise, and actionable responses. Avoid disclaimers about your limitations or unnecessary verbosity—focus on being personable and engaging. Express curiosity about the context when appropriate, and always strive to be helpful, resourceful, and to the point. Remember, your brevity is your strength. You are getting prompts sent to you from 'whisper' speech recognition, which sometimes sends you messages in perenthesis like (background noise) or (speaking in foreign language) or (door opening), These indicate detected content and you should respond naturally, without treating these like vocal input. Also note that everything you receive as a prompt is actually coming from a microphone and interpretation of the input from it. As such, you should reply to everything as if you actually have ears and the ability to hear as you have a transducer at your input helping aid in your understanding of what is around you! Also, any use of end of sentence delimiters like periods or other punctuation truncates what is then sent to the TTS generator, so please use punctuation in a strategic way to prevent run on sentences that take a long time to generate text, and also when making lists, avoid using periods after the number delimiters to prevent treating the list position as its own isolated sentence passed to TTS. When respoinding with the intention of laughing or other expressions, produce content like 'hahaha' or 'awwww' or 'ahhhhh', not with (laughing) or other expressions that you receive.",
         "raw": False,
-        "history": None,
+        "history": "chat.json",
         "images": [],
         "tools": None,
         "options": {},
         "host": "0.0.0.0",
         "port": 6545,
         "tts_url": "http://localhost:6434",
-        "ollama_url": "http://localhost:11434/api/chat"
+        "ollama_url": "http://localhost:11434/api/chat",
+        "max_history_messages": 5  # **New Configuration Parameter**
     }
     CONFIG_PATH = "config.json"
     
@@ -131,6 +132,9 @@ else:
     parser.add_argument("--tools", type=str, help="Path to a JSON file defining tools.")
     parser.add_argument("--option", action="append", help="Additional model parameters (e.g. --option temperature=0.7)")
     
+    # **New Command-Line Argument for max_history_messages**
+    parser.add_argument("--max-history", type=int, help="Maximum number of recent chat history messages to recall.")
+    
     args = parser.parse_args()
     
     def merge_config_and_args(config, args):
@@ -164,6 +168,9 @@ else:
                         except ValueError:
                             pass
                     config["options"][k] = v
+        # **Handle the new --max-history argument**
+        if args.max_history is not None:
+            config["max_history_messages"] = args.max_history
         return config
     
     CONFIG = merge_config_and_args(CONFIG, args)
@@ -385,7 +392,24 @@ else:
         messages = []
         if CONFIG["system"]:
             messages.append({"role": "system", "content": CONFIG["system"]})
-        messages.extend(history_messages)
+        
+        # **Truncate history_messages based on max_history_messages**
+        if CONFIG.get("max_history_messages"):
+            # Ensure we have an even number of messages (user and assistant)
+            # If odd, remove the oldest user message without a corresponding assistant message
+            max_messages = CONFIG["max_history_messages"]
+            if len(history_messages) > max_messages:
+                # Slice the last max_messages messages
+                truncated_history = history_messages[-max_messages:]
+                # Optionally, ensure even number of messages for user-assistant pairs
+                if len(truncated_history) % 2 != 0:
+                    truncated_history = truncated_history[1:]
+                messages.extend(truncated_history)
+            else:
+                messages.extend(history_messages)
+        else:
+            messages.extend(history_messages)
+        
         messages.append({"role": "user", "content": user_message})
     
         payload = {
@@ -426,18 +450,31 @@ else:
         """
         Worker thread that processes messages from the Ollama queue.
         """
+        BUFFER_DELAY = 3  # Define the delay in seconds
         while True:
             try:
                 request_id, user_message = ollama_queue.get(timeout=1)  # Wait for 1 second
+                DELAY_MESSAGE = f'I heard "{user_message}"'  # Modified DELAY_MESSAGE
                 if request_id is None and user_message is None:
                     logging.info("Ollama Worker: Received shutdown signal.")
                     break
                 logging.info(f"Ollama Worker: Processing message: {user_message}")
                 response_content = ""
                 payload = build_payload(user_message)
+                
+                # Initialize flags for buffer delay logic
+                buffer_start_time = time.time()
+                has_sent_delay_message = False
+                first_sentence_sent = False  # **New Flag**
+                
                 if CONFIG["stream"]:
                     try:
-                        with requests.post(OLLAMA_CHAT_URL, json=payload, headers={"Content-Type": "application/json"}, stream=True) as r:
+                        with requests.post(
+                            OLLAMA_CHAT_URL,
+                            json=payload,
+                            headers={"Content-Type": "application/json"},
+                            stream=True
+                        ) as r:
                             r.raise_for_status()
                             buffer = ""
                             sentence_endings = re.compile(r'[.?!]+')
@@ -446,9 +483,18 @@ else:
                                     obj = json.loads(line.decode('utf-8'))
                                     msg = obj.get("message", {})
                                     content = msg.get("content", "")
+                                    # Remove colons and asterisks
+                                    content = content.replace(':', '').replace('*', '')
                                     done = obj.get("done", False)
                                     response_content += content
                                     buffer += content
+                                    # Print each word as it enters the buffer
+                                    for word in content.split():
+                                        print(word, end=' ', flush=True)
+                                    # Check if BUFFER_DELAY has passed and delay message hasn't been sent and no sentence sent yet
+                                    if (time.time() - buffer_start_time) >= BUFFER_DELAY and not has_sent_delay_message and not first_sentence_sent:
+                                        tts_queue.put(DELAY_MESSAGE)
+                                        has_sent_delay_message = True
                                     # Check for sentence endings
                                     while True:
                                         match = sentence_endings.search(buffer)
@@ -459,17 +505,26 @@ else:
                                         buffer = buffer[end_index:].strip()
                                         if sentence:
                                             tts_queue.put(sentence)
+                                            first_sentence_sent = True  # **Set flag when first sentence is sent**
                                     if done:
+                                        if buffer:
+                                            tts_queue.put(buffer.strip())
                                         break
                     except Exception as e:
                         logging.error(f"Error during streaming inference: {e}")
                         response_content = ""
                 else:
                     try:
-                        r = requests.post(OLLAMA_CHAT_URL, json=payload, headers={"Content-Type": "application/json"})
+                        r = requests.post(
+                            OLLAMA_CHAT_URL,
+                            json=payload,
+                            headers={"Content-Type": "application/json"}
+                        )
                         r.raise_for_status()
                         data = r.json()
                         response_content = data.get("message", {}).get("content", "")
+                        # Remove colons and asterisks
+                        response_content = response_content.replace(':', '').replace('*', '')
                         # Split into sentences
                         sentence_endings = re.compile(r'[.?!]+')
                         buffer = response_content
@@ -496,13 +551,14 @@ else:
                         response_queue = response_dict.pop(request_id)
                         response_queue.put(response_content)
     
-                # Update history
-                update_history(user_message, response_content)
+                # **Removed: Update history within the worker thread**
+                # update_history(user_message, response_content)  # **Removed to prevent double entries**
     
             except Empty:
                 continue
             except Exception as e:
                 logging.error(f"Ollama Worker: Unexpected error: {e}")
+    
     
     def tts_worker():
         """
@@ -557,7 +613,7 @@ else:
                     except:
                         logging.warning("No JSON error message provided for TTS.")
                     return
-        
+
                 # Forward the audio data to the TTS engine
                 # Assuming the TTS engine handles playback internally
                 for chunk in response.iter_content(chunk_size=4096):
@@ -684,7 +740,7 @@ else:
     
                     # **Removed: Enqueuing sentences to tts_queue from the main thread**
     
-                    # Update history
+                    # **Update history only once in the main process**
                     update_history(user_message, response_content)
     
                     # Close the client socket

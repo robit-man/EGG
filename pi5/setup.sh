@@ -10,7 +10,7 @@ REPO_URL="https://github.com/robit-man/EGG.git"
 REPO_BRANCH="main"
 CLONE_DIR="/tmp/EGG"
 
-# Target directory where all scripts will reside
+# Target directory where all scripts and files will reside
 TARGET_DIR="/home/$(whoami)/voice"
 
 # Virtual environment name and path
@@ -20,6 +20,12 @@ VENV_NAME="whisper"
 WHISPERCPP_DIR="whispercpp"
 
 VENV_DIR="$TARGET_DIR/$WHISPERCPP_DIR/$VENV_NAME"
+
+# Model files
+MODEL_FILES=(
+    "https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx.json"
+    "https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx"
+)
 
 # Additional scripts and Dockerfile
 ADDITIONAL_FILES=(
@@ -68,7 +74,7 @@ EOF
     fi
 }
 
-# Function to download individual files using curl
+# Function to download files using curl
 download_file() {
     local url="$1"
     local dest="$2"
@@ -150,11 +156,16 @@ else
     echo "All necessary files already exist. Skipping cloning."
 fi
 
-# Navigate to the target directory
-cd "$TARGET_DIR" || {
-    echo "Failed to navigate to $TARGET_DIR. Exiting."
-    exit 1
-}
+# Download model files
+for url in "${MODEL_FILES[@]}"; do
+    FILENAME=$(basename "$url")
+    DEST="$TARGET_DIR/$FILENAME"
+    if [ ! -f "$DEST" ]; then
+        download_file "$url" "$DEST"
+    else
+        echo "$FILENAME already exists. Skipping download."
+    fi
+done
 
 # Set up the Python virtual environment if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then

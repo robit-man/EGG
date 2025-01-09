@@ -49,10 +49,25 @@ Now we automate the activation across reboots
 mkdir -p ~/.config/autostart && echo -e "[Desktop Entry]\nType=Application\nName=Feedback Script\nExec=lxterminal -e python3 /home/egg/feedback.py\nStartupNotify=false\nTerminal=false" > ~/.config/autostart/feedback.desktop
 ```
 
+# Setup and Restart of speech feedback stack
+
+```bash
+curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/setup.sh -o /home/$(whoami)/voice/setup.sh && chmod +x /home/$(whoami)/voice/setup.sh && bash /home/$(whoami)/voice/setup.sh && mkdir -p ~/.config/autostart && cat <<EOF > ~/.config/autostart/voice_setup.desktop
+[Desktop Entry]
+Type=Application
+Exec=/bin/bash /home/$(whoami)/voice/setup.sh
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name=Voice Setup
+Comment=Run Voice Setup on startup
+EOF
+```
+
 ## Whisper curl
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/setup.sh -o setup.sh && bash setup.sh || (echo "Using cached setup.sh" && bash setup.sh)
+curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/setup_bak.sh -o setup_bak.sh && bash setup_bak.sh || (echo "Using cached setup_bak.sh" && bash setup_bak.sh)
 ```
 
 ## Debugging

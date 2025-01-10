@@ -14,6 +14,22 @@ import logging
 import psutil  # For CPU usage monitoring
 
 #############################################
+# Utility Functions
+#############################################
+
+def is_connected(host="8.8.8.8", port=53, timeout=3):
+    """
+    Check internet connectivity by attempting to connect to a well-known DNS server.
+    Returns True if connected, False otherwise.
+    """
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        return True
+    except socket.error:
+        return False
+
+#############################################
 # Step 2: Ensure we're running inside a venv #
 #############################################
 
@@ -24,34 +40,67 @@ def in_venv():
     return (hasattr(sys, 'real_prefix') or
             (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
 
-def setup_venv():
+def setup_venv(online=True):
     # Create venv if it doesn't exist
     if not os.path.isdir(VENV_DIR):
         logging.info("Creating virtual environment...")
-        subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
+        try:
+            subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
+            logging.info("Virtual environment created successfully.")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to create virtual environment: {e}")
+            if not online:
+                logging.warning("Proceeding without setting up virtual environment due to offline mode.")
+            else:
+                sys.exit(1)
 
     pip_path = os.path.join(VENV_DIR, 'bin', 'pip')
-    subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
+    if online:
+        try:
+            logging.info("Installing required packages...")
+            subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
+            logging.info("Required packages installed successfully.")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to install required packages: {e}")
+            logging.warning("Proceeding without installing all packages. Ensure required packages are installed.")
+    else:
+        logging.warning("Offline mode: Skipping package installation. Ensure required packages are installed.")
 
 def relaunch_in_venv():
     # Relaunch inside venv python
     python_path = os.path.join(VENV_DIR, 'bin', 'python')
-    os.execv(python_path, [python_path] + sys.argv)
+    if os.path.exists(python_path):
+        logging.info("Relaunching script inside the virtual environment...")
+        os.execv(python_path, [python_path] + sys.argv)
+    else:
+        logging.error("Virtual environment Python executable not found.")
+        sys.exit(1)
 
 if not in_venv():
-    # Setup VENV and install packages
-    setup_venv()
-    # Relaunch the script within the VENV
-    relaunch_in_venv()
+    # Determine online status
+    ONLINE = is_connected()
+    if not ONLINE:
+        logging.warning("No internet connection detected. Operating in offline mode.")
+    # Setup VENV and install packages if online
+    setup_venv(online=ONLINE)
+    # Relaunch the script within the VENV if online and venv was just set up
+    if ONLINE:
+        relaunch_in_venv()
+    else:
+        logging.warning("Cannot relaunch in virtual environment due to offline mode.")
 else:
     #############################################
     # Step 3: Imports after venv set up          #
     #############################################
     
-    import requests
-    from num2words import num2words
-    import alsaaudio  # For ALSA audio playback
-    import psutil     # For CPU usage monitoring
+    try:
+        import requests
+        from num2words import num2words
+        import alsaaudio  # For ALSA audio playback
+        import psutil     # For CPU usage monitoring
+    except ImportError as e:
+        logging.error(f"Failed to import required modules: {e}")
+        sys.exit(1)
 
     #############################################
     # Step 1: Setup Logging
@@ -59,7 +108,7 @@ else:
     
     # Configure logging to include thread name and timestamp
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.INFO,  # **CHANGED**: Can set to DEBUG for more detailed logs
         format='[%(asctime)s] [%(threadName)s] [%(levelname)s] %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
@@ -85,16 +134,20 @@ else:
         "port": 6545,
         "tts_url": "http://localhost:6434",
         "ollama_url": "http://localhost:11434/api/chat",
-        "max_history_messages": 5  # **New Configuration Parameter**
+        "max_history_messages": 3  # **New Configuration Parameter**
     }
     CONFIG_PATH = "config.json"
     
     def load_config():
         if not os.path.exists(CONFIG_PATH):
             logging.info("No config.json found. Creating default config.json...")
-            with open(CONFIG_PATH, 'w') as f:
-                json.dump(DEFAULT_CONFIG, f, indent=2)
-            return dict(DEFAULT_CONFIG)
+            try:
+                with open(CONFIG_PATH, 'w') as f:
+                    json.dump(DEFAULT_CONFIG, f, indent=2)
+                return dict(DEFAULT_CONFIG)
+            except Exception as e:
+                logging.error(f"Failed to create config.json: {e}")
+                return dict(DEFAULT_CONFIG)
         else:
             try:
                 with open(CONFIG_PATH, 'r') as f:
@@ -135,6 +188,9 @@ else:
     # **New Command-Line Argument for max_history_messages**
     parser.add_argument("--max-history", type=int, help="Maximum number of recent chat history messages to recall.")
     
+    # **New Argument to Force Offline Mode**
+    parser.add_argument("--offline", action="store_true", help="Force the script to operate in offline mode.")
+    
     args = parser.parse_args()
     
     def merge_config_and_args(config, args):
@@ -171,6 +227,8 @@ else:
         # **Handle the new --max-history argument**
         if args.max_history is not None:
             config["max_history_messages"] = args.max_history
+        # **Handle the new --offline argument**
+        config["offline_mode"] = args.offline
         return config
     
     CONFIG = merge_config_and_args(CONFIG, args)
@@ -186,8 +244,12 @@ else:
             logging.warning(f"File '{path}' not found. Using default {default}.")
             if path == CONFIG["history"] and default == []:
                 # Create empty history file
-                with open(path, 'w') as f:
-                    json.dump([], f)
+                try:
+                    with open(path, 'w') as f:
+                        json.dump([], f)
+                    logging.info(f"Created empty history file at '{path}'.")
+                except Exception as e:
+                    logging.warning(f"Could not create history file '{path}': {e}")
             return default
         try:
             with open(path, 'r') as f:
@@ -220,154 +282,13 @@ else:
     # Step 7: Ensure Ollama and Model are Installed #
     #############################################
     
-    MAX_PULL_ATTEMPTS = 3  # Maximum number of attempts to pull the model
+    # **CHANGED**: Removed all functions and checks related to model availability and installation.
+    # The script will now always attempt to use the model specified in the configuration without verifying its availability.
+    # This includes removing the 'ensure_ollama_and_model' function and setting 'MODEL_AVAILABLE' to True unconditionally.
     
-    def check_ollama_installed():
-        """Check if Ollama is installed by verifying if the 'ollama' command is available."""
-        ollama_path = shutil.which('ollama')
-        return ollama_path is not None
-    
-    def install_ollama():
-        """Install Ollama using the official installation script for Linux."""
-        logging.info("Ollama not found. Attempting to install using the official installation script...")
-        try:
-            # The installation script might require interactive shell; using shell=True to handle the pipe
-            subprocess.check_call('curl -fsSL https://ollama.com/install.sh | sh', shell=True, executable='/bin/bash')
-            logging.info("Ollama installation initiated.")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error installing Ollama: {e}")
-            sys.exit(1)
-    
-    def wait_for_ollama():
-        """Wait until Ollama service is up and running by checking GET /api/tags."""
-        ollama_tags_url = "http://localhost:11434/api/tags"
-        max_retries = 10
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(ollama_tags_url)
-                if response.status_code == 200:
-                    logging.info("Ollama service is up and running.")
-                    return
-            except requests.exceptions.RequestException:
-                pass
-            logging.info(f"Waiting for Ollama service to start... ({attempt + 1}/{max_retries})")
-            time.sleep(2)
-        logging.error("Ollama service did not start in time. Please check the Ollama installation.")
-        sys.exit(1)
-    
-    def get_available_models():
-        """Retrieve the list of available models from Ollama via GET /api/tags."""
-        ollama_tags_url = "http://localhost:11434/api/tags"
-        try:
-            response = requests.get(ollama_tags_url)
-            if response.status_code == 200:
-                data = response.json()
-                # Assuming the response has a 'models' field which is a list of model dictionaries
-                available_models = data.get('models', [])
-                logging.info("\nAvailable Models:")
-                for model in available_models:
-                    logging.info(f" - {model.get('name')}")
-                # Extract model names for further processing
-                model_names = [model.get('name') for model in available_models if 'name' in model]
-                return model_names
-            else:
-                logging.error(f"Failed to retrieve models from Ollama: Status code {response.status_code}")
-                return []
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error fetching models from Ollama: {e}")
-            return []
-    
-    def check_model_exists_in_tags(model_name):
-        """Check if the specified model exists in Ollama's available models.
-        Returns the actual model name (with suffix) if found, else None.
-        """
-        available_models = get_available_models()
-        # Direct match
-        if model_name in available_models:
-            logging.info(f"\nModel '{model_name}' is available in Ollama's tags.")
-            return model_name
-        # Check for ':latest' suffix
-        model_latest = f"{model_name}:latest"
-        if model_latest in available_models:
-            logging.info(f"\nModel '{model_latest}' is available in Ollama's tags.")
-            return model_latest
-        # Otherwise, not found
-        logging.error(f"\nModel '{model_name}' does not exist in Ollama's available tags.")
-        return None
-    
-    def check_model_installed(model_name):
-        """Check if the specified model is already installed.
-        Returns True if installed, False otherwise.
-        """
-        try:
-            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
-            models = result.stdout.splitlines()
-            # Normalize model names by stripping whitespace
-            models = [model.strip() for model in models]
-            # Check for exact match
-            if model_name in models:
-                return True
-            # If model_name ends with ':latest', check without the suffix
-            if model_name.endswith(':latest'):
-                base_model = model_name.rsplit(':', 1)[0]
-                if base_model in models:
-                    return True
-            return False
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error checking installed models: {e}")
-            sys.exit(1)
-    
-    def pull_model(model_name):
-        """Pull the specified model using Ollama with retry logic."""
-        logging.info(f"\nModel '{model_name}' not found. Attempting to pull the model...")
-        attempts = 0
-        while attempts < MAX_PULL_ATTEMPTS:
-            try:
-                subprocess.check_call(['ollama', 'pull', model_name])
-                logging.info(f"Model '{model_name}' has been successfully pulled.")
-                return True
-            except subprocess.CalledProcessError as e:
-                attempts += 1
-                logging.error(f"Attempt {attempts}: Error pulling model '{model_name}': {e}")
-                if attempts < MAX_PULL_ATTEMPTS:
-                    logging.info("Retrying to pull the model...")
-                    time.sleep(2)  # Wait before retrying
-                else:
-                    logging.error(f"Failed to pull model '{model_name}' after {MAX_PULL_ATTEMPTS} attempts.")
-                    return False
-    
-    def ensure_ollama_and_model():
-        """Ensure that Ollama is installed and the specified model is available."""
-        if not check_ollama_installed():
-            install_ollama()
-            # After installation, ensure the 'ollama' command is available
-            if not check_ollama_installed():
-                logging.error("Ollama installation failed or 'ollama' command is not in PATH.")
-                sys.exit(1)
-        else:
-            logging.info("Ollama is already installed.")
-    
-        # Wait for Ollama service to be ready by checking GET /api/tags
-        wait_for_ollama()
-    
-        # Check if the model exists in tags
-        model_name = CONFIG["model"]
-        model_actual_name = check_model_exists_in_tags(model_name)
-        if not model_actual_name:
-            logging.error(f"Model '{model_name}' does not exist in Ollama's available tags. Cannot proceed.")
-            sys.exit(1)
-    
-        # Check if the model is installed
-        if not check_model_installed(model_actual_name):
-            # Attempt to pull the model with retry logic
-            pull_successful = pull_model(model_actual_name)
-            if not pull_successful:
-                logging.warning(f"Proceeding as if model '{model_actual_name}' is installed despite failed pull attempts.")
-        else:
-            logging.info(f"Model '{model_actual_name}' is already installed.")
-    
-    # Call the function to ensure Ollama and the model are installed
-    ensure_ollama_and_model()
+    # **CHANGED**: Set MODEL_AVAILABLE to True to always enable model inference.
+    MODEL_AVAILABLE = True
+    logging.info(f"Configured to use model: {CONFIG['model']} regardless of availability.")
     
     #############################################
     # Step 8: Ollama chat interaction
@@ -467,83 +388,93 @@ else:
                 has_sent_delay_message = False
                 first_sentence_sent = False  # **New Flag**
                 
-                if CONFIG["stream"]:
-                    try:
-                        with requests.post(
-                            OLLAMA_CHAT_URL,
-                            json=payload,
-                            headers={"Content-Type": "application/json"},
-                            stream=True
-                        ) as r:
-                            r.raise_for_status()
-                            buffer = ""
-                            sentence_endings = re.compile(r'[.?!]+')
-                            for line in r.iter_lines():
-                                if line:
-                                    obj = json.loads(line.decode('utf-8'))
-                                    msg = obj.get("message", {})
-                                    content = msg.get("content", "")
-                                    # Remove colons and asterisks
-                                    content = content.replace(':', '').replace('*', '')
-                                    done = obj.get("done", False)
-                                    response_content += content
-                                    buffer += content
-                                    # Print each word as it enters the buffer
-                                    for word in content.split():
-                                        print(word, end=' ', flush=True)
-                                    # Check if BUFFER_DELAY has passed and delay message hasn't been sent and no sentence sent yet
-                                    if (time.time() - buffer_start_time) >= BUFFER_DELAY and not has_sent_delay_message and not first_sentence_sent:
-                                        tts_queue.put(DELAY_MESSAGE)
-                                        has_sent_delay_message = True
-                                    # Check for sentence endings
-                                    while True:
-                                        match = sentence_endings.search(buffer)
-                                        if not match:
+                if MODEL_AVAILABLE:
+                    if CONFIG["stream"]:
+                        try:
+                            with requests.post(
+                                OLLAMA_CHAT_URL,
+                                json=payload,
+                                headers={"Content-Type": "application/json"},
+                                stream=True
+                            ) as r:
+                                r.raise_for_status()
+                                buffer = ""
+                                sentence_endings = re.compile(r'[.?!]+')
+                                for line in r.iter_lines():
+                                    if line:
+                                        try:
+                                            obj = json.loads(line.decode('utf-8'))
+                                            msg = obj.get("message", {})
+                                            content = msg.get("content", "")
+                                            # Remove colons and asterisks
+                                            content = content.replace(':', '').replace('*', '')
+                                            done = obj.get("done", False)
+                                            response_content += content
+                                            buffer += content
+                                            # Print each word as it enters the buffer
+                                            for word in content.split():
+                                                print(word, end=' ', flush=True)
+                                            # Check if BUFFER_DELAY has passed and delay message hasn't been sent and no sentence sent yet
+                                            if (time.time() - buffer_start_time) >= BUFFER_DELAY and not has_sent_delay_message and not first_sentence_sent:
+                                                tts_queue.put(DELAY_MESSAGE)
+                                                has_sent_delay_message = True
+                                            # Check for sentence endings
+                                            while True:
+                                                match = sentence_endings.search(buffer)
+                                                if not match:
+                                                    break
+                                                end_index = match.end()
+                                                sentence = buffer[:end_index].strip()
+                                                buffer = buffer[end_index:].strip()
+                                                if sentence:
+                                                    tts_queue.put(sentence)
+                                                    first_sentence_sent = True  # **Set flag when first sentence is sent**
+                                            if done:
+                                                if buffer:
+                                                    tts_queue.put(buffer.strip())
+                                                break
+                                        except json.JSONDecodeError as e:
+                                            logging.error(f"Invalid JSON received from Ollama: {e}")
+                                        except Exception as e:
+                                            logging.error(f"Error processing stream from Ollama: {e}")
                                             break
-                                        end_index = match.end()
-                                        sentence = buffer[:end_index].strip()
-                                        buffer = buffer[end_index:].strip()
-                                        if sentence:
-                                            tts_queue.put(sentence)
-                                            first_sentence_sent = True  # **Set flag when first sentence is sent**
-                                    if done:
-                                        if buffer:
-                                            tts_queue.put(buffer.strip())
-                                        break
-                    except Exception as e:
-                        logging.error(f"Error during streaming inference: {e}")
-                        response_content = ""
+                        except Exception as e:
+                            logging.error(f"Error during streaming inference: {e}")
+                            response_content = ""
+                    else:
+                        try:
+                            r = requests.post(
+                                OLLAMA_CHAT_URL,
+                                json=payload,
+                                headers={"Content-Type": "application/json"}
+                            )
+                            r.raise_for_status()
+                            data = r.json()
+                            response_content = data.get("message", {}).get("content", "")
+                            # Remove colons and asterisks
+                            response_content = response_content.replace(':', '').replace('*', '')
+                            # Split into sentences
+                            sentence_endings = re.compile(r'[.?!]+')
+                            buffer = response_content
+                            while True:
+                                match = sentence_endings.search(buffer)
+                                if not match:
+                                    break
+                                end_index = match.end()
+                                sentence = buffer[:end_index].strip()
+                                buffer = buffer[end_index:].strip()
+                                if sentence:
+                                    tts_queue.put(sentence)
+                            # Handle leftover
+                            leftover = buffer.strip()
+                            if leftover:
+                                tts_queue.put(leftover)
+                        except Exception as e:
+                            logging.error(f"Error during non-stream inference: {e}")
+                            response_content = ""
                 else:
-                    try:
-                        r = requests.post(
-                            OLLAMA_CHAT_URL,
-                            json=payload,
-                            headers={"Content-Type": "application/json"}
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        response_content = data.get("message", {}).get("content", "")
-                        # Remove colons and asterisks
-                        response_content = response_content.replace(':', '').replace('*', '')
-                        # Split into sentences
-                        sentence_endings = re.compile(r'[.?!]+')
-                        buffer = response_content
-                        while True:
-                            match = sentence_endings.search(buffer)
-                            if not match:
-                                break
-                            end_index = match.end()
-                            sentence = buffer[:end_index].strip()
-                            buffer = buffer[end_index:].strip()
-                            if sentence:
-                                tts_queue.put(sentence)
-                        # Handle leftover
-                        leftover = buffer.strip()
-                        if leftover:
-                            tts_queue.put(leftover)
-                    except Exception as e:
-                        logging.error(f"Error during non-stream inference: {e}")
-                        response_content = ""
+                    logging.warning("Model inference is disabled. Skipping model inference.")
+                    response_content = "I'm currently unable to process your request."
     
                 # Send back the response to the client via the response queue
                 with response_dict_lock:
@@ -558,7 +489,6 @@ else:
                 continue
             except Exception as e:
                 logging.error(f"Ollama Worker: Unexpected error: {e}")
-    
     
     def tts_worker():
         """
@@ -637,6 +567,7 @@ else:
         try:
             with open(CONFIG["history"], 'w') as f:
                 json.dump(current_history, f, indent=2)
+            logging.info(f"History updated in '{CONFIG['history']}'.")
         except Exception as e:
             logging.warning(f"Could not write to history file {CONFIG['history']}: {e}")
     
@@ -736,7 +667,11 @@ else:
                         response_content = "I'm sorry, I couldn't process your request at this time."
     
                     # Send back the response to the client
-                    client_sock.sendall(response_content.encode('utf-8'))
+                    try:
+                        client_sock.sendall(response_content.encode('utf-8'))
+                        logging.info(f"Sent response to {addr}.")
+                    except Exception as e:
+                        logging.error(f"Failed to send response to {addr}: {e}")
     
                     # **Removed: Enqueuing sentences to tts_queue from the main thread**
     
@@ -769,4 +704,15 @@ else:
             logging.info("Shutting down complete.")
     
     if __name__ == "__main__":
+        # Determine if running in offline mode
+        if CONFIG.get("offline_mode", False):
+            logging.info("Operating in offline mode.")
+        else:
+            ONLINE_STATUS = is_connected()
+            if not ONLINE_STATUS:
+                logging.warning("No internet connection detected. Switching to offline mode.")
+                CONFIG["offline_mode"] = True
+            else:
+                CONFIG["offline_mode"] = False
+        
         start_server()

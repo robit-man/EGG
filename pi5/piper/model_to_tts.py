@@ -12,7 +12,7 @@ import shutil
 import time
 import logging
 import psutil  # For CPU usage monitoring
-import multiprocessing  # **CHANGED**: Added multiprocessing for handling inference processes
+import multiprocessing  # Added multiprocessing for handling inference processes
 
 #############################################
 # Utility Functions
@@ -24,8 +24,9 @@ def is_connected(host="8.8.8.8", port=53, timeout=3):
     Returns True if connected, False otherwise.
     """
     try:
-        socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect((host, port))
         return True
     except socket.error:
         return False
@@ -55,7 +56,9 @@ def setup_venv(online=True):
             else:
                 sys.exit(1)
 
-    pip_path = os.path.join(VENV_DIR, 'bin', 'pip')
+    # Determine pip path based on OS
+    pip_path = os.path.join(VENV_DIR, 'bin', 'pip') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'pip.exe')
+    
     if online:
         try:
             logging.info("Installing required packages...")
@@ -69,7 +72,7 @@ def setup_venv(online=True):
 
 def relaunch_in_venv():
     # Relaunch inside venv python
-    python_path = os.path.join(VENV_DIR, 'bin', 'python')
+    python_path = os.path.join(VENV_DIR, 'bin', 'python') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'python.exe')
     if os.path.exists(python_path):
         logging.info("Relaunching script inside the virtual environment...")
         os.execv(python_path, [python_path] + sys.argv)
@@ -109,7 +112,7 @@ else:
     
     # Configure logging to include thread name and timestamp
     logging.basicConfig(
-        level=logging.INFO,  # **CHANGED**: Can set to DEBUG for more detailed logs
+        level=logging.INFO,  # Can set to DEBUG for more detailed logs
         format='[%(asctime)s] [%(threadName)s] [%(levelname)s] %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
@@ -125,7 +128,22 @@ else:
         "model": "llama3.2:3b",
         "stream": True,
         "format": None,
-        "system": "You are a highly efficient and curious small language model running on a Raspberry Pi 5. Your primary goal is to provide clear, concise, and actionable responses. Avoid disclaimers about your limitations or unnecessary verbosity—focus on being personable and engaging. Express curiosity about the context when appropriate, and always strive to be helpful, resourceful, and to the point. Remember, your brevity is your strength. You are getting prompts sent to you from 'whisper' speech recognition, which sometimes sends you messages in perenthesis like (background noise) or (speaking in foreign language) or (door opening), These indicate detected content and you should respond naturally, without treating these like vocal input. Also note that everything you receive as a prompt is actually coming from a microphone and interpretation of the input from it. As such, you should reply to everything as if you actually have ears and the ability to hear as you have a transducer at your input helping aid in your understanding of what is around you! Also, any use of end of sentence delimiters like periods or other punctuation truncates what is then sent to the TTS generator, so please use punctuation in a strategic way to prevent run on sentences that take a long time to generate text, and also when making lists, avoid using periods after the number delimiters to prevent treating the list position as its own isolated sentence passed to TTS. When respoinding with the intention of laughing or other expressions, produce content like 'hahaha' or 'awwww' or 'ahhhhh', not with (laughing) or other expressions that you receive.",
+        "system": ("You are a highly efficient and curious small language model running on a Raspberry Pi 5. "
+                   "Your primary goal is to provide clear, concise, and actionable responses. Avoid disclaimers about "
+                   "your limitations or unnecessary verbosity—focus on being personable and engaging. Express curiosity "
+                   "about the context when appropriate, and always strive to be helpful, resourceful, and to the point. "
+                   "Remember, your brevity is your strength. You are getting prompts sent to you from 'whisper' speech "
+                   "recognition, which sometimes sends you messages in perenthesis like (background noise) or "
+                   "(speaking in foreign language) or (door opening), These indicate detected content and you should respond "
+                   "naturally, without treating these like vocal input. Also note that everything you receive as a prompt "
+                   "is actually coming from a microphone and interpretation of the input from it. As such, you should reply "
+                   "to everything as if you actually have ears and the ability to hear as you have a transducer at your input "
+                   "helping aid in your understanding of what is around you! Also, any use of end of sentence delimiters like "
+                   "periods or other punctuation truncates what is then sent to the TTS generator, so please use punctuation in "
+                   "a strategic way to prevent run on sentences that take a long time to generate text, and also when making "
+                   "lists, avoid using periods after the number delimiters to prevent treating the list position as its own "
+                   "isolated sentence passed to TTS. When responding with the intention of laughing or other expressions, "
+                   "produce content like 'hahaha' or 'awwww' or 'ahhhhh', not with (laughing) or other expressions that you receive."),
         "raw": False,
         "history": "chat.json",
         "images": [],
@@ -135,7 +153,8 @@ else:
         "port": 6545,
         "tts_url": "http://localhost:6434",
         "ollama_url": "http://localhost:11434/api/chat",
-        "max_history_messages": 3  # **New Configuration Parameter**
+        "max_history_messages": 3,  # New Configuration Parameter
+        "offline_mode": False  # Default offline mode
     }
     CONFIG_PATH = "config.json"
     
@@ -186,10 +205,10 @@ else:
     parser.add_argument("--tools", type=str, help="Path to a JSON file defining tools.")
     parser.add_argument("--option", action="append", help="Additional model parameters (e.g. --option temperature=0.7)")
     
-    # **New Command-Line Argument for max_history_messages**
+    # New Command-Line Argument for max_history_messages
     parser.add_argument("--max-history", type=int, help="Maximum number of recent chat history messages to recall.")
     
-    # **New Argument to Force Offline Mode**
+    # New Argument to Force Offline Mode
     parser.add_argument("--offline", action="store_true", help="Force the script to operate in offline mode.")
     
     args = parser.parse_args()
@@ -225,10 +244,10 @@ else:
                         except ValueError:
                             pass
                     config["options"][k] = v
-        # **Handle the new --max-history argument**
+        # Handle the new --max-history argument
         if args.max_history is not None:
             config["max_history_messages"] = args.max_history
-        # **Handle the new --offline argument**
+        # Handle the new --offline argument
         config["offline_mode"] = args.offline
         return config
     
@@ -283,11 +302,11 @@ else:
     # Step 7: Ensure Ollama and Model are Installed #
     #############################################
     
-    # **CHANGED**: Removed all functions and checks related to model availability and installation.
+    # Removed all functions and checks related to model availability and installation.
     # The script will now always attempt to use the model specified in the configuration without verifying its availability.
     # This includes removing the 'ensure_ollama_and_model' function and setting 'MODEL_AVAILABLE' to True unconditionally.
     
-    # **CHANGED**: Set MODEL_AVAILABLE to True to always enable model inference.
+    # Set MODEL_AVAILABLE to True to always enable model inference.
     MODEL_AVAILABLE = True
     logging.info(f"Configured to use model: {CONFIG['model']} regardless of availability.")
     
@@ -315,7 +334,7 @@ else:
         if CONFIG["system"]:
             messages.append({"role": "system", "content": CONFIG["system"]})
         
-        # **Truncate history_messages based on max_history_messages**
+        # Truncate history_messages based on max_history_messages
         if CONFIG.get("max_history_messages"):
             # Ensure we have an even number of messages (user and assistant)
             # If odd, remove the oldest user message without a corresponding assistant message
@@ -323,7 +342,7 @@ else:
             if len(history_messages) > max_messages:
                 # Slice the last max_messages messages
                 truncated_history = history_messages[-max_messages:]
-                # Optionally, ensure even number of messages for user-assistant pairs
+                # Ensure even number of messages for user-assistant pairs
                 if len(truncated_history) % 2 != 0:
                     truncated_history = truncated_history[1:]
                 messages.extend(truncated_history)
@@ -361,7 +380,7 @@ else:
     # Initialize Queues for inter-thread and inter-process communication
     ollama_queue = Queue()
     tts_queue = Queue()
-    inference_queue = multiprocessing.Queue()  # **CHANGED**: Added multiprocessing.Queue for inference process output
+    inference_queue = multiprocessing.Queue()  # Added multiprocessing.Queue for inference process output
     
     # Dictionary to map request IDs to response queues
     response_dict = {}
@@ -369,7 +388,7 @@ else:
     request_id_counter = 0
     request_id_lock = threading.Lock()
     
-    # **CHANGED**: Added a function to handle inter-process communication from inference processes to TTS queue
+    # Added a function to handle inter-process communication from inference processes to TTS queue
     def inference_to_tts_handler():
         while True:
             try:
@@ -392,7 +411,7 @@ else:
         Worker thread that processes messages from the Ollama queue.
         Manages inference processes and handles CPU usage constraints.
         """
-        current_inference_process = None  # **CHANGED**: Track the current inference process
+        current_inference_process = None  # Track the current inference process
         while True:
             try:
                 request_id, user_message = ollama_queue.get(timeout=1)  # Wait for 1 second
@@ -418,8 +437,7 @@ else:
                         logging.info("Ollama Worker: Current inference terminated.")
                     else:
                         logging.info("Ollama Worker: CPU usage <= 50%. Waiting for current inference to finish.")
-                        # Optionally, you can choose to wait or queue the new prompt
-                        # Here, we'll wait until the current inference finishes
+                        # Wait until the current inference finishes
                         current_inference_process.join()
                         logging.info("Ollama Worker: Previous inference completed.")
                 
@@ -438,7 +456,7 @@ else:
                 continue
             except Exception as e:
                 logging.error(f"Ollama Worker: Unexpected error: {e}")
-
+    
     def inference_process(user_message, output_queue):
         """
         Function to handle inference in a separate process.
@@ -519,7 +537,7 @@ else:
                     logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
         except Exception as e:
             logging.error(f"Inference Process: Unexpected error: {e}")
-        # **CHANGED**: Removed output_queue.put(None)
+        # Removed output_queue.put(None)
         # The inference_to_tts_handler will be shutdown separately
     
     def tts_worker():
@@ -555,7 +573,7 @@ else:
         tts_thread.start()
         logging.info("TTS Worker: Started.")
 
-    # **CHANGED**: Added synthesize_and_play function to handle TTS requests
+    # Added synthesize_and_play function to handle TTS requests
     def synthesize_and_play(sentence):
         """
         Send the sentence to the TTS engine.
@@ -625,26 +643,25 @@ else:
     def receiver_thread(host, port):
         """
         Dedicated thread to listen for incoming socket connections and receive messages asynchronously.
+        Continuously retries to bind to the specified port until successful.
         """
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            server_socket.bind((host, port))
-            logging.info(f"Receiver Thread: Bound to {host}:{port}")
-        except Exception as e:
-            logging.error(f"Receiver Thread: Error binding to {host}:{port} - {e}. Using defaults: 0.0.0.0:64162")
-            host_d = '0.0.0.0'
-            port_d = 64162
+        while True:
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                server_socket.bind((host_d, port_d))
-                logging.info(f"Receiver Thread: Server bound to {host_d}:{port_d}")
+                server_socket.bind((host, port))
+                logging.info(f"Receiver Thread: Bound to {host}:{port}")
+                server_socket.listen(5)
+                logging.info(f"Receiver Thread: Listening for incoming connections on {host}:{port}...")
+                break  # Successfully bound and listening
             except Exception as e:
-                logging.error(f"Receiver Thread: Failed to bind to default host and port: {e}")
-                sys.exit(1)
-        
-        server_socket.listen(5)
-        logging.info(f"Receiver Thread: Listening for incoming connections on {host}:{port}...")
-        
+                logging.error(f"Receiver Thread: Failed to bind to {host}:{port} - {e}. Retrying in 5 seconds...")
+                try:
+                    server_socket.close()
+                except:
+                    pass
+                time.sleep(5)  # Wait before retrying
+
         while True:
             try:
                 client_sock, addr = server_socket.accept()
@@ -659,8 +676,9 @@ else:
                 client_handler.start()
             except Exception as e:
                 logging.error(f"Receiver Thread: Error accepting connections: {e}")
-                break  # Exit the receiver thread
-    
+                # Continue accepting new connections
+                continue
+
         server_socket.close()
         logging.info("Receiver Thread: Server socket closed.")
 
@@ -709,7 +727,7 @@ else:
             except Exception as e:
                 logging.error(f"ClientHandler: Failed to send response to {addr}: {e}")
 
-            # **Update history only once in the main process**
+            # Update history only once in the main process
             update_history(user_message, response_content)
 
         except Exception as e:
@@ -773,5 +791,5 @@ if __name__ == "__main__":
             CONFIG["offline_mode"] = True
         else:
             CONFIG["offline_mode"] = False
-    
+
     start_server()

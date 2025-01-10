@@ -374,15 +374,18 @@ else:
         while True:
             try:
                 sentence = inference_queue.get()
-                if sentence is None:
+                if sentence == "__SHUTDOWN__":
+                    logging.info("Inference to TTS Handler: Received shutdown signal.")
                     break  # Sentinel to stop the thread
                 tts_queue.put(sentence)
+                logging.debug(f"Inference to TTS Handler: Enqueued sentence to TTS: {sentence}")
             except Exception as e:
                 logging.error(f"Inference to TTS Handler: {e}")
     
     # Start the inference_to_tts_handler thread
     inference_to_tts_thread = threading.Thread(target=inference_to_tts_handler, daemon=True, name="InferenceToTTSHandler")
     inference_to_tts_thread.start()
+    logging.info("InferenceToTTSHandler: Started.")
     
     def ollama_worker():
         """
@@ -397,9 +400,10 @@ else:
                     logging.info("Ollama Worker: Received shutdown signal.")
                     # Terminate any ongoing inference process
                     if current_inference_process and current_inference_process.is_alive():
+                        logging.info("Ollama Worker: Terminating ongoing inference process.")
                         current_inference_process.terminate()
                         current_inference_process.join()
-                        logging.info("Ollama Worker: Terminated ongoing inference process.")
+                        logging.info("Ollama Worker: Ongoing inference process terminated.")
                     break
                 logging.info(f"Ollama Worker: Received new prompt: {user_message}")
                 
@@ -428,8 +432,7 @@ else:
                 current_inference_process.start()
                 logging.info(f"Ollama Worker: Inference process started with PID {current_inference_process.pid}.")
                 
-                # Optionally, you can wait for the process to finish or continue to listen for new prompts
-                # Here, we continue listening for new prompts
+                # Continue listening for new prompts
                 
             except Empty:
                 continue
@@ -474,9 +477,11 @@ else:
                                     buffer = buffer[end_index:].strip()
                                     if sentence:
                                         output_queue.put(sentence)
+                                        logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
                                 if done:
                                     if buffer:
                                         output_queue.put(buffer.strip())
+                                        logging.debug(f"Inference Process: Enqueued final sentence to TTS: {buffer.strip()}")
                                     break
                             except json.JSONDecodeError as e:
                                 logging.error(f"Inference Process: Invalid JSON received: {e}")
@@ -506,16 +511,17 @@ else:
                     buffer = buffer[end_index:].strip()
                     if sentence:
                         output_queue.put(sentence)
+                        logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
                 # Handle leftover
                 leftover = buffer.strip()
                 if leftover:
                     output_queue.put(leftover)
+                    logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
         except Exception as e:
             logging.error(f"Inference Process: Unexpected error: {e}")
-        finally:
-            # Signal that inference is done
-            output_queue.put(None)
-
+        # **CHANGED**: Removed output_queue.put(None)
+        # The inference_to_tts_handler will be shutdown separately
+    
     def tts_worker():
         """
         Worker thread that processes sentences from the TTS queue.
@@ -532,7 +538,7 @@ else:
                 continue
             except Exception as e:
                 logging.error(f"TTS Worker: Error processing sentence: {e}")
-
+    
     def start_ollama_thread():
         """
         Start the Ollama worker thread.
@@ -712,58 +718,8 @@ else:
             client_sock.close()
             logging.info(f"ClientHandler: Connection with {addr} closed.")
 
-    # **CHANGED**: Added synthesize_and_play function to handle TTS requests
-    def synthesize_and_play(sentence):
-        """
-        Send the sentence to the TTS engine.
-        Playback is handled elsewhere.
-        """
-        sentence = sentence.strip()
-        if not sentence:
-            return
-        try:
-            payload = {"prompt": sentence}
-            logging.info(f"Sending TTS request with prompt: {sentence}")
-            with requests.post(CONFIG["tts_url"], json=payload, stream=True, timeout=10) as response:
-                if response.status_code != 200:
-                    logging.warning(f"TTS received status code {response.status_code}")
-                    try:
-                        error_msg = response.json().get('error', 'No error message provided.')
-                        logging.warning(f"TTS error: {error_msg}")
-                    except:
-                        logging.warning("No JSON error message provided for TTS.")
-                    return
-
-                # Forward the audio data to the TTS engine
-                # Assuming the TTS engine handles playback internally
-                for chunk in response.iter_content(chunk_size=4096):
-                    if chunk:
-                        # If needed, process or log the audio data here
-                        pass  # No action since playback is handled elsewhere
-            logging.info("TTS request completed successfully.")
-        except requests.exceptions.Timeout:
-            logging.error("TTS request timed out.")
-        except requests.exceptions.ConnectionError as ce:
-            logging.error(f"Connection error during TTS request: {ce}")
-        except Exception as e:
-            logging.error(f"Unexpected error during TTS: {e}")
-
     #############################################
-    # Step 10: Monitoring CPU Usage
-    #############################################
-    
-    def monitor_cpu_usage(interval=5):
-        """
-        Monitor CPU usage at regular intervals and log it.
-        Runs in a separate daemon thread.
-        """
-        while True:
-            cpu_percent = psutil.cpu_percent(interval=interval)
-            logging.info(f"CPU Usage: {cpu_percent}%")
-            time.sleep(interval)
-
-    #############################################
-    # Step 11: Server Handling with Dedicated Receiver Thread #
+    # Step 12: Server Handling with Dedicated Receiver Thread #
     #############################################
     
     def start_server():
@@ -774,9 +730,8 @@ else:
         start_ollama_thread()
 
         # Start Inference to TTS Handler thread
-        logging.info("Starting Inference to TTS Handler...")
         # Already started earlier
-
+    
         # Start CPU usage monitoring
         cpu_monitor_thread = threading.Thread(target=monitor_cpu_usage, daemon=True, name="CPUMonitor")
         cpu_monitor_thread.start()
@@ -800,7 +755,7 @@ else:
             logging.info("Stopping Ollama Worker...")
             ollama_queue.put((None, None))  # Signal Ollama worker to exit
             logging.info("Stopping Inference to TTS Handler...")
-            inference_queue.put(None)  # Signal inference to TTS handler to exit
+            inference_queue.put("__SHUTDOWN__")  # Signal inference_to_tts_handler to exit
 
             # Allow some time for threads to shutdown
             time.sleep(2)

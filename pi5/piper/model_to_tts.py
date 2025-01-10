@@ -12,6 +12,7 @@ import shutil
 import time
 import logging
 import psutil  # For CPU usage monitoring
+import multiprocessing  # **CHANGED**: Added multiprocessing for handling inference processes
 
 #############################################
 # Utility Functions
@@ -357,9 +358,10 @@ else:
     # Step 9: Dedicated Worker Threads for Ollama and TTS
     #############################################
     
-    # Initialize Queues for inter-thread communication
+    # Initialize Queues for inter-thread and inter-process communication
     ollama_queue = Queue()
     tts_queue = Queue()
+    inference_queue = multiprocessing.Queue()  # **CHANGED**: Added multiprocessing.Queue for inference process output
     
     # Dictionary to map request IDs to response queues
     response_dict = {}
@@ -367,129 +369,153 @@ else:
     request_id_counter = 0
     request_id_lock = threading.Lock()
     
+    # **CHANGED**: Added a function to handle inter-process communication from inference processes to TTS queue
+    def inference_to_tts_handler():
+        while True:
+            try:
+                sentence = inference_queue.get()
+                if sentence is None:
+                    break  # Sentinel to stop the thread
+                tts_queue.put(sentence)
+            except Exception as e:
+                logging.error(f"Inference to TTS Handler: {e}")
+    
+    # Start the inference_to_tts_handler thread
+    inference_to_tts_thread = threading.Thread(target=inference_to_tts_handler, daemon=True, name="InferenceToTTSHandler")
+    inference_to_tts_thread.start()
+    
     def ollama_worker():
         """
         Worker thread that processes messages from the Ollama queue.
+        Manages inference processes and handles CPU usage constraints.
         """
-        BUFFER_DELAY = 3  # Define the delay in seconds
+        current_inference_process = None  # **CHANGED**: Track the current inference process
         while True:
             try:
                 request_id, user_message = ollama_queue.get(timeout=1)  # Wait for 1 second
-                DELAY_MESSAGE = f'I heard "{user_message}"'  # Modified DELAY_MESSAGE
                 if request_id is None and user_message is None:
                     logging.info("Ollama Worker: Received shutdown signal.")
+                    # Terminate any ongoing inference process
+                    if current_inference_process and current_inference_process.is_alive():
+                        current_inference_process.terminate()
+                        current_inference_process.join()
+                        logging.info("Ollama Worker: Terminated ongoing inference process.")
                     break
-                logging.info(f"Ollama Worker: Processing message: {user_message}")
-                response_content = ""
-                payload = build_payload(user_message)
+                logging.info(f"Ollama Worker: Received new prompt: {user_message}")
                 
-                # Initialize flags for buffer delay logic
-                buffer_start_time = time.time()
-                has_sent_delay_message = False
-                first_sentence_sent = False  # **New Flag**
-                
-                if MODEL_AVAILABLE:
-                    if CONFIG["stream"]:
-                        try:
-                            with requests.post(
-                                OLLAMA_CHAT_URL,
-                                json=payload,
-                                headers={"Content-Type": "application/json"},
-                                stream=True
-                            ) as r:
-                                r.raise_for_status()
-                                buffer = ""
-                                sentence_endings = re.compile(r'[.?!]+')
-                                for line in r.iter_lines():
-                                    if line:
-                                        try:
-                                            obj = json.loads(line.decode('utf-8'))
-                                            msg = obj.get("message", {})
-                                            content = msg.get("content", "")
-                                            # Remove colons and asterisks
-                                            content = content.replace(':', '').replace('*', '')
-                                            done = obj.get("done", False)
-                                            response_content += content
-                                            buffer += content
-                                            # Print each word as it enters the buffer
-                                            for word in content.split():
-                                                print(word, end=' ', flush=True)
-                                            # Check if BUFFER_DELAY has passed and delay message hasn't been sent and no sentence sent yet
-                                            if (time.time() - buffer_start_time) >= BUFFER_DELAY and not has_sent_delay_message and not first_sentence_sent:
-                                                tts_queue.put(DELAY_MESSAGE)
-                                                has_sent_delay_message = True
-                                            # Check for sentence endings
-                                            while True:
-                                                match = sentence_endings.search(buffer)
-                                                if not match:
-                                                    break
-                                                end_index = match.end()
-                                                sentence = buffer[:end_index].strip()
-                                                buffer = buffer[end_index:].strip()
-                                                if sentence:
-                                                    tts_queue.put(sentence)
-                                                    first_sentence_sent = True  # **Set flag when first sentence is sent**
-                                            if done:
-                                                if buffer:
-                                                    tts_queue.put(buffer.strip())
-                                                break
-                                        except json.JSONDecodeError as e:
-                                            logging.error(f"Invalid JSON received from Ollama: {e}")
-                                        except Exception as e:
-                                            logging.error(f"Error processing stream from Ollama: {e}")
-                                            break
-                        except Exception as e:
-                            logging.error(f"Error during streaming inference: {e}")
-                            response_content = ""
+                # Check if an inference process is already running
+                if current_inference_process and current_inference_process.is_alive():
+                    cpu_usage = psutil.cpu_percent(interval=1)
+                    logging.info(f"Ollama Worker: Current CPU usage is {cpu_usage}%.")
+                    if cpu_usage > 50:
+                        logging.info("Ollama Worker: CPU usage > 50%. Terminating current inference.")
+                        current_inference_process.terminate()
+                        current_inference_process.join()
+                        logging.info("Ollama Worker: Current inference terminated.")
                     else:
-                        try:
-                            r = requests.post(
-                                OLLAMA_CHAT_URL,
-                                json=payload,
-                                headers={"Content-Type": "application/json"}
-                            )
-                            r.raise_for_status()
-                            data = r.json()
-                            response_content = data.get("message", {}).get("content", "")
-                            # Remove colons and asterisks
-                            response_content = response_content.replace(':', '').replace('*', '')
-                            # Split into sentences
-                            sentence_endings = re.compile(r'[.?!]+')
-                            buffer = response_content
-                            while True:
-                                match = sentence_endings.search(buffer)
-                                if not match:
-                                    break
-                                end_index = match.end()
-                                sentence = buffer[:end_index].strip()
-                                buffer = buffer[end_index:].strip()
-                                if sentence:
-                                    tts_queue.put(sentence)
-                            # Handle leftover
-                            leftover = buffer.strip()
-                            if leftover:
-                                tts_queue.put(leftover)
-                        except Exception as e:
-                            logging.error(f"Error during non-stream inference: {e}")
-                            response_content = ""
-                else:
-                    logging.warning("Model inference is disabled. Skipping model inference.")
-                    response_content = "I'm currently unable to process your request."
-    
-                # Send back the response to the client via the response queue
-                with response_dict_lock:
-                    if request_id in response_dict:
-                        response_queue = response_dict.pop(request_id)
-                        response_queue.put(response_content)
-    
-                # **Removed: Update history within the worker thread**
-                # update_history(user_message, response_content)  # **Removed to prevent double entries**
-    
+                        logging.info("Ollama Worker: CPU usage <= 50%. Waiting for current inference to finish.")
+                        # Optionally, you can choose to wait or queue the new prompt
+                        # Here, we'll wait until the current inference finishes
+                        current_inference_process.join()
+                        logging.info("Ollama Worker: Previous inference completed.")
+                
+                # Start a new inference process for the new prompt
+                logging.info("Ollama Worker: Starting new inference process.")
+                current_inference_process = multiprocessing.Process(
+                    target=inference_process,
+                    args=(user_message, inference_queue)
+                )
+                current_inference_process.start()
+                logging.info(f"Ollama Worker: Inference process started with PID {current_inference_process.pid}.")
+                
+                # Optionally, you can wait for the process to finish or continue to listen for new prompts
+                # Here, we continue listening for new prompts
+                
             except Empty:
                 continue
             except Exception as e:
                 logging.error(f"Ollama Worker: Unexpected error: {e}")
-    
+
+    def inference_process(user_message, output_queue):
+        """
+        Function to handle inference in a separate process.
+        Sends sentences to the output_queue for TTS.
+        """
+        try:
+            payload = build_payload(user_message)
+            if CONFIG["stream"]:
+                # Streaming response
+                with requests.post(
+                    OLLAMA_CHAT_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    stream=True
+                ) as r:
+                    r.raise_for_status()
+                    buffer = ""
+                    sentence_endings = re.compile(r'[.?!]+')
+                    for line in r.iter_lines():
+                        if line:
+                            try:
+                                obj = json.loads(line.decode('utf-8'))
+                                msg = obj.get("message", {})
+                                content = msg.get("content", "")
+                                # Remove colons and asterisks
+                                content = content.replace(':', '').replace('*', '')
+                                done = obj.get("done", False)
+                                buffer += content
+                                # Split into sentences
+                                while True:
+                                    match = sentence_endings.search(buffer)
+                                    if not match:
+                                        break
+                                    end_index = match.end()
+                                    sentence = buffer[:end_index].strip()
+                                    buffer = buffer[end_index:].strip()
+                                    if sentence:
+                                        output_queue.put(sentence)
+                                if done:
+                                    if buffer:
+                                        output_queue.put(buffer.strip())
+                                    break
+                            except json.JSONDecodeError as e:
+                                logging.error(f"Inference Process: Invalid JSON received: {e}")
+                            except Exception as e:
+                                logging.error(f"Inference Process: Error processing stream: {e}")
+            else:
+                # Non-streaming response
+                r = requests.post(
+                    OLLAMA_CHAT_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                r.raise_for_status()
+                data = r.json()
+                response_content = data.get("message", {}).get("content", "")
+                # Remove colons and asterisks
+                response_content = response_content.replace(':', '').replace('*', '')
+                # Split into sentences
+                sentence_endings = re.compile(r'[.?!]+')
+                buffer = response_content
+                while True:
+                    match = sentence_endings.search(buffer)
+                    if not match:
+                        break
+                    end_index = match.end()
+                    sentence = buffer[:end_index].strip()
+                    buffer = buffer[end_index:].strip()
+                    if sentence:
+                        output_queue.put(sentence)
+                # Handle leftover
+                leftover = buffer.strip()
+                if leftover:
+                    output_queue.put(leftover)
+        except Exception as e:
+            logging.error(f"Inference Process: Unexpected error: {e}")
+        finally:
+            # Signal that inference is done
+            output_queue.put(None)
+
     def tts_worker():
         """
         Worker thread that processes sentences from the TTS queue.
@@ -506,7 +532,7 @@ else:
                 continue
             except Exception as e:
                 logging.error(f"TTS Worker: Error processing sentence: {e}")
-    
+
     def start_ollama_thread():
         """
         Start the Ollama worker thread.
@@ -514,7 +540,7 @@ else:
         ollama_thread = threading.Thread(target=ollama_worker, daemon=True, name="OllamaWorker")
         ollama_thread.start()
         logging.info("Ollama Worker: Started.")
-    
+
     def start_tts_thread():
         """
         Start the TTS worker thread.
@@ -522,7 +548,8 @@ else:
         tts_thread = threading.Thread(target=tts_worker, daemon=True, name="TTSWorker")
         tts_thread.start()
         logging.info("TTS Worker: Started.")
-    
+
+    # **CHANGED**: Added synthesize_and_play function to handle TTS requests
     def synthesize_and_play(sentence):
         """
         Send the sentence to the TTS engine.
@@ -557,7 +584,7 @@ else:
             logging.error(f"Connection error during TTS request: {ce}")
         except Exception as e:
             logging.error(f"Unexpected error during TTS: {e}")
-    
+
     def update_history(user_message, assistant_message):
         if not CONFIG["history"]:
             return
@@ -570,7 +597,7 @@ else:
             logging.info(f"History updated in '{CONFIG['history']}'.")
         except Exception as e:
             logging.warning(f"Could not write to history file {CONFIG['history']}: {e}")
-    
+
     #############################################
     # Step 10: Monitoring CPU Usage
     #############################################
@@ -584,13 +611,160 @@ else:
             cpu_percent = psutil.cpu_percent(interval=interval)
             logging.info(f"CPU Usage: {cpu_percent}%")
             time.sleep(interval)
-    
+
     #############################################
-    # Step 11: Server Handling without Threads  #
+    # Step 11: Receiver Thread for Incoming Messages #
     #############################################
     
-    HOST = CONFIG["host"]
-    PORT = CONFIG["port"]
+    def receiver_thread(host, port):
+        """
+        Dedicated thread to listen for incoming socket connections and receive messages asynchronously.
+        """
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server_socket.bind((host, port))
+            logging.info(f"Receiver Thread: Bound to {host}:{port}")
+        except Exception as e:
+            logging.error(f"Receiver Thread: Error binding to {host}:{port} - {e}. Using defaults: 0.0.0.0:64162")
+            host_d = '0.0.0.0'
+            port_d = 64162
+            try:
+                server_socket.bind((host_d, port_d))
+                logging.info(f"Receiver Thread: Server bound to {host_d}:{port_d}")
+            except Exception as e:
+                logging.error(f"Receiver Thread: Failed to bind to default host and port: {e}")
+                sys.exit(1)
+        
+        server_socket.listen(5)
+        logging.info(f"Receiver Thread: Listening for incoming connections on {host}:{port}...")
+        
+        while True:
+            try:
+                client_sock, addr = server_socket.accept()
+                logging.info(f"Receiver Thread: Accepted connection from {addr}")
+                # Start a new thread to handle the client
+                client_handler = threading.Thread(
+                    target=handle_client,
+                    args=(client_sock, addr),
+                    daemon=True,
+                    name=f"ClientHandler-{addr}"
+                )
+                client_handler.start()
+            except Exception as e:
+                logging.error(f"Receiver Thread: Error accepting connections: {e}")
+                break  # Exit the receiver thread
+    
+        server_socket.close()
+        logging.info("Receiver Thread: Server socket closed.")
+
+    def handle_client(client_sock, addr):
+        """
+        Handle individual client connections.
+        """
+        try:
+            data = client_sock.recv(65536)
+            if not data:
+                logging.info(f"ClientHandler: No data from {addr}, closing connection.")
+                client_sock.close()
+                return
+            user_message = data.decode('utf-8').strip()
+            if not user_message:
+                logging.info(f"ClientHandler: Empty prompt from {addr}, ignoring.")
+                client_sock.close()
+                return
+            logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
+
+            # Generate a unique request ID
+            with request_id_lock:
+                global request_id_counter
+                request_id_counter += 1
+                request_id = request_id_counter
+
+            # Create a response queue for this request
+            response_queue = Queue()
+            with response_dict_lock:
+                response_dict[request_id] = response_queue
+
+            # Enqueue the message to the Ollama worker
+            ollama_queue.put((request_id, user_message))
+
+            # Wait for the response from the Ollama worker
+            try:
+                response_content = response_queue.get(timeout=60)  # Wait up to 60 seconds
+            except Empty:
+                logging.error("ClientHandler: Timeout waiting for Ollama response.")
+                response_content = "I'm sorry, I couldn't process your request at this time."
+
+            # Send back the response to the client
+            try:
+                client_sock.sendall(response_content.encode('utf-8'))
+                logging.info(f"ClientHandler: Sent response to {addr}.")
+            except Exception as e:
+                logging.error(f"ClientHandler: Failed to send response to {addr}: {e}")
+
+            # **Update history only once in the main process**
+            update_history(user_message, response_content)
+
+        except Exception as e:
+            logging.error(f"ClientHandler: Unexpected error: {e}")
+        finally:
+            client_sock.close()
+            logging.info(f"ClientHandler: Connection with {addr} closed.")
+
+    # **CHANGED**: Added synthesize_and_play function to handle TTS requests
+    def synthesize_and_play(sentence):
+        """
+        Send the sentence to the TTS engine.
+        Playback is handled elsewhere.
+        """
+        sentence = sentence.strip()
+        if not sentence:
+            return
+        try:
+            payload = {"prompt": sentence}
+            logging.info(f"Sending TTS request with prompt: {sentence}")
+            with requests.post(CONFIG["tts_url"], json=payload, stream=True, timeout=10) as response:
+                if response.status_code != 200:
+                    logging.warning(f"TTS received status code {response.status_code}")
+                    try:
+                        error_msg = response.json().get('error', 'No error message provided.')
+                        logging.warning(f"TTS error: {error_msg}")
+                    except:
+                        logging.warning("No JSON error message provided for TTS.")
+                    return
+
+                # Forward the audio data to the TTS engine
+                # Assuming the TTS engine handles playback internally
+                for chunk in response.iter_content(chunk_size=4096):
+                    if chunk:
+                        # If needed, process or log the audio data here
+                        pass  # No action since playback is handled elsewhere
+            logging.info("TTS request completed successfully.")
+        except requests.exceptions.Timeout:
+            logging.error("TTS request timed out.")
+        except requests.exceptions.ConnectionError as ce:
+            logging.error(f"Connection error during TTS request: {ce}")
+        except Exception as e:
+            logging.error(f"Unexpected error during TTS: {e}")
+
+    #############################################
+    # Step 10: Monitoring CPU Usage
+    #############################################
+    
+    def monitor_cpu_usage(interval=5):
+        """
+        Monitor CPU usage at regular intervals and log it.
+        Runs in a separate daemon thread.
+        """
+        while True:
+            cpu_percent = psutil.cpu_percent(interval=interval)
+            logging.info(f"CPU Usage: {cpu_percent}%")
+            time.sleep(interval)
+
+    #############################################
+    # Step 11: Server Handling with Dedicated Receiver Thread #
+    #############################################
     
     def start_server():
         # Start TTS and Ollama worker threads
@@ -598,121 +772,51 @@ else:
         start_tts_thread()
         logging.info("Starting Ollama Worker...")
         start_ollama_thread()
-    
+
+        # Start Inference to TTS Handler thread
+        logging.info("Starting Inference to TTS Handler...")
+        # Already started earlier
+
         # Start CPU usage monitoring
         cpu_monitor_thread = threading.Thread(target=monitor_cpu_usage, daemon=True, name="CPUMonitor")
         cpu_monitor_thread.start()
         logging.info("CPU Usage Monitor: Started.")
-    
-        # Start the main server socket
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            server.bind((HOST, PORT))
-        except Exception as e:
-            logging.error(f"Error binding to {HOST}:{PORT} - {e}. Using defaults: 0.0.0.0:64162")
-            HOST_D = '0.0.0.0'
-            PORT_D = 64162
-            try:
-                server.bind((HOST_D, PORT_D))
-                logging.info(f"Server bound to {HOST_D}:{PORT_D}")
-            except Exception as e:
-                logging.error(f"Failed to bind to default host and port: {e}")
-                sys.exit(1)
-    
-        server.listen(5)
-        logging.info(f"Listening for incoming connections on {HOST}:{PORT}...")
-    
-        # Retrieve the actual model name to use
-        model_actual_name = CONFIG["model"]
-    
+
+        # Start the receiver thread
+        receiver = threading.Thread(target=receiver_thread, args=(CONFIG["host"], CONFIG["port"]), daemon=True, name="ReceiverThread")
+        receiver.start()
+        logging.info("Receiver Thread: Started.")
+
+        # Keep the main thread alive to allow daemon threads to run
         try:
             while True:
-                try:
-                    client_sock, addr = server.accept()
-                    logging.info(f"Accepted connection from {addr}")
-                    
-                    # Handle client connection sequentially
-                    data = client_sock.recv(65536)
-                    if not data:
-                        logging.info(f"No data from {addr}, closing connection.")
-                        client_sock.close()
-                        continue
-                    user_message = data.decode('utf-8').strip()
-                    if not user_message:
-                        logging.info(f"Empty prompt from {addr}, ignoring.")
-                        client_sock.close()
-                        continue
-                    logging.info(f"Received prompt from {addr}: {user_message}")
-    
-                    # Generate a unique request ID
-                    with request_id_lock:
-                        global request_id_counter
-                        request_id_counter += 1
-                        request_id = request_id_counter
-    
-                    # Create a response queue for this request
-                    response_queue = Queue()
-                    with response_dict_lock:
-                        response_dict[request_id] = response_queue
-    
-                    # Enqueue the message to the Ollama worker
-                    ollama_queue.put((request_id, user_message))
-    
-                    # Wait for the response from the Ollama worker
-                    try:
-                        response_content = response_queue.get(timeout=60)  # Wait up to 60 seconds
-                    except Empty:
-                        logging.error("Timeout waiting for Ollama response.")
-                        response_content = "I'm sorry, I couldn't process your request at this time."
-    
-                    # Send back the response to the client
-                    try:
-                        client_sock.sendall(response_content.encode('utf-8'))
-                        logging.info(f"Sent response to {addr}.")
-                    except Exception as e:
-                        logging.error(f"Failed to send response to {addr}: {e}")
-    
-                    # **Removed: Enqueuing sentences to tts_queue from the main thread**
-    
-                    # **Update history only once in the main process**
-                    update_history(user_message, response_content)
-    
-                    # Close the client socket
-                    client_sock.close()
-                    logging.info(f"Connection with {addr} closed.")
-    
-                except KeyboardInterrupt:
-                    logging.info("\nInterrupt received, shutting down server.")
-                    break
-                except Exception as e:
-                    logging.error(f"Error handling client connection: {e}")
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logging.info("\nInterrupt received, shutting down server.")
         finally:
-            # Stop accepting new connections
-            server.close()
-            logging.info("Server socket closed.")
-    
             # Stop worker threads
             logging.info("Stopping TTS Worker...")
             tts_queue.put(None)  # Signal TTS worker to exit
             logging.info("Stopping Ollama Worker...")
             ollama_queue.put((None, None))  # Signal Ollama worker to exit
-    
-            # Wait a moment to allow workers to shutdown
+            logging.info("Stopping Inference to TTS Handler...")
+            inference_queue.put(None)  # Signal inference to TTS handler to exit
+
+            # Allow some time for threads to shutdown
             time.sleep(2)
-    
+
             logging.info("Shutting down complete.")
-    
-    if __name__ == "__main__":
-        # Determine if running in offline mode
-        if CONFIG.get("offline_mode", False):
-            logging.info("Operating in offline mode.")
+
+if __name__ == "__main__":
+    # Determine if running in offline mode
+    if CONFIG.get("offline_mode", False):
+        logging.info("Operating in offline mode.")
+    else:
+        ONLINE_STATUS = is_connected()
+        if not ONLINE_STATUS:
+            logging.warning("No internet connection detected. Switching to offline mode.")
+            CONFIG["offline_mode"] = True
         else:
-            ONLINE_STATUS = is_connected()
-            if not ONLINE_STATUS:
-                logging.warning("No internet connection detected. Switching to offline mode.")
-                CONFIG["offline_mode"] = True
-            else:
-                CONFIG["offline_mode"] = False
-        
-        start_server()
+            CONFIG["offline_mode"] = False
+    
+    start_server()

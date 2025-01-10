@@ -58,7 +58,7 @@ def setup_venv(online=True):
 
     # Determine pip path based on OS
     pip_path = os.path.join(VENV_DIR, 'bin', 'pip') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'pip.exe')
-    
+
     if online:
         try:
             logging.info("Installing required packages...")
@@ -101,6 +101,7 @@ else:
         import psutil     # For CPU usage monitoring
     except ImportError as e:
         logging.error(f"Failed to import required modules: {e}")
+        logging.error("Ensure all required packages are installed in the virtual environment.")
         sys.exit(1)
 
     #############################################
@@ -113,7 +114,8 @@ else:
         format='[%(asctime)s] [%(threadName)s] [%(levelname)s] %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
-            # You can add FileHandler here to log to a file if needed
+            # Uncomment the following line to log to a file
+            # logging.FileHandler("server.log")
         ]
     )
     
@@ -291,7 +293,9 @@ else:
             logging.warning(f"Format file '{fmt}' not found. Ignoring format.")
             return None
     
-    history_messages = safe_load_json_file(CONFIG["history"], [])
+    # Use absolute path for history
+    history_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG["history"])
+    history_messages = safe_load_json_file(history_path, [])
     tools_data = safe_load_json_file(CONFIG["tools"], None)
     format_schema = load_format_schema(CONFIG["format"])
     
@@ -385,6 +389,9 @@ else:
     request_id_counter = 0
     request_id_lock = threading.Lock()
     
+    # Initialize a Lock for history updates to ensure thread safety
+    history_lock = threading.Lock()
+    
     # Function to handle inter-process communication from inference processes to TTS queue
     def inference_to_tts_handler():
         while True:
@@ -393,6 +400,9 @@ else:
                 if sentence == "__SHUTDOWN__":
                     logging.info("Inference to TTS Handler: Received shutdown signal.")
                     break  # Sentinel to stop the thread
+                # Append assistant sentence to history
+                update_history("assistant", sentence)
+                # Enqueue sentence to TTS queue
                 tts_queue.put(sentence)
                 logging.debug(f"Inference to TTS Handler: Enqueued sentence to TTS: {sentence}")
             except Exception as e:
@@ -606,18 +616,22 @@ else:
         except Exception as e:
             logging.error(f"Unexpected error during TTS: {e}")
 
-    def update_history(user_message, assistant_message):
-        if not CONFIG["history"]:
+    def update_history(role, content):
+        """
+        Append a single message to the chat history.
+        Only appends if the role is 'user' or 'assistant' and content is provided.
+        """
+        if not role or not content:
             return
-        current_history = safe_load_json_file(CONFIG["history"], [])
-        current_history.append({"role": "user", "content": user_message})
-        current_history.append({"role": "assistant", "content": assistant_message})
-        try:
-            with open(CONFIG["history"], 'w') as f:
-                json.dump(current_history, f, indent=2)
-            logging.info(f"History updated in '{CONFIG['history']}'.")
-        except Exception as e:
-            logging.warning(f"Could not write to history file {CONFIG['history']}: {e}")
+        with history_lock:
+            current_history = safe_load_json_file(history_path, [])
+            current_history.append({"role": role, "content": content})
+            try:
+                with open(history_path, 'w') as f:
+                    json.dump(current_history, f, indent=2)
+                logging.info(f"History updated in '{history_path}' with {role} message.")
+            except Exception as e:
+                logging.warning(f"Could not write to history file {history_path}: {e}")
 
     #############################################
     # Step 10: Monitoring CPU Usage
@@ -696,6 +710,9 @@ else:
                 return
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
 
+            # Append user message to history
+            update_history("user", user_message)
+
             # Generate a unique request ID
             with request_id_lock:
                 global request_id_counter
@@ -713,20 +730,22 @@ else:
             # Wait for the response from the Ollama worker
             try:
                 response_content = response_queue.get(timeout=60)  # Wait up to 60 seconds
+                # Send back the response to the client
+                try:
+                    client_sock.sendall(response_content.encode('utf-8'))
+                    logging.info(f"ClientHandler: Sent response to {addr}.")
+                except Exception as e:
+                    logging.error(f"ClientHandler: Failed to send response to {addr}: {e}")
             except Empty:
                 logging.error("ClientHandler: Timeout waiting for Ollama response.")
                 response_content = "I'm sorry, I couldn't process your request at this time."
-
-            # Send back the response to the client
-            try:
-                client_sock.sendall(response_content.encode('utf-8'))
-                logging.info(f"ClientHandler: Sent response to {addr}.")
-            except Exception as e:
-                logging.error(f"ClientHandler: Failed to send response to {addr}: {e}")
-
-            # Update history only once in the main process
-            update_history(user_message, response_content)
-
+                # Send back the placeholder to the client
+                try:
+                    client_sock.sendall(response_content.encode('utf-8'))
+                    logging.info(f"ClientHandler: Sent response to {addr}.")
+                except Exception as e:
+                    logging.error(f"ClientHandler: Failed to send response to {addr}: {e}")
+                # Do not append to history
         except Exception as e:
             logging.error(f"ClientHandler: Unexpected error: {e}")
         finally:
@@ -746,7 +765,7 @@ else:
 
         # Start Inference to TTS Handler thread
         # Already started earlier
-    
+
         # Start CPU usage monitoring
         cpu_monitor_thread = threading.Thread(target=monitor_cpu_usage, daemon=True, name="CPUMonitor")
         cpu_monitor_thread.start()

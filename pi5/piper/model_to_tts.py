@@ -12,7 +12,7 @@ import shutil
 import time
 import logging
 import psutil  # For CPU usage monitoring
-import multiprocessing  # Added multiprocessing for handling inference processes
+import multiprocessing  # For handling inference processes
 
 #############################################
 # Utility Functions
@@ -87,11 +87,8 @@ if not in_venv():
         logging.warning("No internet connection detected. Operating in offline mode.")
     # Setup VENV and install packages if online
     setup_venv(online=ONLINE)
-    # Relaunch the script within the VENV if online and venv was just set up
-    if ONLINE:
-        relaunch_in_venv()
-    else:
-        logging.warning("Cannot relaunch in virtual environment due to offline mode.")
+    # Always relaunch in venv, regardless of online/offline status
+    relaunch_in_venv()
 else:
     #############################################
     # Step 3: Imports after venv set up          #
@@ -380,7 +377,7 @@ else:
     # Initialize Queues for inter-thread and inter-process communication
     ollama_queue = Queue()
     tts_queue = Queue()
-    inference_queue = multiprocessing.Queue()  # Added multiprocessing.Queue for inference process output
+    inference_queue = multiprocessing.Queue()  # For inference process output
     
     # Dictionary to map request IDs to response queues
     response_dict = {}
@@ -388,7 +385,7 @@ else:
     request_id_counter = 0
     request_id_lock = threading.Lock()
     
-    # Added a function to handle inter-process communication from inference processes to TTS queue
+    # Function to handle inter-process communication from inference processes to TTS queue
     def inference_to_tts_handler():
         while True:
             try:

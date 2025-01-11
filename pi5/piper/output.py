@@ -17,7 +17,7 @@ RATE = 22050            # Ensure this matches the output format of your audio so
 CHANNELS = 1
 
 # Audio Processing Configuration
-VOLUME = 0.5  # Volume control factor (1.0 = original volume). Adjust as needed
+VOLUME = 0.2  # Volume control factor (1.0 = original volume). Adjust as needed
 
 # Maximum number of pip install attempts
 MAX_PIP_ATTEMPTS = 3

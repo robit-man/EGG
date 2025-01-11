@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=battery
+Comment=My battery
+Exec=/home/egg/UPS_HAT_D/battery.sh
+Icon=/home/egg/UPS_HAT_D/images/battery.1.png
+Terminal=false
+MultipleArgs=false
+Type=Application
+Categories=Application;Development;
+StartupNotify=true

@@ -165,6 +165,8 @@ For Camera Info, [Check out this page](https://www.raspberrypi.com/documentation
 
 For more information and support related to battery monitoring [visit the wiki here](https://www.waveshare.com/wiki/UPS_HAT_(D))
 
+Note that we updated the scripts for the latest python 3.12 expected syntax in [our version](https://github.com/robit-man/EGG/tree/main/pi5/UPS_HAT_D)
+
 If your Bluetooth speaker connects but fails to act as a sound device, here are some steps to troubleshoot:
 
 1. **Install Bluetooth Utilities:** Ensure you have the necessary Bluetooth and audio packages installed. Run:

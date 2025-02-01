@@ -3,12 +3,12 @@
 
 ## Parts List
 - [JETSON AGX ORIN](https://www.amazon.com/NVIDIA-Jetson-Orin-64GB-Developer/dp/B0BYGB3WV4/) $1,999
-- [24V LI-ION BATTERY](https://www.amazon.com/SSCYHT-Rechargeable-Replacement-Wheelchair-24v12-5ah/dp/B0DDGRSYZ6) $147 (Must be 140mm x 120mm x 68mm)
+- [24V LI-ION BATTERY](https://www.amazon.com/Battery-Waterproof-Electric-Motorcycles-Replacing/dp/B0DT71S854) $147 (Must be 140mm x 120mm x 68mm)
 - [Audio Amplifier](https://www.amazon.com/Bluetooth-Amplifier-DAMGOO-Technique-Password/dp/B07XG33WPN) $21.98
 - [NileCAM81 4k Camera](https://www.e-consystems.com/camera-modules/ar0821-4k-hdr-gmsl2-camera-module.asp) (Contact to buy 6 at once) $389 / Camera
 - [NileCAM81_CUOAGX Carrier Board](https://www.e-consystems.com/nvidia-cameras/jetson-agx-orin-cameras/ar0821-4k-hdr-gmsl2-camera.asp) $300 / Connector Board
 - [6 Inch Farka Z Female to Female](https://www.amazon.com/gp/product/B094XXCY3M)
-- [120W DC 24 to DC 12 Volt Buck](https://www.amazon.com/dp/B097SWGRRJ)
+- [120W DC 24 to DC 12 Volt Buck](https://www.amazon.com/MGGi-Converter-Waterproof-Transformer-Regulator/dp/B09T9PTH4M)
 - [DisplayPort 90 Degree Converter](https://www.amazon.com/dp/B0CL4R649J)
 - [Dummy Display Port](https://www.amazon.com/Furjosta-DisplayPort-Headless-Emulator-1920x1080/dp/B0BTP19LPG)
 - [3.5mm Audio Cable](https://www.amazon.com/dp/B08MDPW6R2)

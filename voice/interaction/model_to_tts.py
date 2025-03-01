@@ -69,7 +69,6 @@ def beep(freq=120, duration=0.05):
         # If 'play' is not available or any other error occurs, just ignore.
         pass
 
-
 #############################################
 # Step 3: Config Defaults & File
 #############################################
@@ -80,7 +79,7 @@ DEFAULT_CONFIG = {
     "format": None,
     "system": None,
     "raw": False,
-    "history": None,
+    "history": "chat.json",
     "images": [],
     "tools": None,
     "options": {},
@@ -315,7 +314,11 @@ def pull_model(model_name):
         sys.exit(1)
 
 def ensure_ollama_and_model():
-    """Ensure that Ollama is installed and the specified model is available."""
+    """Ensure that Ollama is installed and the specified model is available.
+    
+    -- UPDATED LOGIC --
+    If the model is found in Ollama's tags, we bypass the local installation check and pull.
+    """
     if not check_ollama_installed():
         install_ollama()
         # After installation, ensure the 'ollama' command is available
@@ -333,10 +336,9 @@ def ensure_ollama_and_model():
         print(f"Model '{model_name}' does not exist in Ollama's available tags. Cannot proceed.")
         sys.exit(1)
 
-    if not check_model_installed(model_actual_name):
-        pull_model(model_actual_name)
-    else:
-        print(f"Model '{model_actual_name}' is already installed.")
+    # Bypass local installation check/pull if model is found in tags.
+    print(f"Model '{model_actual_name}' found in Ollama's tags. Bypassing pull.")
+    CONFIG["model"] = model_actual_name
 
 # Ensure we have Ollama and the selected model
 ensure_ollama_and_model()
@@ -544,7 +546,6 @@ def stop_wait_beeps():
     if wait_beeps_thread and wait_beeps_thread.is_alive():
         wait_beeps_thread.join()
     wait_beeps_thread = None
-
 
 #############################################
 # Step 8: Streaming the Output

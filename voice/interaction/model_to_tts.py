@@ -19,8 +19,10 @@ VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
 NEEDED_PACKAGES = ["requests", "num2words"]
 
 def in_venv():
-    return (hasattr(sys, 'real_prefix') or
-            (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
+    return (
+        hasattr(sys, 'real_prefix')
+        or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
+    )
 
 def setup_venv():
     # Create venv if it doesn't exist
@@ -48,12 +50,33 @@ import requests
 from num2words import num2words
 
 #############################################
+# Additional: Short Tone/Beep Utilities      #
+#############################################
+
+def beep(freq=120, duration=0.05):
+    """
+    Play a short beep tone (if 'play' is installed) at the specified frequency (Hz)
+    and duration (seconds). Captures output to avoid clutter.
+    """
+    try:
+        subprocess.run(
+            ["play", "-nq", "-t", "alsa", "synth", str(duration), "sine", str(freq)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+    except Exception:
+        # If 'play' is not available or any other error occurs, just ignore.
+        pass
+
+
+#############################################
 # Step 3: Config Defaults & File
 #############################################
 
 DEFAULT_CONFIG = {
     "model": "llama3.2-vision",
-    "stream": False,
+    "stream": True,
     "format": None,
     "system": None,
     "raw": False,
@@ -238,8 +261,7 @@ def get_available_models():
             print("\nAvailable Models:")
             for model in available_models:
                 print(f" - {model.get('name')}")
-            # Extract model names for further processing
-            model_names = [model.get('name') for model in available_models if 'name' in model]
+            model_names = [m.get('name') for m in available_models if 'name' in m]
             return model_names
         else:
             print(f"Failed to retrieve models from Ollama: Status code {response.status_code}")
@@ -253,16 +275,13 @@ def check_model_exists_in_tags(model_name):
     Returns the actual model name (with suffix) if found, else None.
     """
     available_models = get_available_models()
-    # Direct match
     if model_name in available_models:
         print(f"\nModel '{model_name}' is available in Ollama's tags.")
         return model_name
-    # Check for ':latest' suffix
     model_latest = f"{model_name}:latest"
     if model_latest in available_models:
         print(f"\nModel '{model_latest}' is available in Ollama's tags.")
         return model_latest
-    # Otherwise, not found
     print(f"\nModel '{model_name}' does not exist in Ollama's available tags.")
     return None
 
@@ -273,12 +292,9 @@ def check_model_installed(model_name):
     try:
         result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
         models = result.stdout.splitlines()
-        # Normalize model names by stripping whitespace
-        models = [model.strip() for model in models]
-        # Check for exact match
+        models = [m.strip() for m in models]
         if model_name in models:
             return True
-        # If model_name ends with ':latest', check without the suffix
         if model_name.endswith(':latest'):
             base_model = model_name.rsplit(':', 1)[0]
             if base_model in models:
@@ -309,23 +325,20 @@ def ensure_ollama_and_model():
     else:
         print("Ollama is already installed.")
 
-    # Wait for Ollama service to be ready by checking GET /api/tags
     wait_for_ollama()
 
-    # Check if the model exists in tags
     model_name = CONFIG["model"]
     model_actual_name = check_model_exists_in_tags(model_name)
     if not model_actual_name:
         print(f"Model '{model_name}' does not exist in Ollama's available tags. Cannot proceed.")
         sys.exit(1)
 
-    # Check if the model is installed
     if not check_model_installed(model_actual_name):
         pull_model(model_actual_name)
     else:
         print(f"Model '{model_actual_name}' is already installed.")
 
-# Call the function to ensure Ollama and the model are installed
+# Ensure we have Ollama and the selected model
 ensure_ollama_and_model()
 
 #############################################
@@ -387,9 +400,15 @@ tts_thread = None
 tts_thread_lock = threading.Lock()
 
 def synthesize_and_play(prompt):
+    # Filter out asterisks (*) and hashtags (#) just before TTS:
+    prompt = re.sub(r'[\*#]', '', prompt)
     prompt = prompt.strip()
     if not prompt:
         return
+
+    # Start background beep (waiting) until we see first raw data chunk
+    start_wait_beeps()
+
     try:
         payload = {"prompt": prompt}
         with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
@@ -400,13 +419,17 @@ def synthesize_and_play(prompt):
                     print(f"TTS error: {error_msg}")
                 except:
                     print("No JSON error message provided for TTS.")
+                stop_wait_beeps()  # Stop beep if TTS fails
                 return
 
-            # Play audio using aplay
+            # As soon as we have a valid response, we'll read the first chunk
+            # to know TTS data is actually incoming; stop beeps right away
             aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
                                      stdin=subprocess.PIPE)
             try:
                 for chunk in response.iter_content(chunk_size=4096):
+                    # Stop beep the moment we detect TTS data
+                    stop_wait_beeps()
                     if tts_stop_flag:
                         break
                     if chunk:
@@ -414,11 +437,14 @@ def synthesize_and_play(prompt):
             except BrokenPipeError:
                 print("Warning: aplay subprocess terminated unexpectedly.")
             finally:
-                # Close aplay even if stopped early
                 aplay.stdin.close()
                 aplay.wait()
     except Exception as e:
         print(f"Unexpected error during TTS: {e}")
+        stop_wait_beeps()
+    else:
+        # If everything finishes gracefully, we ensure beeps are off
+        stop_wait_beeps()
 
 def tts_worker():
     global tts_stop_flag
@@ -426,22 +452,18 @@ def tts_worker():
         try:
             sentence = tts_queue.get(timeout=0.1)
         except:
-            # No item, just continue if not stopped
             if tts_stop_flag:
                 break
             continue
 
         if tts_stop_flag:
             break
-
-        # Play this sentence
         synthesize_and_play(sentence)
 
 def start_tts_thread():
     global tts_queue, tts_thread, tts_stop_flag
     with tts_thread_lock:
         if tts_thread and tts_thread.is_alive():
-            # Already running
             return
         tts_stop_flag = False
         tts_queue = Queue()
@@ -453,7 +475,6 @@ def stop_tts_thread():
     with tts_thread_lock:
         if tts_thread and tts_thread.is_alive():
             tts_stop_flag = True
-            # Flush queue
             with tts_queue.mutex:
                 tts_queue.queue.clear()
             tts_thread.join()
@@ -464,6 +485,66 @@ def stop_tts_thread():
 def enqueue_sentence_for_tts(sentence):
     if tts_queue and not tts_stop_flag:
         tts_queue.put(sentence)
+
+#############################################
+# Step 7.1: Non-blocking beep while waiting #
+#############################################
+
+wait_beeps_thread = None
+wait_beeps_flag = False
+wait_beeps_lock = threading.Lock()
+
+def wait_beeps_worker():
+    """
+    While wait_beeps_flag is True, play three short 50ms beeps (80Hz)
+    spaced 100ms apart, then wait the remainder of ~1s, repeatedly.
+    This runs in the background and does not block inference or TTS streaming.
+    """
+    while True:
+        with wait_beeps_lock:
+            if not wait_beeps_flag:
+                break
+
+        # First beep
+        beep(80, 0.05)
+        with wait_beeps_lock:
+            if not wait_beeps_flag:
+                break
+        time.sleep(0.1)
+
+        # Second beep
+        beep(80, 0.05)
+        with wait_beeps_lock:
+            if not wait_beeps_flag:
+                break
+        time.sleep(0.1)
+
+        # Third beep
+        beep(80, 0.05)
+        with wait_beeps_lock:
+            if not wait_beeps_flag:
+                break
+
+        # Wait the remainder so that the total loop is ~1 second
+        time.sleep(0.65)
+
+def start_wait_beeps():
+    global wait_beeps_thread, wait_beeps_flag
+    with wait_beeps_lock:
+        if wait_beeps_thread and wait_beeps_thread.is_alive():
+            return  # Already running
+        wait_beeps_flag = True
+    wait_beeps_thread = threading.Thread(target=wait_beeps_worker, daemon=True)
+    wait_beeps_thread.start()
+
+def stop_wait_beeps():
+    global wait_beeps_thread, wait_beeps_flag
+    with wait_beeps_lock:
+        wait_beeps_flag = False
+    if wait_beeps_thread and wait_beeps_thread.is_alive():
+        wait_beeps_thread.join()
+    wait_beeps_thread = None
+
 
 #############################################
 # Step 8: Streaming the Output
@@ -520,8 +601,11 @@ def process_text(text):
         sentences = []
         for content, done in chat_completion_stream(processed_text):
             if stop_flag:
-                # If stopped mid-way, just return what we have
                 break
+
+            # Print each chunk immediately to console
+            print(content, end='', flush=True)
+
             buffer += content
             while True:
                 if stop_flag:
@@ -533,25 +617,24 @@ def process_text(text):
                 sentence = buffer[:end_index].strip()
                 buffer = buffer[end_index:].strip()
                 if sentence and not stop_flag:
-                    # Enqueue sentence for TTS immediately
                     sentences.append(sentence)
                     enqueue_sentence_for_tts(sentence)
             if done or stop_flag:
                 break
 
+        print()  # new line after stream ends
+
         if not stop_flag:
-            # If not stopped, handle leftover
             leftover = buffer.strip()
             if leftover:
                 sentences.append(leftover)
                 enqueue_sentence_for_tts(leftover)
             return " ".join(sentences)
         else:
-            # Stopped early
             return " ".join(sentences)
     else:
-        # Non-stream mode
         result = chat_completion_nonstream(processed_text)
+        print(result)  # Print once if not streaming
         sentences = []
         buffer = result
         sentence_endings = re.compile(r'[.?!]+')
@@ -606,27 +689,37 @@ def inference_thread(user_message, result_holder, model_actual_name):
 def new_request(user_message, model_actual_name):
     global stop_flag, current_thread
 
+    # Beep to indicate a new request is starting
+    beep(120, 0.05)
+
     with inference_lock:
         # Cancel ongoing inference if any
         if current_thread and current_thread.is_alive():
             print("Interrupting current inference...")
+            beep(80, 0.05)
             stop_flag = True
             current_thread.join()
             stop_flag = False
 
         # Cancel ongoing TTS
         print("Stopping TTS thread...")
+        beep(80, 0.05)
         stop_tts_thread()
+
         # Restart TTS thread (empty queue)
         print("Starting new TTS thread...")
+        beep(120, 0.05)
         start_tts_thread()
 
         # Start new inference thread
         result_holder = []
-        current_thread = threading.Thread(target=inference_thread, args=(user_message, result_holder, model_actual_name))
+        current_thread = threading.Thread(
+            target=inference_thread,
+            args=(user_message, result_holder, model_actual_name)
+        )
         current_thread.start()
 
-    # Wait for inference to finish
+    # We do NOT block here with sleeps. The script will proceed once inference finishes:
     current_thread.join()
 
     result = result_holder[0] if result_holder else ""
@@ -646,6 +739,7 @@ client_threads_lock = threading.Lock()
 def handle_client_connection(client_socket, address, model_actual_name):
     global stop_flag, current_thread
     print(f"\nAccepted connection from {address}")
+    beep(120, 0.05)  # Short beep to signal new connection
     try:
         data = client_socket.recv(65536)
         if not data:
@@ -656,6 +750,7 @@ def handle_client_connection(client_socket, address, model_actual_name):
             print(f"Empty prompt from {address}, ignoring.")
             return
         print(f"Received prompt from {address}: {user_message}")
+        beep(120, 0.05)
 
         result = new_request(user_message, model_actual_name)
         client_socket.sendall(result.encode('utf-8'))
@@ -695,7 +790,10 @@ def start_server():
         while True:
             try:
                 client_sock, addr = server.accept()
-                client_thread = threading.Thread(target=handle_client_connection, args=(client_sock, addr, model_actual_name))
+                client_thread = threading.Thread(
+                    target=handle_client_connection,
+                    args=(client_sock, addr, model_actual_name)
+                )
                 client_thread.start()
                 with client_threads_lock:
                     client_threads.append(client_thread)

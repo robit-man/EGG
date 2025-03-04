@@ -10,18 +10,21 @@ import threading
 from queue import Queue
 import shutil
 import time
+import sqlite3
+import pickle
+import numpy as np
+from datetime import datetime
 
 #############################################
 # Step 1: Ensure we're running inside a venv #
 #############################################
 
 VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-NEEDED_PACKAGES = ["requests", "num2words"]
+NEEDED_PACKAGES = ["requests", "num2words", "ollama"]
 
 def in_venv():
     return (
-        hasattr(sys, 'real_prefix')
-        or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
+        hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
     )
 
 def setup_venv():
@@ -29,7 +32,6 @@ def setup_venv():
     if not os.path.isdir(VENV_DIR):
         print("Creating virtual environment...")
         subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
-
     pip_path = os.path.join(VENV_DIR, 'bin', 'pip')
     subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
 
@@ -48,6 +50,7 @@ if not in_venv():
 
 import requests
 from num2words import num2words
+from ollama import embed  # <--- For memory embedding
 
 #############################################
 # Additional: Short Tone/Beep Utilities      #
@@ -86,7 +89,8 @@ DEFAULT_CONFIG = {
     "host": "0.0.0.0",
     "port": 64162,
     "tts_url": "http://localhost:61637/synthesize",
-    "ollama_url": "http://localhost:11434/api/chat"
+    "ollama_url": "http://localhost:11434/api/chat",
+    "database_path": "embeddings.db"  # <--- For storing memory embeddings
 }
 CONFIG_PATH = "config.json"
 
@@ -158,6 +162,7 @@ def merge_config_and_args(config, args):
                 k, v = opt.split('=', 1)
                 k = k.strip()
                 v = v.strip()
+                # Attempt to convert numeric
                 if v.isdigit():
                     v = int(v)
                 else:
@@ -211,137 +216,123 @@ history_messages = safe_load_json_file(CONFIG["history"], [])
 tools_data = safe_load_json_file(CONFIG["tools"], None)
 format_schema = load_format_schema(CONFIG["format"])
 
+# Filter out invalid items from history
+if not isinstance(history_messages, list):
+    history_messages = []
+else:
+    history_messages = [
+        m for m in history_messages
+        if isinstance(m, dict) and "role" in m and "content" in m
+    ]
+
 #############################################
-# Step 5.1: Ensure Ollama and Model are Installed #
+# Step 5.1: Database for Memory Embeddings
 #############################################
 
-def check_ollama_installed():
-    """Check if Ollama is installed by verifying if the 'ollama' command is available."""
-    ollama_path = shutil.which('ollama')
-    return ollama_path is not None
+DB_PATH = CONFIG.get("database_path", "embeddings.db")
+import threading
 
-def install_ollama():
-    """Install Ollama using the official installation script for Linux."""
-    print("Ollama not found. Attempting to install using the official installation script...")
-    try:
-        # The installation script might require interactive shell; using shell=True to handle the pipe
-        subprocess.check_call('curl -fsSL https://ollama.com/install.sh | sh', shell=True, executable='/bin/bash')
-        print("Ollama installation initiated.")
-    except subprocess.CalledProcessError as e:
-        print(f"Error installing Ollama: {e}")
-        sys.exit(1)
+def initialize_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT,
+            embedding BLOB,
+            timestamp TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+    print(f"[Database] Initialized at {DB_PATH}")
 
-def wait_for_ollama():
-    """Wait until Ollama service is up and running by checking GET /api/tags."""
-    ollama_tags_url = "http://localhost:11434/api/tags"
-    max_retries = 10
-    for attempt in range(max_retries):
+db_lock = threading.Lock()
+
+def generate_embedding(text):
+    """
+    Uses the 'nomic-embed-text' model to embed 'text'.
+    Returns a Python list of floats, or None if fails.
+    """
+    with db_lock:
         try:
-            response = requests.get(ollama_tags_url)
-            if response.status_code == 200:
-                print("Ollama service is up and running.")
-                return
-        except requests.exceptions.RequestException:
-            pass
-        print(f"Waiting for Ollama service to start... ({attempt + 1}/{max_retries})")
-        time.sleep(2)
-    print("Ollama service did not start in time. Please check the Ollama installation.")
-    sys.exit(1)
+            resp = embed(model='nomic-embed-text', input=text)
+        except Exception as e:
+            print(f"Memory embed call failed for '{text}': {e}")
+            return None
 
-def get_available_models():
-    """Retrieve the list of available models from Ollama via GET /api/tags."""
-    ollama_tags_url = "http://localhost:11434/api/tags"
-    try:
-        response = requests.get(ollama_tags_url)
-        if response.status_code == 200:
-            data = response.json()
-            # Assuming the response has a 'models' field which is a list of model dictionaries
-            available_models = data.get('models', [])
-            print("\nAvailable Models:")
-            for model in available_models:
-                print(f" - {model.get('name')}")
-            model_names = [m.get('name') for m in available_models if 'name' in m]
-            return model_names
-        else:
-            print(f"Failed to retrieve models from Ollama: Status code {response.status_code}")
-            return []
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching models from Ollama: {e}")
+        if not isinstance(resp, dict):
+            print("Memory embed returned non-dict:", resp)
+            return None
+        embeddings = resp.get("embeddings")
+        if not embeddings or not isinstance(embeddings, list):
+            print("Empty or invalid embeddings array from 'nomic-embed-text':", resp)
+            return None
+
+        # If embeddings[0] is itself a list of floats, we use that
+        # Otherwise assume embeddings is a single vector
+        if isinstance(embeddings[0], list):
+            return embeddings[0]
+        return embeddings
+
+import pickle
+import numpy as np
+
+def store_memory(text):
+    """
+    Generate embedding for 'text' and store in DB if not empty.
+    """
+    emb = generate_embedding(text)
+    if not emb or len(emb)==0:
+        print("No embedding to store for:", text)
+        return
+    blob=pickle.dumps(emb)
+    with db_lock:
+        conn=sqlite3.connect(DB_PATH)
+        c=conn.cursor()
+        c.execute("INSERT INTO embeddings (text,embedding,timestamp) VALUES (?,?,?)",
+                  (text, blob, datetime.utcnow().isoformat()))
+        conn.commit()
+        conn.close()
+    print("[Memory] Stored embedding for:", text)
+
+def get_memory_matches(query_text, top_k=3):
+    """
+    Embed 'query_text', retrieve top K similar from DB.
+    Return a list of textual matches.
+    """
+    q_emb = generate_embedding(query_text)
+    if not q_emb:
         return []
+    q_arr = np.array(q_emb)
 
-def check_model_exists_in_tags(model_name):
-    """Check if the specified model exists in Ollama's available models.
-    Returns the actual model name (with suffix) if found, else None.
-    """
-    available_models = get_available_models()
-    if model_name in available_models:
-        print(f"\nModel '{model_name}' is available in Ollama's tags.")
-        return model_name
-    model_latest = f"{model_name}:latest"
-    if model_latest in available_models:
-        print(f"\nModel '{model_latest}' is available in Ollama's tags.")
-        return model_latest
-    print(f"\nModel '{model_name}' does not exist in Ollama's available tags.")
-    return None
+    with db_lock:
+        conn=sqlite3.connect(DB_PATH)
+        c=conn.cursor()
+        c.execute("SELECT text,embedding,timestamp FROM embeddings")
+        rows=c.fetchall()
+        conn.close()
 
-def check_model_installed(model_name):
-    """Check if the specified model is already installed.
-    Returns True if installed, False otherwise.
-    """
-    try:
-        result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
-        models = result.stdout.splitlines()
-        models = [m.strip() for m in models]
-        if model_name in models:
-            return True
-        if model_name.endswith(':latest'):
-            base_model = model_name.rsplit(':', 1)[0]
-            if base_model in models:
-                return True
-        return False
-    except subprocess.CalledProcessError as e:
-        print(f"Error checking installed models: {e}")
-        sys.exit(1)
+    results=[]
+    for t, eblob, ts in rows:
+        try:
+            arr=pickle.loads(eblob)
+        except:
+            continue
+        if not arr:
+            continue
+        arr_np=np.array(arr)
+        denom = np.linalg.norm(q_arr)*np.linalg.norm(arr_np)
+        if denom==0:
+            sim=0.0
+        else:
+            sim = float(np.dot(q_arr, arr_np)/denom)
+        results.append((t, sim))
 
-def pull_model(model_name):
-    """Pull the specified model using Ollama."""
-    print(f"\nModel '{model_name}' not found. Pulling the model...")
-    try:
-        subprocess.check_call(['ollama', 'pull', model_name])
-        print(f"Model '{model_name}' has been successfully pulled.")
-    except subprocess.CalledProcessError as e:
-        print(f"Error pulling model '{model_name}': {e}")
-        sys.exit(1)
-
-def ensure_ollama_and_model():
-    """Ensure that Ollama is installed and the specified model is available.
-    
-    -- UPDATED LOGIC --
-    If the model is found in Ollama's tags, we bypass the local installation check and pull.
-    """
-    if not check_ollama_installed():
-        install_ollama()
-        # After installation, ensure the 'ollama' command is available
-        if not check_ollama_installed():
-            print("Ollama installation failed or 'ollama' command is not in PATH.")
-            sys.exit(1)
-    else:
-        print("Ollama is already installed.")
-
-    wait_for_ollama()
-
-    model_name = CONFIG["model"]
-    model_actual_name = check_model_exists_in_tags(model_name)
-    if not model_actual_name:
-        print(f"Model '{model_name}' does not exist in Ollama's available tags. Cannot proceed.")
-        sys.exit(1)
-
-    # Bypass local installation check/pull if model is found in tags.
-    print(f"Model '{model_actual_name}' found in Ollama's tags. Bypassing pull.")
-    CONFIG["model"] = model_actual_name
-
-# Ensure we have Ollama and the selected model
-ensure_ollama_and_model()
+    results.sort(key=lambda x: x[1], reverse=True)
+    top=results[:top_k]
+    matches=[x[0] for x in top]
+    return matches
 
 #############################################
 # Step 6: Ollama chat interaction
@@ -363,30 +354,46 @@ def convert_numbers_to_words(text):
     return re.sub(r'\b\d+\b', replace_num, text)
 
 def build_payload(user_message):
-    messages = []
+    """
+    Build the messages array with:
+    1) system message (if any)
+    2) existing history
+    3) memory retrieval (top 3)
+    4) user message
+    """
+    messages=[]
+    # Add system if present
     if CONFIG["system"]:
-        messages.append({"role": "system", "content": CONFIG["system"]})
-    messages.extend(history_messages)
-    messages.append({"role": "user", "content": user_message})
+        messages.append({"role":"system","content":CONFIG["system"]})
 
-    payload = {
+    # Add prior history
+    messages.extend(history_messages)
+
+    # memory retrieval
+    mems = get_memory_matches(user_message, top_k=3)
+    if mems:
+        content_str = "\n".join(mems)
+        messages.append({"role":"system","content":"Relevant memories:\n"+content_str})
+
+    # user last
+    messages.append({"role":"user","content":user_message})
+
+    payload={
         "model": CONFIG["model"],
         "messages": messages,
         "stream": CONFIG["stream"]
     }
-
     if format_schema:
-        payload["format"] = format_schema
+        payload["format"]=format_schema
     if CONFIG["raw"]:
-        payload["raw"] = True
+        payload["raw"]=True
     if CONFIG["images"]:
-        if payload["messages"] and payload["messages"][-1]["role"] == "user":
-            payload["messages"][-1]["images"] = CONFIG["images"]
+        if payload["messages"] and payload["messages"][-1]["role"]=="user":
+            payload["messages"][-1]["images"]=CONFIG["images"]
     if tools_data:
-        payload["tools"] = tools_data
+        payload["tools"]=tools_data
     if CONFIG["options"]:
-        payload["options"] = CONFIG["options"]
-
+        payload["options"]=CONFIG["options"]
     return payload
 
 stop_flag = False
@@ -402,424 +409,357 @@ tts_thread = None
 tts_thread_lock = threading.Lock()
 
 def synthesize_and_play(prompt):
-    # Filter out asterisks (*) and hashtags (#) just before TTS:
-    prompt = re.sub(r'[\*#]', '', prompt)
-    prompt = prompt.strip()
+    # Filter out asterisks (*) and hashtags (#):
+    prompt = re.sub(r'[\*#]', '', prompt).strip()
     if not prompt:
         return
-
-    # Start background beep (waiting) until we see first raw data chunk
     start_wait_beeps()
-
     try:
-        payload = {"prompt": prompt}
-        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
-            if response.status_code != 200:
-                print(f"Warning: TTS received status code {response.status_code}")
-                try:
-                    error_msg = response.json().get('error', 'No error message provided.')
-                    print(f"TTS error: {error_msg}")
-                except:
-                    print("No JSON error message provided for TTS.")
-                stop_wait_beeps()  # Stop beep if TTS fails
+        payload={"prompt":prompt}
+        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as r:
+            if r.status_code!=200:
+                print(f"Warning: TTS code {r.status_code}")
+                stop_wait_beeps()
                 return
-
-            # As soon as we have a valid response, we'll read the first chunk
-            # to know TTS data is actually incoming; stop beeps right away
-            aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
-                                     stdin=subprocess.PIPE)
+            aplay=subprocess.Popen(['aplay','-r','22050','-f','S16_LE','-t','raw'],stdin=subprocess.PIPE)
             try:
-                for chunk in response.iter_content(chunk_size=4096):
-                    # Stop beep the moment we detect TTS data
+                for chunk in r.iter_content(chunk_size=4096):
                     stop_wait_beeps()
                     if tts_stop_flag:
                         break
-                    if chunk:
-                        aplay.stdin.write(chunk)
+                    aplay.stdin.write(chunk)
             except BrokenPipeError:
-                print("Warning: aplay subprocess terminated unexpectedly.")
+                print("Warning: aplay ended.")
             finally:
                 aplay.stdin.close()
                 aplay.wait()
     except Exception as e:
-        print(f"Unexpected error during TTS: {e}")
+        print("TTS error:", e)
         stop_wait_beeps()
     else:
-        # If everything finishes gracefully, we ensure beeps are off
         stop_wait_beeps()
 
 def tts_worker():
     global tts_stop_flag
     while not tts_stop_flag:
         try:
-            sentence = tts_queue.get(timeout=0.1)
+            line=tts_queue.get(timeout=0.1)
         except:
             if tts_stop_flag:
                 break
             continue
-
         if tts_stop_flag:
             break
-        synthesize_and_play(sentence)
+        synthesize_and_play(line)
 
 def start_tts_thread():
     global tts_queue, tts_thread, tts_stop_flag
     with tts_thread_lock:
         if tts_thread and tts_thread.is_alive():
             return
-        tts_stop_flag = False
-        tts_queue = Queue()
-        tts_thread = threading.Thread(target=tts_worker, daemon=True)
+        tts_stop_flag=False
+        tts_queue=Queue()
+        tts_thread=threading.Thread(target=tts_worker, daemon=True)
         tts_thread.start()
 
 def stop_tts_thread():
     global tts_stop_flag, tts_thread, tts_queue
     with tts_thread_lock:
         if tts_thread and tts_thread.is_alive():
-            tts_stop_flag = True
+            tts_stop_flag=True
             with tts_queue.mutex:
                 tts_queue.queue.clear()
             tts_thread.join()
-        tts_stop_flag = False
-        tts_queue = None
-        tts_thread = None
+        tts_stop_flag=False
+        tts_queue=None
+        tts_thread=None
 
 def enqueue_sentence_for_tts(sentence):
     if tts_queue and not tts_stop_flag:
         tts_queue.put(sentence)
 
-#############################################
-# Step 7.1: Non-blocking beep while waiting #
-#############################################
-
-wait_beeps_thread = None
-wait_beeps_flag = False
-wait_beeps_lock = threading.Lock()
+wait_beeps_thread=None
+wait_beeps_flag=False
+wait_beeps_lock=threading.Lock()
 
 def wait_beeps_worker():
-    """
-    While wait_beeps_flag is True, play three short 50ms beeps (80Hz)
-    spaced 100ms apart, then wait the remainder of ~1s, repeatedly.
-    This runs in the background and does not block inference or TTS streaming.
-    """
     while True:
         with wait_beeps_lock:
             if not wait_beeps_flag:
                 break
-
-        # First beep
-        beep(80, 0.05)
+        beep(80,0.05)
         with wait_beeps_lock:
             if not wait_beeps_flag:
                 break
         time.sleep(0.1)
-
-        # Second beep
-        beep(80, 0.05)
+        beep(80,0.05)
         with wait_beeps_lock:
             if not wait_beeps_flag:
                 break
         time.sleep(0.1)
-
-        # Third beep
-        beep(80, 0.05)
+        beep(80,0.05)
         with wait_beeps_lock:
             if not wait_beeps_flag:
                 break
-
-        # Wait the remainder so that the total loop is ~1 second
         time.sleep(0.65)
 
 def start_wait_beeps():
     global wait_beeps_thread, wait_beeps_flag
     with wait_beeps_lock:
         if wait_beeps_thread and wait_beeps_thread.is_alive():
-            return  # Already running
-        wait_beeps_flag = True
-    wait_beeps_thread = threading.Thread(target=wait_beeps_worker, daemon=True)
+            return
+        wait_beeps_flag=True
+    wait_beeps_thread=threading.Thread(target=wait_beeps_worker, daemon=True)
     wait_beeps_thread.start()
 
 def stop_wait_beeps():
     global wait_beeps_thread, wait_beeps_flag
     with wait_beeps_lock:
-        wait_beeps_flag = False
+        wait_beeps_flag=False
     if wait_beeps_thread and wait_beeps_thread.is_alive():
         wait_beeps_thread.join()
-    wait_beeps_thread = None
+    wait_beeps_thread=None
 
 #############################################
-# Step 8: Streaming the Output
+# Step 7.1: Actual Inference
 #############################################
 
 def chat_completion_stream(user_message):
     global stop_flag
-    payload = build_payload(user_message)
-    headers = {"Content-Type": "application/json"}
-
+    payload=build_payload(user_message)
+    headers={"Content-Type":"application/json"}
     try:
-        with requests.post(OLLAMA_CHAT_URL, json=payload, headers=headers, stream=True) as r:
+        with requests.post(CONFIG["ollama_url"], json=payload, headers=headers, stream=True) as r:
             r.raise_for_status()
             for line in r.iter_lines():
                 if stop_flag:
-                    print("Stream canceled due to new request.")
                     break
                 if line:
-                    obj = json.loads(line.decode('utf-8'))
-                    msg = obj.get("message", {})
-                    content = msg.get("content", "")
-                    done = obj.get("done", False)
+                    obj=json.loads(line.decode('utf-8'))
+                    msg=obj.get("message",{})
+                    content=msg.get("content","")
+                    done=obj.get("done",False)
                     yield content, done
                     if done:
                         break
     except Exception as e:
-        print(f"Error during streaming inference: {e}")
+        print("Error streaming inference:", e)
         yield "", True
 
 def chat_completion_nonstream(user_message):
-    payload = build_payload(user_message)
-    headers = {"Content-Type": "application/json"}
+    payload=build_payload(user_message)
+    headers={"Content-Type":"application/json"}
     try:
-        resp = requests.post(OLLAMA_CHAT_URL, json=payload, headers=headers)
+        resp=requests.post(CONFIG["ollama_url"],json=payload,headers=headers)
         resp.raise_for_status()
-        data = resp.json()
-        msg = data.get("message", {})
-        return msg.get("content", "")
+        data=resp.json()
+        msg=data.get("message",{})
+        return msg.get("content","")
     except Exception as e:
-        print(f"Error during non-stream inference: {e}")
+        print("Error non-stream inference:", e)
         return ""
 
-#############################################
-# Step 9: Processing the model output
-#############################################
-
-def process_text(text):
+def process_text(user_message):
+    """
+    Build text, pass to Ollama (stream or not),
+    do TTS sentence by sentence in streaming mode.
+    """
     global stop_flag
-    processed_text = convert_numbers_to_words(text)
-    sentence_endings = re.compile(r'[.?!]+')
-
     if CONFIG["stream"]:
-        buffer = ""
-        sentences = []
-        for content, done in chat_completion_stream(processed_text):
+        # streaming
+        buffer=""
+        sentences=[]
+        for chunk, done in chat_completion_stream(user_message):
             if stop_flag:
                 break
-
-            # Print each chunk immediately to console
-            print(content, end='', flush=True)
-
-            buffer += content
+            print(chunk, end='', flush=True)
+            buffer+=chunk
+            sentence_endings=re.compile(r'[.?!]+')
             while True:
                 if stop_flag:
                     break
-                match = sentence_endings.search(buffer)
+                match=sentence_endings.search(buffer)
                 if not match:
                     break
-                end_index = match.end()
-                sentence = buffer[:end_index].strip()
-                buffer = buffer[end_index:].strip()
-                if sentence and not stop_flag:
+                end_idx=match.end()
+                sentence=buffer[:end_idx].strip()
+                buffer=buffer[end_idx:].strip()
+                if sentence:
                     sentences.append(sentence)
                     enqueue_sentence_for_tts(sentence)
             if done or stop_flag:
                 break
-
-        print()  # new line after stream ends
-
-        if not stop_flag:
-            leftover = buffer.strip()
-            if leftover:
-                sentences.append(leftover)
-                enqueue_sentence_for_tts(leftover)
-            return " ".join(sentences)
-        else:
-            return " ".join(sentences)
+        print()
+        leftover=buffer.strip()
+        if leftover:
+            sentences.append(leftover)
+            enqueue_sentence_for_tts(leftover)
+        return " ".join(sentences)
     else:
-        result = chat_completion_nonstream(processed_text)
-        print(result)  # Print once if not streaming
-        sentences = []
-        buffer = result
-        sentence_endings = re.compile(r'[.?!]+')
+        # non-stream
+        text=chat_completion_nonstream(user_message)
+        print(text)
+        # TTS entire text in sentences
+        sentences=[]
+        buffer=text
+        sentence_endings=re.compile(r'[.?!]+')
         while True:
-            match = sentence_endings.search(buffer)
+            match=sentence_endings.search(buffer)
             if not match:
                 break
-            end_index = match.end()
-            sentence = buffer[:end_index].strip()
-            buffer = buffer[end_index:].strip()
+            end_idx=match.end()
+            sentence=buffer[:end_idx].strip()
+            buffer=buffer[end_idx:].strip()
             if sentence:
                 enqueue_sentence_for_tts(sentence)
                 sentences.append(sentence)
-
-        leftover = buffer.strip()
+        leftover=buffer.strip()
         if leftover:
             enqueue_sentence_for_tts(leftover)
             sentences.append(leftover)
-
         return " ".join(sentences)
 
 #############################################
-# Step 10: Update History File with New Messages
+# Step 10: Update History
 #############################################
 
-def update_history(user_message, assistant_message):
+def update_history_file(user_message, assistant_message):
     if not CONFIG["history"]:
         return
     current_history = safe_load_json_file(CONFIG["history"], [])
-    current_history.append({"role": "user", "content": user_message})
-    current_history.append({"role": "assistant", "content": assistant_message})
+    if not isinstance(current_history, list):
+        current_history=[]
+    current_history.append({"role":"user","content":user_message})
+    current_history.append({"role":"assistant","content":assistant_message})
     try:
         with open(CONFIG["history"], 'w') as f:
-            json.dump(current_history, f, indent=2)
+            json.dump(current_history,f,indent=2)
     except Exception as e:
-        print(f"Warning: Could not write to history file {CONFIG['history']}: {e}")
+        print("Warning: can't write to history file:", e)
 
 #############################################
-# Step 11: Handling Concurrent Requests and Cancellation
+# Step 11: Embedding user & assistant messages
 #############################################
 
-stop_flag = False
-current_thread = None
-inference_lock = threading.Lock()
+def remember_messages(user_message, assistant_message):
+    # embed user
+    store_memory(user_message)
+    # embed assistant
+    store_memory(assistant_message)
 
-def inference_thread(user_message, result_holder, model_actual_name):
+#############################################
+# Step 11: Handling concurrency
+#############################################
+
+stop_flag=False
+current_thread=None
+inference_lock=threading.Lock()
+
+def inference_thread(user_message, result_list):
     global stop_flag
-    stop_flag = False
-    result = process_text(user_message)
-    result_holder.append(result)
+    stop_flag=False
+    result=process_text(user_message)
+    result_list.append(result)
 
-def new_request(user_message, model_actual_name):
+def new_request(user_message):
     global stop_flag, current_thread
-
-    # Beep to indicate a new request is starting
-    beep(120, 0.05)
+    beep(120,0.05)
 
     with inference_lock:
-        # Cancel ongoing inference if any
         if current_thread and current_thread.is_alive():
-            print("Interrupting current inference...")
-            beep(80, 0.05)
-            stop_flag = True
+            print("Interrupting current inference..")
+            beep(80,0.05)
+            stop_flag=True
             current_thread.join()
-            stop_flag = False
+            stop_flag=False
 
-        # Cancel ongoing TTS
-        print("Stopping TTS thread...")
-        beep(80, 0.05)
+        print("Stopping TTS..")
+        beep(80,0.05)
         stop_tts_thread()
 
-        # Restart TTS thread (empty queue)
-        print("Starting new TTS thread...")
-        beep(120, 0.05)
+        print("Starting new TTS..")
+        beep(120,0.05)
         start_tts_thread()
 
-        # Start new inference thread
-        result_holder = []
-        current_thread = threading.Thread(
-            target=inference_thread,
-            args=(user_message, result_holder, model_actual_name)
-        )
+        holder=[]
+        current_thread=threading.Thread(target=inference_thread,args=(user_message,holder))
         current_thread.start()
 
-    # We do NOT block here with sleeps. The script will proceed once inference finishes:
     current_thread.join()
-
-    result = result_holder[0] if result_holder else ""
-    return result
+    final=holder[0] if holder else ""
+    return final
 
 #############################################
-# Step 12: Start Server with Enhanced Interrupt Handling
+# Step 12: Server
 #############################################
 
-HOST = CONFIG["host"]
-PORT = CONFIG["port"]
+HOST=CONFIG["host"]
+PORT=CONFIG["port"]
 
-# List to keep track of client threads
-client_threads = []
-client_threads_lock = threading.Lock()
+client_threads=[]
+client_threads_lock=threading.Lock()
 
-def handle_client_connection(client_socket, address, model_actual_name):
-    global stop_flag, current_thread
-    print(f"\nAccepted connection from {address}")
-    beep(120, 0.05)  # Short beep to signal new connection
+def handle_client_connection(client_socket, addr):
+    print("\nAccepted connection from", addr)
+    beep(120,0.05)
     try:
-        data = client_socket.recv(65536)
+        data=client_socket.recv(65536)
         if not data:
-            print(f"No data from {address}, closing connection.")
+            print("No data from", addr)
             return
-        user_message = data.decode('utf-8').strip()
+        user_message=data.decode('utf-8').strip()
         if not user_message:
-            print(f"Empty prompt from {address}, ignoring.")
+            print("Empty prompt from", addr)
             return
-        print(f"Received prompt from {address}: {user_message}")
-        beep(120, 0.05)
+        print("Received prompt from",addr,":",user_message)
+        beep(120,0.05)
+        result=new_request(user_message)
 
-        result = new_request(user_message, model_actual_name)
         client_socket.sendall(result.encode('utf-8'))
-
-        # Update history
-        update_history(user_message, result)
-
+        # update history
+        update_history_file(user_message, result)
+        # embed user+assistant
+        remember_messages(user_message, result)
     except Exception as e:
-        print(f"Error handling client {address}: {e}")
+        print("Error handling client", addr, ":", e)
     finally:
         client_socket.close()
 
 def start_server():
-    global client_threads
-
-    # Start TTS thread initially
-    print("\nStarting TTS thread...")
+    initialize_db()
+    print("Starting TTS thread..")
     start_tts_thread()
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
     try:
-        server.bind((HOST, PORT))
+        server.bind((HOST, int(PORT)))
     except Exception as e:
-        print(f"Error binding to {HOST}:{PORT} - {e}. Using defaults: 0.0.0.0:64162")
-        HOST_D = '0.0.0.0'
-        PORT_D = 64162
-        server.bind((HOST_D, PORT_D))
+        print(f"Error binding to {HOST}:{PORT}", e,"Using defaults 0.0.0.0:64162")
+        server.bind(('0.0.0.0',64162))
 
     server.listen(5)
     print(f"\nListening for incoming connections on {HOST}:{PORT}...")
 
-    # Retrieve the actual model name to use
-    model_actual_name = CONFIG["model"]
-
     try:
         while True:
-            try:
-                client_sock, addr = server.accept()
-                client_thread = threading.Thread(
-                    target=handle_client_connection,
-                    args=(client_sock, addr, model_actual_name)
-                )
-                client_thread.start()
-                with client_threads_lock:
-                    client_threads.append(client_thread)
-            except KeyboardInterrupt:
-                print("\nInterrupt received, shutting down server.")
-                break
-            except Exception as e:
-                print(f"Error accepting connections: {e}")
+            client_sock, client_addr=server.accept()
+            t=threading.Thread(target=handle_client_connection,args=(client_sock,client_addr))
+            t.start()
+            with client_threads_lock:
+                client_threads.append(t)
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt, shutting down..")
     finally:
-        # Stop accepting new connections
         server.close()
-        print("\nServer socket closed.")
-
-        # Stop TTS thread
-        print("Stopping TTS thread...")
+        print("Server closed.")
+        print("Stopping TTS..")
         stop_tts_thread()
-
-        # Wait for all client threads to finish
-        print("Waiting for client threads to finish...")
+        print("Waiting for client threads..")
         with client_threads_lock:
-            for t in client_threads:
-                t.join()
-        print("All client threads have been terminated.")
+            for thr in client_threads:
+                thr.join()
+        print("All client threads done. Shutdown complete.")
 
-        print("Shutting down complete.")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     start_server()

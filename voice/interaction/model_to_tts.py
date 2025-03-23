@@ -52,18 +52,24 @@ from ollama import chat  # Use Ollama Python library for inference
 #############################################
 # Additional: Short Tone/Beep Utilities      #
 #############################################
-def beep(freq=1200, duration=0.01):
-    print(f"[Beep] Playing beep at {freq}Hz for {duration}s.")
+def beep(freq=3000, duration=0.05):
+    """
+    Play a rapid, complex futuristic beep using nested sine and square tones.
+    The beep consists of simultaneous sine waves at 3000Hz and 4500Hz, and square waves at 6000Hz and 9000Hz.
+    No artificial delay is added.
+    """
+    command = [
+        "play", "-n", "synth", "0.02",
+        "sine", "13000",
+        "sine", "14500",
+        "square", "16000",
+        "square", "19000"
+    ]
     try:
-        subprocess.run(
-            ["play", "-nq", "-t", "alsa", "synth", str(duration), "sine", str(freq)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
-        print("[Beep] Beep played.")
-    except Exception:
-        print("[Beep] Beep failed (or 'play' not available).")
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        print(f"[Beep] Complex futuristic beep played: {' '.join(command)}")
+    except Exception as e:
+        print(f"[Beep] Complex beep failed: {e}")
 
 #############################################
 # Step 3: Config Defaults & File             #
@@ -76,7 +82,7 @@ DEFAULT_CONFIG = {
     "system": None,
     "raw": False,
     "history": "chat.json",
-    "history_depth": 40,
+    "history_depth": 100,
     "images": [],
     "tools": None,
     "options": {},
@@ -482,10 +488,12 @@ def wait_beeps_worker():
         with wait_beeps_lock:
             if not wait_beeps_flag:
                 break
-        beep(1480, 0.03)
-        beep(8130, 0.02)
-        beep(1480, 0.03)
-
+        beep(80, 0.05)
+        time.sleep(0.1)
+        beep(80, 0.05)
+        time.sleep(0.1)
+        beep(80, 0.05)
+        time.sleep(0.65)
 
 def start_wait_beeps():
     global wait_beeps_thread, wait_beeps_flag
@@ -640,19 +648,19 @@ def inference_thread(user_message, result_holder, model_actual_name):
 def new_request(user_message, model_actual_name):
     global stop_flag, current_thread
     print("[Request] New inference request received.")
-    beep(1520, 0.03)
+    beep(120, 0.05)
     with inference_lock:
         if current_thread and current_thread.is_alive():
             print("[Request] Interrupting current inference...")
-            beep(1480, 0.03)
+            beep(80, 0.05)
             stop_flag = True
             current_thread.join()
             stop_flag = False
         print("[Request] Stopping current TTS thread...")
-        beep(1680, 0.02)
+        beep(80, 0.05)
         stop_tts_thread()
         print("[Request] Restarting TTS thread...")
-        beep(1200, 0.02)
+        beep(120, 0.05)
         start_tts_thread()
         result_holder = []
         current_thread = threading.Thread(
@@ -704,6 +712,11 @@ def interactive_loop():
         else:
             print("[Interactive] Unknown command. Commands are: /send, /model, /history_depth, /quit.")
 
+def start_interactive_thread():
+    thread = threading.Thread(target=interactive_loop, daemon=True)
+    thread.start()
+    print("[Interactive] Interactive command thread started.")
+
 #############################################
 # Step 13: Start Server with Enhanced Interrupt Handling
 #############################################
@@ -716,7 +729,7 @@ client_threads_lock = threading.Lock()
 def handle_client_connection(client_socket, address, model_actual_name):
     global stop_flag, current_thread
     print(f"\n[Server] Accepted connection from {address}")
-    beep(1320, 0.03)
+    beep(120, 0.05)
     try:
         data = client_socket.recv(65536)
         if not data:
@@ -727,7 +740,7 @@ def handle_client_connection(client_socket, address, model_actual_name):
             print(f"[Server] Empty prompt from {address}, ignoring.")
             return
         print(f"[Server] Received prompt from {address}: {user_message}")
-        beep(1520, 0.03)
+        beep(120, 0.05)
         result = new_request(user_message, model_actual_name)
         client_socket.sendall(result.encode('utf-8'))
         update_history(user_message, result)

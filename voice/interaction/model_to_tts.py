@@ -344,6 +344,19 @@ def convert_numbers_to_words(text):
             return number_str
     return re.sub(r'\b\d+\b', replace_num, text)
 
+# New: Emoji removal filter
+def remove_emojis(text):
+    emoji_pattern = re.compile(
+        "["
+        u"\U0001F600-\U0001F64F"  # emoticons
+        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+        u"\U0001F680-\U0001F6FF"  # transport & map symbols
+        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        "]+",
+        flags=re.UNICODE
+    )
+    return emoji_pattern.sub(r'', text)
+
 def build_payload(user_message):
     messages = []
     if CONFIG["system"]:
@@ -389,6 +402,8 @@ tts_thread_lock = threading.Lock()
 
 def synthesize_and_play(prompt):
     prompt = re.sub(r'[\*#]', '', prompt).strip()
+    # Filter out emojis before sending to TTS
+    prompt = remove_emojis(prompt)
     if not prompt:
         print("[TTS] Empty prompt; skipping TTS.")
         return

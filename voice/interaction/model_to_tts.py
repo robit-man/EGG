@@ -54,7 +54,7 @@ from ollama import chat  # Use Ollama Python library for inference
 #############################################
 def beep(freq=3000, duration=0.05):
     """
-    Play a rapid, complex futuristic beep using nested sine and square tones.
+    Play a rapid, beep using nested sine and square tones.
     The beep consists of simultaneous sine waves at 3000Hz and 4500Hz, and square waves at 6000Hz and 9000Hz.
     No artificial delay is added.
     """
@@ -67,7 +67,7 @@ def beep(freq=3000, duration=0.05):
     ]
     try:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        print(f"[Beep] Complex futuristic beep played: {' '.join(command)}")
+        print(f"[Beep] beep played: {' '.join(command)}")
     except Exception as e:
         print(f"[Beep] Complex beep failed: {e}")
 

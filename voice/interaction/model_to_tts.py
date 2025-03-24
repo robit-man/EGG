@@ -187,6 +187,33 @@ def merge_config_and_args(config, args):
 
 CONFIG = merge_config_and_args(CONFIG, args)
 
+
+def monitor_config(interval=5):
+    """
+    Monitors the config.json file for changes every 'interval' seconds.
+    If a change is detected, the configuration is reloaded and the global
+    CONFIG dictionary is updated. Additionally, the history messages file (chat.json)
+    is reloaded based on the new configuration.
+    
+    Args:
+        interval (int): The time in seconds between checks.
+    """
+    last_mtime = os.path.getmtime(CONFIG_PATH)
+    while True:
+        time.sleep(interval)
+        try:
+            new_mtime = os.path.getmtime(CONFIG_PATH)
+            if new_mtime != last_mtime:
+                print("[Config Monitor] Detected change in config.json. Reloading configuration...")
+                new_config = load_config()
+                CONFIG.update(new_config)
+                global history_messages
+                history_messages = safe_load_json_file(CONFIG["history"], [])
+                last_mtime = new_mtime
+        except Exception as e:
+            print("[Config Monitor] Error monitoring config.json:", e)
+            
+            
 #############################################
 # Step 5: Load Optional Configurations       #
 #############################################
@@ -1143,5 +1170,8 @@ def remove_emojis(text):
 # Main
 #############################################
 if __name__ == "__main__":
+    monitor_thread = threading.Thread(target=monitor_config, daemon=True)
+    monitor_thread.start()
+    
     start_interactive_thread()
     start_server()

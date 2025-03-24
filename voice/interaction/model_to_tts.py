@@ -11,13 +11,14 @@ from queue import Queue
 import shutil
 import time
 from contextlib import redirect_stdout
+import inspect
 
 #############################################
 # Step 1: Ensure we're running inside a venv #
 #############################################
 print("[VENV] Checking if running inside a virtual environment...")
 VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial"]
+NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial", "dotenv"]
 
 def in_venv():
     is_in = hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
@@ -51,6 +52,10 @@ from ollama import chat  # Use Ollama Python library for inference
 import re
 import serial
 import psutil
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 #############################################
 # Additional: Short Tone/Beep Utilities      #
@@ -377,51 +382,77 @@ def see_whats_around() -> str:
 
 def get_battery_voltage() -> float:
     """
-    Connect to the ESP32-C6 via the serial port and read one ADC value.
-    The ADC value is converted to a voltage using the following formula:
+    Reads the battery voltage from a file located in the user's home directory.
     
-        voltage = (adc_value / 3030) * 29.0
-    
-    This function waits (up to 5 seconds) for data from the serial port.
+    The file is expected to be at:
+        ~/voltage.txt
+    and contain a single line with the battery voltage as a floating point number.
     
     Returns:
-        A float representing the calculated battery voltage.
-        If an error occurs, a string describing the error is returned.
+        A float representing the battery voltage.
+        
+    Raises:
+        RuntimeError if the file cannot be read or its content cannot be converted to float.
     """
-    # Serial port and baud rate settings
-    port = '/dev/ttyACM0'  # Update this if needed.
-    baud_rate = 9600
-
-    # Helper: Convert raw ADC value to voltage.
-    def calculate_voltage(adc_value):
-        # Using the observed relationship: ADC value ≈ 2400 corresponds to about 24.4V.
-        return (adc_value / 3030) * 29.0
-
     try:
-        # Open the serial port.
-        ser = serial.Serial(port, baud_rate, timeout=2)
-        print(f"Connected to {port} at {baud_rate} baud")
-        
-        # Wait until data is available (with a timeout).
-        start_time = time.time()
-        while ser.in_waiting == 0:
-            if time.time() - start_time > 5:
-                ser.close()
-                return "Error: No data received from serial within timeout."
-            time.sleep(0.1)
-        
-        # Read one line of data from the serial port.
-        line = ser.readline().decode('utf-8').strip()
-        ser.close()
-        
-        # Convert the line to an integer ADC value.
-        adc_value = int(line)
-        # Calculate the voltage.
-        voltage = calculate_voltage(adc_value)
+        home_dir = os.path.expanduser("~")
+        file_path = os.path.join(home_dir, "voltage.txt")
+        with open(file_path, "r") as f:
+            line = f.readline().strip()
+            voltage = float(line)
         return voltage
-
     except Exception as e:
-        return f"Error reading battery voltage: {e}"
+        raise RuntimeError(f"Error reading battery voltage: {e}")
+        
+# Load environment variables from .env file
+load_dotenv()
+
+def brave_search(topic: str) -> str:
+    """
+    Search Brave Web Search API for the specified topic.
+
+    Args:
+        topic (str): The search query.
+
+    Returns:
+        A string representing the JSON search results if successful,
+        or an error message if the search fails.
+    
+    This function uses the following settings:
+      - API endpoint: https://api.search.brave.com/res/v1/web/search
+      - Headers:
+          Accept: application/json
+          Accept-Encoding: gzip
+          x-subscription-token: <BRAVE_API_KEY from .env>
+      - Query parameters:
+          q: topic
+          count: 3  (returns 3 results)
+    """
+    api_key = os.environ.get("BRAVE_API_KEY", "")
+    if not api_key:
+        return "Error: BRAVE_API_KEY not found in environment variables."
+    
+    endpoint = "https://api.search.brave.com/res/v1/web/search"
+    
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "x-subscription-token": api_key
+    }
+    
+    params = {
+        "q": topic,
+        "count": 3
+    }
+    
+    try:
+        response = requests.get(endpoint, headers=headers, params=params, timeout=5)
+        if response.status_code == 200:
+            return response.text
+        else:
+            return f"Error {response.status_code}: {response.text}"
+    except Exception as e:
+        return f"Error: {e}"
 
 def get_system_utilization() -> dict:
     """
@@ -463,24 +494,22 @@ def build_payload(user_message):
     messages = []
     if CONFIG["system"]:
         messages.append({"role": "system", "content": CONFIG["system"]})
-    # Append tool calling instructions so that the model knows about the available tools.
+    
+    # Construct the tool instructions by directly referencing the function source code.
     tool_instructions = (
         "At each turn, if you decide to invoke any of the function(s), it should be wrapped with ```tool_code```. "
-        "The following Python methods are available:\n\n"
-        "```python\n"
-        "def see_whats_around() -> str:\n"
-        "    \"\"\"Fetch image from camera URL and save locally, returning the file path. "
-        "Use this when you need more visual context.\"\"\"\n\n"
-        "def get_battery_voltage() -> float:\n"
-        "    \"\"\"Return the estimated battery voltage using system sensors if available, "
-        "or by reading from an external ADC as a fallback.\"\"\"\n\n"
-        "def get_system_utilization() -> dict:\n"
-        "    \"\"\"Return a dictionary with CPU usage, memory usage, and disk usage percentages.\"\"\"\n"
-        "```\n\n"
+        "The following Python methods are available (source code provided for context):\n\n"
+        "```python\n" +
+        inspect.getsource(see_whats_around) + "\n" +
+        inspect.getsource(brave_search) + "\n" +
+        inspect.getsource(get_battery_voltage) + "\n" +
+        inspect.getsource(get_system_utilization) +
+        "\n```\n\n"
         "When using a tool call, the generated code should be readable and efficient. "
         "The response from a method call will be wrapped in ```tool_output```."
     )
     messages.append({"role": "system", "content": tool_instructions})
+    
     # Truncate history to the last CONFIG["history_depth"] messages
     history_depth = CONFIG.get("history_depth", 40)
     if len(history_messages) > history_depth:
@@ -488,6 +517,7 @@ def build_payload(user_message):
         messages.extend(history_messages[-history_depth:])
     else:
         messages.extend(history_messages)
+    
     messages.append({"role": "user", "content": user_message})
     payload = {
         "model": CONFIG["model"],

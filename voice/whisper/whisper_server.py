@@ -12,7 +12,7 @@ import whisper
 import torch
 
 # Configuration
-MODEL_NAME = "large"          # Whisper model size: tiny, base, small, medium, large
+MODEL_NAME = "medium"          # Whisper model size: tiny, base, small, medium, large
 MODEL_DIR = "models"           # Directory to store the Whisper model
 AUDIO_SAMPLE_RATE = 16000      # Whisper expects 16kHz audio
 CHANNELS = 1                   # Mono audio

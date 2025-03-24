@@ -18,7 +18,7 @@ import inspect
 #############################################
 print("[VENV] Checking if running inside a virtual environment...")
 VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial", "dotenv"]
+NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial", "dotenv", "beautifulsoup4"]
 
 def in_venv():
     is_in = hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
@@ -53,6 +53,7 @@ import re
 import serial
 import psutil
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # Load environment variables from .env file
 load_dotenv()
@@ -263,6 +264,22 @@ def wait_for_ollama():
     sys.exit(1)
 
 def get_available_models():
+    """
+    Query the Ollama tags endpoint to retrieve a list of available models.
+    
+    This function sends an HTTP GET request to the Ollama API at:
+        http://localhost:11434/api/tags
+    If the response is successful (HTTP status 200), it parses the JSON response,
+    prints out the names of all available models, and returns a list of model names.
+    
+    Returns:
+        List[str]: A list of model names available in the Ollama tags.
+                   If the request fails or no models are found, an empty list is returned.
+    
+    Example:
+        models = get_available_models()
+        # Prints and returns: ['gemma3:12b', 'another_model', ...]
+    """
     ollama_tags_url = "http://localhost:11434/api/tags"
     try:
         response = requests.get(ollama_tags_url)
@@ -281,6 +298,23 @@ def get_available_models():
         return []
 
 def check_model_exists_in_tags(model_name):
+    """
+    Check if the specified model exists in the available tags from Ollama.
+    
+    This function calls get_available_models() to retrieve the current list of models.
+    It then checks if the provided model_name is directly present.
+    If not, it also checks for a model with the ":latest" suffix.
+    
+    Args:
+        model_name (str): The name of the model to check for.
+    
+    Returns:
+        str or None: The available model name (possibly modified with ":latest")
+                     if found; otherwise, None.
+    
+    Example:
+        actual_model = check_model_exists_in_tags("gemma3:12b")
+    """
     available_models = get_available_models()
     if model_name in available_models:
         print(f"[Ollama] Model '{model_name}' found in tags.")
@@ -293,6 +327,25 @@ def check_model_exists_in_tags(model_name):
     return None
 
 def check_model_installed(model_name):
+    """
+    Check if the specified model is installed locally using the 'ollama list' command.
+    
+    This function runs the command 'ollama list' via subprocess, captures the output,
+    and checks if the provided model_name (or its base name, if ending with ':latest')
+    appears in the list of installed models.
+    
+    Args:
+        model_name (str): The name of the model to verify.
+    
+    Returns:
+        bool: True if the model is installed; otherwise, False.
+    
+    Raises:
+        SystemExit: If an error occurs while running the 'ollama list' command.
+    
+    Example:
+        is_installed = check_model_installed("gemma3:12b")
+    """
     try:
         result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
         models = [m.strip() for m in result.stdout.splitlines()]
@@ -309,6 +362,22 @@ def check_model_installed(model_name):
         sys.exit(1)
 
 def pull_model(model_name):
+    """
+    Pull (download) the specified model using Ollama's pull command.
+    
+    This function attempts to download the given model by calling 'ollama pull'
+    via subprocess. It prints status messages before and after the pull operation.
+    If the pull fails, the function prints an error message and terminates the program.
+    
+    Args:
+        model_name (str): The name of the model to pull.
+    
+    Returns:
+        None
+    
+    Example:
+        pull_model("gemma3:12b")
+    """
     print(f"[Ollama] Pulling model '{model_name}'...")
     try:
         subprocess.check_call(['ollama', 'pull', model_name])
@@ -318,6 +387,25 @@ def pull_model(model_name):
         sys.exit(1)
 
 def ensure_ollama_and_model():
+    """
+    Ensure that Ollama is installed and that the specified model is available.
+    
+    This function performs the following steps:
+      1. Checks if the 'ollama' command is installed. If not, it calls install_ollama() (assumed to be defined elsewhere).
+      2. Waits for the Ollama service to become available using wait_for_ollama() (assumed to be defined elsewhere).
+      3. Retrieves the desired model name from CONFIG["model"] and checks its availability using check_model_exists_in_tags().
+      4. If the model is not available, the function terminates the program.
+      5. If the model is available, CONFIG["model"] is updated with the actual model name.
+    
+    Returns:
+        None
+    
+    Raises:
+        SystemExit: If Ollama is not installed or if the specified model is unavailable.
+    
+    Example:
+        ensure_ollama_and_model()
+    """
     if not check_ollama_installed():
         install_ollama()
         if not check_ollama_installed():
@@ -454,6 +542,54 @@ def brave_search(topic: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+def bs4_scrape(url: str) -> str:
+    """
+    Scrape the provided website URL using BeautifulSoup and return the prettified HTML.
+
+    Args:
+        url (str): The URL of the website to scrape.
+    
+    Returns:
+        A string containing the prettified HTML of the page if successful,
+        or an error message if the scraping fails.
+    
+    The function sets a browser User-Agent header to avoid potential "Not accepted" errors.
+    """
+    headers = {
+        'User-Agent': ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246")
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html5lib')
+        return soup.prettify()
+    except Exception as e:
+        return f"Error during scraping: {e}"
+       
+def find_file(filename: str, search_path: str = ".") -> str:
+    """
+    Search recursively for a file with the given filename starting from the specified search path.
+
+    Args:
+        filename (str): The name of the file to search for.
+        search_path (str): The directory to start the search from. Defaults to the current directory.
+
+    Returns:
+        str or None: The directory path where the file was found, or None if the file is not found.
+
+    Example:
+        directory = find_file("example.txt", "/home/user")
+        if directory:
+            print(f"File found in: {directory}")
+        else:
+            print("File not found.")
+    """
+    for root, dirs, files in os.walk(search_path):
+        if filename in files:
+            return root
+    return None
+     
 def get_system_utilization() -> dict:
     """
     Return system utilization metrics as a dictionary:
@@ -502,6 +638,13 @@ def build_payload(user_message):
         "```python\n" +
         inspect.getsource(see_whats_around) + "\n" +
         inspect.getsource(brave_search) + "\n" +
+        inspect.getsource(bs4_scrape) + "\n" +
+        inspect.getsource(find_file) + "\n" +
+        inspect.getsource(pull_model) + "\n" +
+        inspect.getsource(get_available_models) + "\n" +
+        inspect.getsource(check_model_exists_in_tags) + "\n" +
+        inspect.getsource(check_model_installed) + "\n" +
+        inspect.getsource(ensure_ollama_and_model) + "\n" +
         inspect.getsource(get_battery_voltage) + "\n" +
         inspect.getsource(get_system_utilization) +
         "\n```\n\n"

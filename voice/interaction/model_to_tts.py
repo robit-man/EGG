@@ -48,6 +48,7 @@ print("[Imports] Importing external modules...")
 import requests
 from num2words import num2words
 from ollama import chat  # Use Ollama Python library for inference
+import psutil
 
 #############################################
 # Additional: Short Tone/Beep Utilities      #
@@ -372,6 +373,48 @@ def see_whats_around() -> str:
         print("[Tool] Exception fetching image:", e)
         return f"Error: {str(e)}"
 
+
+def get_battery_voltage():
+    """
+    Returns an estimated battery voltage using psutil's sensors_battery().
+    
+    The estimation maps battery.percent linearly between:
+      - EMPTY_VOLTAGE: 22.0 V (0%)
+      - FULLY_CHARGED_VOLTAGE: 29.4 V (100%)
+      
+    If battery information is unavailable, returns None.
+    """
+    FULLY_CHARGED_VOLTAGE = 29.4
+    EMPTY_VOLTAGE = 22.0
+    battery = psutil.sensors_battery()
+    if battery is not None:
+        voltage = EMPTY_VOLTAGE + (battery.percent / 100.0) * (FULLY_CHARGED_VOLTAGE - EMPTY_VOLTAGE)
+        return voltage
+    return None
+
+def get_system_utilization():
+    """
+    Returns system utilization metrics as a dictionary:
+      - CPU usage percentage (averaged over 1 second)
+      - Memory usage percentage
+      - Disk usage percentage for the root partition
+      
+    Example return:
+        {
+            "cpu_usage": 12.3,
+            "memory_usage": 47.8,
+            "disk_usage": 67.2
+        }
+    """
+    cpu_usage = psutil.cpu_percent(interval=1)
+    memory_usage = psutil.virtual_memory().percent
+    disk_usage = psutil.disk_usage('/').percent
+    return {
+        "cpu_usage": cpu_usage,
+        "memory_usage": memory_usage,
+        "disk_usage": disk_usage
+    }
+    
 # New: Extract tool call from model response.
 def extract_tool_call(text):
     import io
@@ -396,13 +439,19 @@ def build_payload(user_message):
     messages = []
     if CONFIG["system"]:
         messages.append({"role": "system", "content": CONFIG["system"]})
-    # Append tool calling instructions so that the model knows about the available tool.
+    # Append tool calling instructions so that the model knows about the available tools.
     tool_instructions = (
         "At each turn, if you decide to invoke any of the function(s), it should be wrapped with ```tool_code```. "
-        "The following Python method is available:\n\n"
+        "The following Python methods are available:\n\n"
         "```python\n"
         "def see_whats_around() -> str:\n"
-        "    \"\"\"Fetch image from camera URL and save locally, returning the file path.\"\"\"\n"
+        "    \"\"\"Fetch image from camera URL and save locally, returning the file path. "
+        "Use this when you need more visual context.\"\"\"\n\n"
+        "def get_battery_voltage() -> float:\n"
+        "    \"\"\"Return the estimated battery voltage using system sensors if available, "
+        "or by reading from an external ADC as a fallback.\"\"\"\n\n"
+        "def get_system_utilization() -> dict:\n"
+        "    \"\"\"Return a dictionary with CPU usage, memory usage, and disk usage percentages.\"\"\"\n"
         "```\n\n"
         "When using a tool call, the generated code should be readable and efficient. "
         "The response from a method call will be wrapped in ```tool_output```."
@@ -435,6 +484,7 @@ def build_payload(user_message):
     print("[Payload] Built payload:")
     print(json.dumps(payload, indent=2))
     return payload
+
 
 stop_flag = False
 thread_lock = threading.Lock()

@@ -12,30 +12,35 @@ import shutil
 import time
 from contextlib import redirect_stdout
 import inspect
+import curses
+
+#############################################
+# Global Variables for Curses Display
+#############################################
+display_lock = threading.Lock()
+current_request = ""
+current_tokens = ""
+current_tool_calls = ""
+tts_flag = False      # Indicates if TTS process is active (flag for overall status)
+tts_playing = False   # Indicates if audio is currently being played
 
 #############################################
 # Step 1: Ensure we're running inside a venv #
 #############################################
-print("[VENV] Checking if running inside a virtual environment...")
 VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
 NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial", "dotenv", "beautifulsoup4"]
 
 def in_venv():
-    is_in = hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
-    print(f"[VENV] in_venv: {is_in}")
-    return is_in
+    return hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
 
 def setup_venv():
     if not os.path.isdir(VENV_DIR):
-        print("[VENV] Creating virtual environment...")
         subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
     pip_path = os.path.join(VENV_DIR, 'bin', 'pip')
-    print("[VENV] Installing required packages:", NEEDED_PACKAGES)
     subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
 
 def relaunch_in_venv():
     python_path = os.path.join(VENV_DIR, 'bin', 'python')
-    print("[VENV] Relaunching inside virtual environment...")
     os.execv(python_path, [python_path] + sys.argv)
 
 if not in_venv():
@@ -45,7 +50,6 @@ if not in_venv():
 #############################################
 # Step 2: Imports after venv set up          #
 #############################################
-print("[Imports] Importing external modules...")
 import requests
 from num2words import num2words
 from ollama import chat  # Use Ollama Python library for inference
@@ -55,18 +59,12 @@ import psutil
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
-# Load environment variables from .env file
 load_dotenv()
 
 #############################################
 # Additional: Short Tone/Beep Utilities      #
 #############################################
 def beep(freq=3000, duration=0.05):
-    """
-    Play a rapid, complex futuristic beep using nested sine and square tones.
-    The beep consists of simultaneous sine waves at 3000Hz and 4500Hz, and square waves at 6000Hz and 9000Hz.
-    No artificial delay is added.
-    """
     command = [
         "play", "-n", "synth", "0.02",
         "sine", "13000",
@@ -76,14 +74,12 @@ def beep(freq=3000, duration=0.05):
     ]
     try:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        print(f"[Beep] Complex futuristic beep played: {' '.join(command)}")
-    except Exception as e:
-        print(f"[Beep] Complex beep failed: {e}")
+    except Exception:
+        pass
 
 #############################################
 # Step 3: Config Defaults & File             #
 #############################################
-print("[Config] Loading configuration...")
 DEFAULT_CONFIG = {
     "model": "gemma3:12b",
     "stream": True,
@@ -104,7 +100,6 @@ CONFIG_PATH = "config.json"
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
-        print("[Config] No config.json found. Creating default config file.")
         with open(CONFIG_PATH, 'w') as f:
             json.dump(DEFAULT_CONFIG, f, indent=2)
         return dict(DEFAULT_CONFIG)
@@ -115,11 +110,8 @@ def load_config():
             for key, value in DEFAULT_CONFIG.items():
                 if key not in cfg:
                     cfg[key] = value
-            print("[Config] Loaded configuration:")
-            print(json.dumps(cfg, indent=2))
             return cfg
-        except Exception as e:
-            print(f"[Config] Error loading config.json: {e}. Using default settings.")
+        except Exception:
             return dict(DEFAULT_CONFIG)
 
 CONFIG = load_config()
@@ -128,14 +120,12 @@ def update_config_file():
     try:
         with open(CONFIG_PATH, 'w') as f:
             json.dump(CONFIG, f, indent=2)
-        print("[Config] Configuration file updated.")
-    except Exception as e:
-        print(f"[Config] Error updating config file: {e}")
+    except Exception:
+        pass
 
 #############################################
 # Step 4: Parse Command-Line Arguments       #
 #############################################
-print("[Args] Parsing command-line arguments...")
 parser = argparse.ArgumentParser(description="Ollama Chat Server with TTS and advanced features.")
 parser.add_argument("--model", type=str, help="Model name to use.")
 parser.add_argument("--stream", action="store_true", help="Enable streaming responses from the model.")
@@ -150,7 +140,6 @@ parser.add_argument("--option", action="append", help="Additional model paramete
 args = parser.parse_args()
 
 def merge_config_and_args(config, args):
-    print("[Args] Merging command-line arguments into configuration...")
     if args.model:
         config["model"] = args.model
     if args.stream:
@@ -181,48 +170,50 @@ def merge_config_and_args(config, args):
                     except ValueError:
                         pass
                 config["options"][k] = v
-    print("[Args] Configuration after merge:")
-    print(json.dumps(config, indent=2))
     return config
 
 CONFIG = merge_config_and_args(CONFIG, args)
 
-
+#############################################
+# Monitor Config & Script Changes
+#############################################
 def monitor_config(interval=5):
-    """
-    Monitors the config.json file for changes every 'interval' seconds.
-    If a change is detected, the configuration is reloaded and the global
-    CONFIG dictionary is updated. Additionally, the history messages file (chat.json)
-    is reloaded based on the new configuration.
-    
-    Args:
-        interval (int): The time in seconds between checks.
-    """
     last_mtime = os.path.getmtime(CONFIG_PATH)
     while True:
         time.sleep(interval)
         try:
             new_mtime = os.path.getmtime(CONFIG_PATH)
             if new_mtime != last_mtime:
-                print("[Config Monitor] Detected change in config.json. Reloading configuration...")
+                with display_lock:
+                    global current_tool_calls
+                    current_tool_calls = "Config changed; reloading..."
                 new_config = load_config()
                 CONFIG.update(new_config)
                 global history_messages
                 history_messages = safe_load_json_file(CONFIG["history"], [])
                 last_mtime = new_mtime
-        except Exception as e:
-            print("[Config Monitor] Error monitoring config.json:", e)
-            
-            
+        except Exception:
+            pass
+
+def monitor_script(interval=5):
+    script_path = os.path.abspath(__file__)
+    last_mtime = os.path.getmtime(script_path)
+    while True:
+        time.sleep(interval)
+        try:
+            new_mtime = os.path.getmtime(script_path)
+            if new_mtime != last_mtime:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            pass
+
 #############################################
 # Step 5: Load Optional Configurations       #
 #############################################
-print("[Config] Loading optional JSON configurations...")
 def safe_load_json_file(path, default):
     if not path:
         return default
     if not os.path.exists(path):
-        print(f"[Config] Warning: File '{path}' not found. Using default {default}.")
         if path == CONFIG["history"] and default == []:
             with open(path, 'w') as f:
                 json.dump([], f)
@@ -230,8 +221,7 @@ def safe_load_json_file(path, default):
     try:
         with open(path, 'r') as f:
             return json.load(f)
-    except Exception as e:
-        print(f"[Config] Warning: Could not load '{path}': {e}. Using default {default}.")
+    except Exception:
         return default
 
 def load_format_schema(fmt):
@@ -243,35 +233,24 @@ def load_format_schema(fmt):
         try:
             with open(fmt, 'r') as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"[Config] Warning: Could not load format schema from '{fmt}': {e}. Ignoring format.")
+        except Exception:
             return None
-    print(f"[Config] Warning: Format file '{fmt}' not found. Ignoring format.")
     return None
 
 history_messages = safe_load_json_file(CONFIG["history"], [])
 tools_data = safe_load_json_file(CONFIG["tools"], None)
 format_schema = load_format_schema(CONFIG["format"])
-print("[Config] Loaded history messages:")
-print(history_messages)
 
 #############################################
 # Step 5.1: Ensure Ollama and Model are Installed #
 #############################################
-print("[Ollama] Checking Ollama installation and model availability...")
-
 def check_ollama_installed():
-    ollama_path = shutil.which('ollama')
-    print(f"[Ollama] ollama command path: {ollama_path}")
-    return ollama_path is not None
+    return shutil.which('ollama') is not None
 
 def install_ollama():
-    print("[Ollama] Installing Ollama via official installation script...")
     try:
         subprocess.check_call('curl -fsSL https://ollama.com/install.sh | sh', shell=True, executable='/bin/bash')
-        print("[Ollama] Installation initiated.")
-    except subprocess.CalledProcessError as e:
-        print(f"[Ollama] Error installing Ollama: {e}")
+    except subprocess.CalledProcessError:
         sys.exit(1)
 
 def wait_for_ollama():
@@ -281,102 +260,38 @@ def wait_for_ollama():
         try:
             response = requests.get(ollama_tags_url)
             if response.status_code == 200:
-                print("[Ollama] Service is up and running.")
                 return
         except requests.exceptions.RequestException:
             pass
-        print(f"[Ollama] Waiting for service to start... ({attempt+1}/{max_retries})")
         time.sleep(2)
-    print("[Ollama] Service did not start in time. Exiting.")
     sys.exit(1)
 
 def get_available_models():
-    """
-    Query the Ollama tags endpoint to retrieve a list of available models.
-    
-    This function sends an HTTP GET request to the Ollama API at:
-        http://localhost:11434/api/tags
-    If the response is successful (HTTP status 200), it parses the JSON response,
-    prints out the names of all available models, and returns a list of model names.
-    
-    Returns:
-        List[str]: A list of model names available in the Ollama tags.
-                   If the request fails or no models are found, an empty list is returned.
-    
-    Example:
-        models = get_available_models()
-        # Prints and returns: ['gemma3:12b', 'another_model', ...]
-    """
     ollama_tags_url = "http://localhost:11434/api/tags"
     try:
         response = requests.get(ollama_tags_url)
         if response.status_code == 200:
             data = response.json()
             available_models = data.get('models', [])
-            print("\n[Ollama] Available Models:")
-            for model in available_models:
-                print(f" - {model.get('name')}")
             return [m.get('name') for m in available_models if 'name' in m]
         else:
-            print(f"[Ollama] Failed to retrieve models: Status code {response.status_code}")
             return []
-    except requests.exceptions.RequestException as e:
-        print(f"[Ollama] Error fetching models: {e}")
+    except requests.exceptions.RequestException:
         return []
 
 def check_model_exists_in_tags(model_name):
-    """
-    Check if the specified model exists in the available tags from Ollama.
-    
-    This function calls get_available_models() to retrieve the current list of models.
-    It then checks if the provided model_name is directly present.
-    If not, it also checks for a model with the ":latest" suffix.
-    
-    Args:
-        model_name (str): The name of the model to check for.
-    
-    Returns:
-        str or None: The available model name (possibly modified with ":latest")
-                     if found; otherwise, None.
-    
-    Example:
-        actual_model = check_model_exists_in_tags("gemma3:12b")
-    """
     available_models = get_available_models()
     if model_name in available_models:
-        print(f"[Ollama] Model '{model_name}' found in tags.")
         return model_name
     model_latest = f"{model_name}:latest"
     if model_latest in available_models:
-        print(f"[Ollama] Model '{model_latest}' found in tags.")
         return model_latest
-    print(f"[Ollama] Model '{model_name}' not found in available tags.")
     return None
 
 def check_model_installed(model_name):
-    """
-    Check if the specified model is installed locally using the 'ollama list' command.
-    
-    This function runs the command 'ollama list' via subprocess, captures the output,
-    and checks if the provided model_name (or its base name, if ending with ':latest')
-    appears in the list of installed models.
-    
-    Args:
-        model_name (str): The name of the model to verify.
-    
-    Returns:
-        bool: True if the model is installed; otherwise, False.
-    
-    Raises:
-        SystemExit: If an error occurs while running the 'ollama list' command.
-    
-    Example:
-        is_installed = check_model_installed("gemma3:12b")
-    """
     try:
         result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
         models = [m.strip() for m in result.stdout.splitlines()]
-        print("[Ollama] Installed models:", models)
         if model_name in models:
             return True
         if model_name.endswith(':latest'):
@@ -384,69 +299,25 @@ def check_model_installed(model_name):
             if base_model in models:
                 return True
         return False
-    except subprocess.CalledProcessError as e:
-        print(f"[Ollama] Error checking installed models: {e}")
+    except subprocess.CalledProcessError:
         sys.exit(1)
 
 def pull_model(model_name):
-    """
-    Pull (download) the specified model using Ollama's pull command.
-    
-    This function attempts to download the given model by calling 'ollama pull'
-    via subprocess. It prints status messages before and after the pull operation.
-    If the pull fails, the function prints an error message and terminates the program.
-    
-    Args:
-        model_name (str): The name of the model to pull.
-    
-    Returns:
-        None
-    
-    Example:
-        pull_model("gemma3:12b")
-    """
-    print(f"[Ollama] Pulling model '{model_name}'...")
     try:
         subprocess.check_call(['ollama', 'pull', model_name])
-        print(f"[Ollama] Model '{model_name}' pulled successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"[Ollama] Error pulling model '{model_name}': {e}")
+    except subprocess.CalledProcessError:
         sys.exit(1)
 
 def ensure_ollama_and_model():
-    """
-    Ensure that Ollama is installed and that the specified model is available.
-    
-    This function performs the following steps:
-      1. Checks if the 'ollama' command is installed. If not, it calls install_ollama() (assumed to be defined elsewhere).
-      2. Waits for the Ollama service to become available using wait_for_ollama() (assumed to be defined elsewhere).
-      3. Retrieves the desired model name from CONFIG["model"] and checks its availability using check_model_exists_in_tags().
-      4. If the model is not available, the function terminates the program.
-      5. If the model is available, CONFIG["model"] is updated with the actual model name.
-    
-    Returns:
-        None
-    
-    Raises:
-        SystemExit: If Ollama is not installed or if the specified model is unavailable.
-    
-    Example:
-        ensure_ollama_and_model()
-    """
     if not check_ollama_installed():
         install_ollama()
-        if not check_ollama_installed():
-            print("[Ollama] Installation failed or 'ollama' command not in PATH.")
+        if not check_model_installed(CONFIG["model"]):
             sys.exit(1)
-    else:
-        print("[Ollama] Ollama is already installed.")
     wait_for_ollama()
     model_name = CONFIG["model"]
     model_actual_name = check_model_exists_in_tags(model_name)
     if not model_actual_name:
-        print(f"[Ollama] Model '{model_name}' not available. Exiting.")
         sys.exit(1)
-    print(f"[Ollama] Using model: {model_actual_name}")
     CONFIG["model"] = model_actual_name
 
 ensure_ollama_and_model()
@@ -454,8 +325,7 @@ ensure_ollama_and_model()
 #############################################
 # Step 6: Ollama Chat Interaction
 #############################################
-print("[Inference] Preparing Ollama chat interaction using the Ollama Python library...")
-OLLAMA_CHAT_URL = CONFIG["ollama_url"]  # For legacy logging; not used with the library
+OLLAMA_CHAT_URL = CONFIG["ollama_url"]
 
 def convert_numbers_to_words(text):
     def replace_num(match):
@@ -467,13 +337,7 @@ def convert_numbers_to_words(text):
             return number_str
     return re.sub(r'\b\d+\b', replace_num, text)
 
-# New: Expose tool for capturing a camera image.
-
 def see_whats_around() -> str:
-    """
-    Fetch image from camera URL and save locally, returning the file path.
-    This should be used any time you want to gather more visual context.
-    """
     import requests
     images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
     if not os.path.exists(images_dir):
@@ -491,24 +355,11 @@ def see_whats_around() -> str:
                     f.write(chunk)
             return file_path
         else:
-            return f"Error: Received status code {response.status_code}"
+            return f"Error: {response.status_code}"
     except Exception as e:
         return f"Error: {e}"
 
 def get_battery_voltage() -> float:
-    """
-    Reads the battery voltage from a file located in the user's home directory.
-    
-    The file is expected to be at:
-        ~/voltage.txt
-    and contain a single line with the battery voltage as a floating point number.
-    
-    Returns:
-        A float representing the battery voltage.
-        
-    Raises:
-        RuntimeError if the file cannot be read or its content cannot be converted to float.
-    """
     try:
         home_dir = os.path.expanduser("~")
         file_path = os.path.join(home_dir, "voltage.txt")
@@ -518,48 +369,21 @@ def get_battery_voltage() -> float:
         return voltage
     except Exception as e:
         raise RuntimeError(f"Error reading battery voltage: {e}")
-        
-# Load environment variables from .env file
-load_dotenv()
 
 def brave_search(topic: str) -> str:
-    """
-    Search Brave Web Search API for the specified topic.
-
-    Args:
-        topic (str): The search query.
-
-    Returns:
-        A string representing the JSON search results if successful,
-        or an error message if the search fails.
-    
-    This function uses the following settings:
-      - API endpoint: https://api.search.brave.com/res/v1/web/search
-      - Headers:
-          Accept: application/json
-          Accept-Encoding: gzip
-          x-subscription-token: <BRAVE_API_KEY from .env>
-      - Query parameters:
-          q: topic
-          count: 3  (returns 3 results)
-    """
     api_key = os.environ.get("BRAVE_API_KEY", "")
     if not api_key:
-        return "Error: BRAVE_API_KEY not found in environment variables."
-    
+        return "Error: BRAVE_API_KEY not set."
     endpoint = "https://api.search.brave.com/res/v1/web/search"
-    
     headers = {
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
         "x-subscription-token": api_key
     }
-    
     params = {
         "q": topic,
         "count": 3
     }
-    
     try:
         response = requests.get(endpoint, headers=headers, params=params, timeout=5)
         if response.status_code == 200:
@@ -570,18 +394,6 @@ def brave_search(topic: str) -> str:
         return f"Error: {e}"
 
 def bs4_scrape(url: str) -> str:
-    """
-    Scrape the provided website URL using BeautifulSoup and return the prettified HTML.
-
-    Args:
-        url (str): The URL of the website to scrape.
-    
-    Returns:
-        A string containing the prettified HTML of the page if successful,
-        or an error message if the scraping fails.
-    
-    The function sets a browser User-Agent header to avoid potential "Not accepted" errors.
-    """
     headers = {
         'User-Agent': ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246")
@@ -593,37 +405,29 @@ def bs4_scrape(url: str) -> str:
         return soup.prettify()
     except Exception as e:
         return f"Error during scraping: {e}"
-       
+
 def find_file(filename: str, search_path: str = ".") -> str:
-    """
-    Search recursively for a file with the given filename starting from the specified search path.
-
-    Args:
-        filename (str): The name of the file to search for.
-        search_path (str): The directory to start the search from. Defaults to the current directory.
-
-    Returns:
-        str or None: The directory path where the file was found, or None if the file is not found.
-
-    Example:
-        directory = find_file("example.txt", "/home/user")
-        if directory:
-            print(f"File found in: {directory}")
-        else:
-            print("File not found.")
-    """
     for root, dirs, files in os.walk(search_path):
         if filename in files:
             return root
     return None
      
+def get_current_time() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def get_current_location() -> dict:
+    import requests
+    try:
+        response = requests.get("http://ip-api.com/json", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": f"HTTP error {response.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
+        
 def get_system_utilization() -> dict:
-    """
-    Return system utilization metrics as a dictionary:
-      - 'cpu_usage': CPU usage percentage (averaged over 1 second)
-      - 'memory_usage': Memory usage percentage
-      - 'disk_usage': Disk usage percentage of the root partition
-    """
     cpu_usage = psutil.cpu_percent(interval=1)
     memory_usage = psutil.virtual_memory().percent
     disk_usage = psutil.disk_usage('/').percent
@@ -632,12 +436,12 @@ def get_system_utilization() -> dict:
         "memory_usage": memory_usage,
         "disk_usage": disk_usage
     }
-    
-# New: Extract tool call from model response.
+
 def extract_tool_call(text):
     import io
     from contextlib import redirect_stdout
-    pattern = r"```tool_code\s*(.*?)\s*```"
+    # Updated regex to accept both tool_code and tool_call
+    pattern = r"```tool_(?:code|call)\s*(.*?)\s*```"
     match = re.search(pattern, text, re.DOTALL)
     if match:
         code = match.group(1).strip()
@@ -652,19 +456,24 @@ def extract_tool_call(text):
         return f'```tool_output\n{r}\n```'
     return None
 
-# Modified build_payload now includes tool calling instructions.
 def build_payload(user_message):
+    global current_request, current_tokens, current_tool_calls
+    with display_lock:
+        current_request = user_message
+        current_tokens = ""
+        current_tool_calls = ""
     messages = []
     if CONFIG["system"]:
         messages.append({"role": "system", "content": CONFIG["system"]})
-    
-    # Construct the tool instructions by directly referencing the function source code.
     tool_instructions = (
-        "At each turn, if you decide to invoke any of the function(s), it should be wrapped with ```tool_code```. "
-        "The following Python methods are available (source code provided for context):\n\n"
+        "At each turn, if you decide to invoke any of the function(s), it should be wrapped with \n\n```tool_call\nfunction_name(arguments)\n```\n\n"
+        "Review the following Python methods (source code provided for context) to determine if a tool call is appropriate:\n\n"
         "```python\n" +
         inspect.getsource(see_whats_around) + "\n" +
         inspect.getsource(brave_search) + "\n" +
+        inspect.getsource(get_battery_voltage) + "\n" +
+        inspect.getsource(get_current_time) + "\n" +
+        inspect.getsource(get_current_location) + "\n" +
         inspect.getsource(bs4_scrape) + "\n" +
         inspect.getsource(find_file) + "\n" +
         inspect.getsource(pull_model) + "\n" +
@@ -672,22 +481,16 @@ def build_payload(user_message):
         inspect.getsource(check_model_exists_in_tags) + "\n" +
         inspect.getsource(check_model_installed) + "\n" +
         inspect.getsource(ensure_ollama_and_model) + "\n" +
-        inspect.getsource(get_battery_voltage) + "\n" +
         inspect.getsource(get_system_utilization) +
         "\n```\n\n"
         "When using a tool call, the generated code should be readable and efficient. "
-        "The response from a method call will be wrapped in ```tool_output```."
+        "The response from a tool call will be wrapped in ```tool_output```."
     )
     messages.append({"role": "system", "content": tool_instructions})
-    
-    # Truncate history to the last CONFIG["history_depth"] messages
-    history_depth = CONFIG.get("history_depth", 40)
-    if len(history_messages) > history_depth:
-        print(f"[Payload] Truncating history messages to last {history_depth} (was {len(history_messages)})")
-        messages.extend(history_messages[-history_depth:])
+    if len(history_messages) > CONFIG.get("history_depth", 40):
+        messages.extend(history_messages[-CONFIG["history_depth"]:])
     else:
         messages.extend(history_messages)
-    
     messages.append({"role": "user", "content": user_message})
     payload = {
         "model": CONFIG["model"],
@@ -705,13 +508,25 @@ def build_payload(user_message):
         payload["tools"] = tools_data
     if CONFIG["options"]:
         payload["options"] = CONFIG["options"]
-    print("[Payload] Built payload:")
-    print(json.dumps(payload, indent=2))
     return payload
 
-
-stop_flag = False
-thread_lock = threading.Lock()
+#############################################
+# Curses Display
+#############################################
+def curses_display(stdscr):
+    global current_request, current_tokens, current_tool_calls, tts_flag, tts_playing
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    while True:
+        with display_lock:
+            stdscr.erase()
+            stdscr.addstr(0, 0, f"User: {current_request}")
+            stdscr.addstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Flag: {tts_flag} | TTS Playing: {tts_playing}")
+            stdscr.hline(2, 0, '-', curses.COLS)
+            stdscr.addstr(3, 0, "Model Tokens:")
+            stdscr.addstr(4, 0, current_tokens)
+        stdscr.refresh()
+        time.sleep(0.5)
 
 #############################################
 # Step 7: TTS Playback with Queue and Thread
@@ -722,56 +537,46 @@ tts_thread = None
 tts_thread_lock = threading.Lock()
 
 def synthesize_and_play(prompt):
+    global tts_flag, tts_playing
+    tts_flag = True
+    tts_playing = True
     prompt = re.sub(r'[\*#]', '', prompt).strip()
-    # Filter out emojis before sending to TTS
     prompt = remove_emojis(prompt)
     if not prompt:
-        print("[TTS] Empty prompt; skipping TTS.")
+        tts_flag = False
+        tts_playing = False
         return
-    print(f"[TTS] Starting TTS for prompt: {prompt}")
-    start_wait_beeps()
     try:
         payload = {"prompt": prompt}
         with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
             if response.status_code != 200:
-                print(f"[TTS] Warning: Received status code {response.status_code}")
-                try:
-                    error_msg = response.json().get('error', 'No error message provided.')
-                    print(f"[TTS] Error message: {error_msg}")
-                except:
-                    print("[TTS] No JSON error message provided for TTS.")
-                stop_wait_beeps()
+                tts_flag = False
+                tts_playing = False
                 return
-            print("[TTS] TTS request successful. Beginning audio stream...")
-            aplay = subprocess.Popen(['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
-                                     stdin=subprocess.PIPE)
-            try:
-                for chunk in response.iter_content(chunk_size=4096):
-                    stop_wait_beeps()
-                    if tts_stop_flag:
-                        print("[TTS] Stop flag detected. Terminating TTS playback.")
-                        break
-                    if chunk:
-                        aplay.stdin.write(chunk)
-            except BrokenPipeError:
-                print("[TTS] Warning: aplay subprocess terminated unexpectedly.")
-            finally:
-                aplay.stdin.close()
-                aplay.wait()
-                print("[TTS] TTS playback finished.")
-    except Exception as e:
-        print(f"[TTS] Unexpected error during TTS: {e}")
-        stop_wait_beeps()
-    else:
-        stop_wait_beeps()
+            # Redirect stdout and stderr to DEVNULL to prevent any console output from aplay
+            aplay = subprocess.Popen(
+                ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            for chunk in response.iter_content(chunk_size=4096):
+                if tts_stop_flag:
+                    break
+                if chunk:
+                    aplay.stdin.write(chunk)
+            aplay.stdin.close()
+            aplay.wait()
+    except Exception:
+        pass
+    tts_flag = False
+    tts_playing = False
 
 def tts_worker():
     global tts_stop_flag
-    print("[TTS] TTS worker started.")
     while not tts_stop_flag:
         try:
             sentence = tts_queue.get(timeout=0.1)
-            print(f"[TTS] Retrieved sentence from queue: {sentence}")
         except Exception:
             if tts_stop_flag:
                 break
@@ -779,15 +584,13 @@ def tts_worker():
         if tts_stop_flag:
             break
         synthesize_and_play(sentence)
-    print("[TTS] TTS worker terminating.")
+    tts_stop_flag = False
 
 def start_tts_thread():
     global tts_queue, tts_thread, tts_stop_flag
     with tts_thread_lock:
         if tts_thread and tts_thread.is_alive():
-            print("[TTS] TTS thread already running.")
             return
-        print("[TTS] Starting TTS thread...")
         tts_stop_flag = False
         tts_queue = Queue()
         tts_thread = threading.Thread(target=tts_worker, daemon=True)
@@ -797,20 +600,18 @@ def stop_tts_thread():
     global tts_stop_flag, tts_thread, tts_queue
     with tts_thread_lock:
         if tts_thread and tts_thread.is_alive():
-            print("[TTS] Stopping TTS thread...")
             tts_stop_flag = True
             with tts_queue.mutex:
                 tts_queue.queue.clear()
             tts_thread.join()
-            print("[TTS] TTS thread stopped.")
         tts_stop_flag = False
         tts_queue = None
         tts_thread = None
 
 def enqueue_sentence_for_tts(sentence):
     if tts_queue and not tts_stop_flag:
-        print(f"[TTS] Enqueuing sentence for TTS: {sentence}")
         tts_queue.put(sentence)
+
 
 #############################################
 # Step 7.1: Non-blocking beep while waiting #
@@ -852,53 +653,47 @@ def stop_wait_beeps():
 # Step 8: Streaming the Output via Ollama Library
 #############################################
 def chat_completion_stream(user_message):
+    global current_tokens, current_tool_calls
     payload = build_payload(user_message)
-    print("[Inference] Sending streaming request via ollama.chat()...")
+    tokens = ""
     try:
         stream = chat(model=CONFIG["model"], messages=payload["messages"], stream=CONFIG["stream"])
-        print(f"[Inference] Streaming response object type: {type(stream)}")
         for part in stream:
-            print("[Inference] Raw stream part:", part)
             content = part["message"]["content"]
             done = part.get("done", False)
-            print(f"[Inference] Received chunk: {content!r}, done: {done}")
+            tokens += content
+            with display_lock:
+                current_tokens = tokens
             yield content, done
             if done:
                 break
-    except Exception as e:
-        print("[Inference] Error during streaming inference:", e)
+    except Exception:
         yield "", True
 
 def chat_completion_nonstream(user_message):
     payload = build_payload(user_message)
-    print("[Inference] Sending non-streaming request via ollama.chat()...")
     try:
         response = chat(model=CONFIG["model"], messages=payload["messages"], stream=False)
         result = response["message"]["content"]
-        print("[Inference] Non-streamed result received:")
-        print(result)
         return result
-    except Exception as e:
-        print("[Inference] Error during non-stream inference:", e)
+    except Exception:
         return ""
 
 #############################################
 # Step 9: Processing the Model Output
 #############################################
 def process_text(text, skip_tts=False):
-    global stop_flag
+    global current_tokens, current_tool_calls
     processed_text = convert_numbers_to_words(text)
-    print("[Process] Processed text:", processed_text)
     sentence_endings = re.compile(r'[.?!]+')
+    tokens = ""
     if CONFIG["stream"]:
         buffer = ""
-        sentences = []
         for content, done in chat_completion_stream(processed_text):
-            if stop_flag:
-                break
-            print(f"[Process] Received chunk: {content!r}")
             buffer += content
-            print(f"[Process] Buffer now: {buffer!r}")
+            tokens += content
+            with display_lock:
+                current_tokens = tokens
             while True:
                 match = sentence_endings.search(buffer)
                 if not match:
@@ -907,51 +702,22 @@ def process_text(text, skip_tts=False):
                 sentence = buffer[:end_index].strip()
                 buffer = buffer[end_index:].lstrip()
                 if sentence:
-                    print(f"[Process] Detected complete sentence: {sentence!r}")
-                    sentences.append(sentence)
                     if not skip_tts:
                         threading.Thread(target=enqueue_sentence_for_tts, args=(sentence,), daemon=True).start()
             if done:
-                print("[Process] Inference indicated completion.")
                 break
-        print("[Process] Stream ended. Final buffer:", buffer)
         if buffer.strip():
             leftover = buffer.strip()
-            print(f"[Process] Final leftover sentence: {leftover!r}")
-            sentences.append(leftover)
-            if not skip_tts:
-                threading.Thread(target=enqueue_sentence_for_tts, args=(leftover,), daemon=True).start()
-        full_text = "".join(sentences)
-        print("[Process] Full assembled response:")
-        print(full_text)
-        return full_text
+            tokens += leftover
+            with display_lock:
+                current_tokens = tokens
+        return tokens
     else:
         result = chat_completion_nonstream(processed_text)
-        print("[Process] Non-streamed response:")
-        print(result)
-        sentences = []
-        buffer = result
-        sentence_endings = re.compile(r'[.?!]+')
-        while True:
-            match = sentence_endings.search(buffer)
-            if not match:
-                break
-            end_index = match.end()
-            sentence = buffer[:end_index].strip()
-            buffer = buffer[end_index:].lstrip()
-            if sentence:
-                sentences.append(sentence)
-                if not skip_tts:
-                    enqueue_sentence_for_tts(sentence)
-        if buffer.strip():
-            leftover = buffer.strip()
-            sentences.append(leftover)
-            if not skip_tts:
-                enqueue_sentence_for_tts(leftover)
-        full_text = "".join(sentences)
-        print("[Process] Full assembled non-streamed response:")
-        print(full_text)
-        return full_text
+        tokens = result
+        with display_lock:
+            current_tokens = tokens
+        return tokens
 
 #############################################
 # Step 10: Update History File with New Messages
@@ -965,9 +731,8 @@ def update_history(user_message, assistant_message):
     try:
         with open(CONFIG["history"], 'w') as f:
             json.dump(current_history, f, indent=2)
-        print("[History] History file updated.")
-    except Exception as e:
-        print(f"[History] Warning: Could not write to history file {CONFIG['history']}: {e}")
+    except Exception:
+        pass
 
 #############################################
 # Step 11: Handling Concurrent Requests and Cancellation
@@ -979,28 +744,20 @@ inference_lock = threading.Lock()
 def inference_thread(user_message, result_holder, model_actual_name, skip_tts):
     global stop_flag
     stop_flag = False
-    print("[Inference Thread] Starting inference for message:")
-    print(user_message)
     result = process_text(user_message, skip_tts)
-    print("[Inference Thread] Inference result obtained.")
     result_holder.append(result)
 
 def new_request(user_message, model_actual_name, depth=0, skip_tts=False):
-    global stop_flag, current_thread
-    print("[Request] New inference request received.")
-    beep(120, 0.05)
+    global stop_flag, current_thread, current_tool_calls, current_request
+    with display_lock:
+        current_request = user_message
+        current_tool_calls = ""
     with inference_lock:
         if current_thread and current_thread.is_alive():
-            print("[Request] Interrupting current inference...")
-            beep(80, 0.05)
             stop_flag = True
             current_thread.join()
             stop_flag = False
-        print("[Request] Stopping current TTS thread...")
-        beep(80, 0.05)
         stop_tts_thread()
-        print("[Request] Restarting TTS thread...")
-        beep(120, 0.05)
         start_tts_thread()
         result_holder = []
         current_thread = threading.Thread(
@@ -1010,23 +767,19 @@ def new_request(user_message, model_actual_name, depth=0, skip_tts=False):
         current_thread.start()
     current_thread.join()
     result = result_holder[0] if result_holder else ""
-    # If a tool call is detected in the response and we're in the first iteration, clear TTS
-    # and perform one more iteration with the tool output appended.
     tool_call = extract_tool_call(result)
     if tool_call and depth < 1:
-        print("[Tool] Tool call detected, executing tool function.")
-        stop_tts_thread()  # Clear any TTS from the current (intermediate) iteration.
+        with display_lock:
+            current_tool_calls = tool_call
+        stop_tts_thread()
         new_message = user_message + "\n" + tool_call
-        # The final iteration should pass its result to TTS.
         return new_request(new_message, model_actual_name, depth=depth+1, skip_tts=False)
-    print("[Request] Inference complete. Returning result.")
     return result
 
 #############################################
 # Step 12: Interactive Command-Line Interface
 #############################################
 def interactive_loop():
-    print("\n[Interactive] Enter commands (/send, /model, /history_depth, /quit):")
     while True:
         try:
             cmd = input("[Interactive] > ").strip()
@@ -1036,35 +789,29 @@ def interactive_loop():
             continue
         if cmd.startswith("/send "):
             message = cmd[len("/send "):].strip()
-            print(f"[Interactive] Sending message: {message}")
+            with display_lock:
+                global current_request
+                current_request = message
             result = new_request(message, CONFIG["model"])
-            print("[Interactive] Inference result:")
-            print(result)
+            update_history(message, result)
         elif cmd.startswith("/model "):
             new_model = cmd[len("/model "):].strip()
-            print(f"[Interactive] Changing model to: {new_model}")
             CONFIG["model"] = new_model
             ensure_ollama_and_model()
             update_config_file()
-            print(f"[Interactive] Model updated to: {CONFIG['model']}")
         elif cmd.startswith("/history_depth "):
             try:
                 depth = int(cmd[len("/history_depth "):].strip())
-                print(f"[Interactive] Setting history depth to: {depth}")
                 CONFIG["history_depth"] = depth
                 update_config_file()
             except ValueError:
-                print("[Interactive] Invalid history depth value. Please enter an integer.")
+                pass
         elif cmd == "/quit":
-            print("[Interactive] Quitting interactive mode.")
             break
-        else:
-            print("[Interactive] Unknown command. Commands are: /send, /model, /history_depth, /quit.")
 
 def start_interactive_thread():
     thread = threading.Thread(target=interactive_loop, daemon=True)
     thread.start()
-    print("[Interactive] Interactive command thread started.")
 
 #############################################
 # Step 13: Start Server with Enhanced Interrupt Handling
@@ -1076,72 +823,51 @@ client_threads = []
 client_threads_lock = threading.Lock()
 
 def handle_client_connection(client_socket, address, model_actual_name):
-    global stop_flag, current_thread
-    print(f"\n[Server] Accepted connection from {address}")
-    beep(120, 0.05)
     try:
         data = client_socket.recv(65536)
         if not data:
-            print(f"[Server] No data from {address}, closing connection.")
             return
         user_message = data.decode('utf-8').strip()
         if not user_message:
-            print(f"[Server] Empty prompt from {address}, ignoring.")
             return
-        print(f"[Server] Received prompt from {address}: {user_message}")
-        beep(120, 0.05)
         result = new_request(user_message, model_actual_name)
         client_socket.sendall(result.encode('utf-8'))
         update_history(user_message, result)
-    except Exception as e:
-        print(f"[Server] Error handling client {address}: {e}")
+    except Exception:
+        pass
     finally:
         client_socket.close()
-        print(f"[Server] Connection with {address} closed.")
 
 def start_server():
     global client_threads
-    print("\n[Server] Starting TTS thread...")
     start_tts_thread()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         server.bind((HOST, PORT))
-        print(f"[Server] Bound to {HOST}:{PORT}")
-    except Exception as e:
-        print(f"[Server] Error binding to {HOST}:{PORT}: {e}. Using default 0.0.0.0:64162")
+    except Exception:
         server.bind(('0.0.0.0', 64162))
     server.listen(5)
-    print(f"[Server] Listening for incoming connections on {HOST}:{PORT}...")
     model_actual_name = CONFIG["model"]
-    try:
-        while True:
-            try:
-                client_sock, addr = server.accept()
-                print(f"[Server] New connection accepted from {addr}")
-                client_thread = threading.Thread(
-                    target=handle_client_connection,
-                    args=(client_sock, addr, model_actual_name)
-                )
-                client_thread.start()
-                with client_threads_lock:
-                    client_threads.append(client_thread)
-            except KeyboardInterrupt:
-                print("\n[Server] Keyboard interrupt received. Shutting down server.")
-                break
-            except Exception as e:
-                print(f"[Server] Error accepting connections: {e}")
-    finally:
-        server.close()
-        print("\n[Server] Server socket closed.")
-        print("[Server] Stopping TTS thread...")
-        stop_tts_thread()
-        print("[Server] Waiting for client threads to finish...")
-        with client_threads_lock:
-            for t in client_threads:
-                t.join()
-        print("[Server] All client threads have been terminated.")
-        print("[Server] Shutting down complete.")
+    while True:
+        try:
+            client_sock, addr = server.accept()
+            client_thread = threading.Thread(
+                target=handle_client_connection,
+                args=(client_sock, addr, model_actual_name)
+            )
+            client_thread.start()
+            with client_threads_lock:
+                client_threads.append(client_thread)
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            pass
+    server.close()
+    stop_tts_thread()
+    with client_threads_lock:
+        for t in client_threads:
+            t.join()
 
 #############################################
 # Step 14: Interactive Command-Line Interface Thread
@@ -1149,7 +875,6 @@ def start_server():
 def start_interactive_thread():
     thread = threading.Thread(target=interactive_loop, daemon=True)
     thread.start()
-    print("[Interactive] Interactive command thread started.")
 
 #############################################
 # Utility: Remove Emojis from text
@@ -1157,21 +882,66 @@ def start_interactive_thread():
 def remove_emojis(text):
     emoji_pattern = re.compile(
         "["
-        u"\U0001F600-\U0001F64F"  # emoticons
-        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-        u"\U0001F680-\U0001F6FF"  # transport & map symbols
-        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        u"\U0001F600-\U0001F64F"
+        u"\U0001F300-\U0001F5FF"
+        u"\U0001F680-\U0001F6FF"
+        u"\U0001F1E0-\U0001F1FF"
         "]+",
         flags=re.UNICODE
     )
     return emoji_pattern.sub(r'', text)
 
 #############################################
-# Main
+# New: Monitor the script file for changes and restart
 #############################################
-if __name__ == "__main__":
+def monitor_script(interval=5):
+    script_path = os.path.abspath(__file__)
+    last_mtime = os.path.getmtime(script_path)
+    while True:
+        time.sleep(interval)
+        try:
+            new_mtime = os.path.getmtime(script_path)
+            if new_mtime != last_mtime:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            pass
+
+#############################################
+# Curses Display Function
+#############################################
+def curses_display(stdscr):
+    global current_request, current_tokens, current_tool_calls, tts_flag, tts_playing
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    while True:
+        with display_lock:
+            stdscr.erase()
+            stdscr.addstr(0, 0, f"User: {current_request}")
+            stdscr.addstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Flag: {tts_flag} | TTS Playing: {tts_playing}")
+            stdscr.hline(2, 0, '-', curses.COLS)
+            stdscr.addstr(3, 0, "Model Tokens:")
+            stdscr.addstr(4, 0, current_tokens)
+        stdscr.refresh()
+        time.sleep(0.5)
+
+#############################################
+# Main: Launch Curses and Start Threads
+#############################################
+def main(stdscr):
+    curses_thread = threading.Thread(target=curses_display, args=(stdscr,), daemon=True)
+    curses_thread.start()
     monitor_thread = threading.Thread(target=monitor_config, daemon=True)
     monitor_thread.start()
-    
+    script_monitor_thread = threading.Thread(target=monitor_script, daemon=True)
+    script_monitor_thread.start()
     start_interactive_thread()
-    start_server()
+    server_thread = threading.Thread(target=start_server, daemon=True)
+    server_thread.start()
+    while True:
+        try:
+            time.sleep(1)
+        except KeyboardInterrupt:
+            break
+
+if __name__ == "__main__":
+    curses.wrapper(main)

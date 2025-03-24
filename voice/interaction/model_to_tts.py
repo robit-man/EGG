@@ -54,7 +54,7 @@ from ollama import chat  # Use Ollama Python library for inference
 #############################################
 def beep(freq=3000, duration=0.05):
     """
-    Play a rapid, beep using nested sine and square tones.
+    Play a rapid, complex futuristic beep using nested sine and square tones.
     The beep consists of simultaneous sine waves at 3000Hz and 4500Hz, and square waves at 6000Hz and 9000Hz.
     No artificial delay is added.
     """
@@ -67,7 +67,7 @@ def beep(freq=3000, duration=0.05):
     ]
     try:
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        print(f"[Beep] beep played: {' '.join(command)}")
+        print(f"[Beep] Complex futuristic beep played: {' '.join(command)}")
     except Exception as e:
         print(f"[Beep] Complex beep failed: {e}")
 
@@ -344,23 +344,70 @@ def convert_numbers_to_words(text):
             return number_str
     return re.sub(r'\b\d+\b', replace_num, text)
 
-# New: Emoji removal filter
-def remove_emojis(text):
-    emoji_pattern = re.compile(
-        "["
-        u"\U0001F600-\U0001F64F"  # emoticons
-        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-        u"\U0001F680-\U0001F6FF"  # transport & map symbols
-        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
-        "]+",
-        flags=re.UNICODE
-    )
-    return emoji_pattern.sub(r'', text)
+# New: Expose tool for capturing a camera image.
+def see_whats_around() -> str:
+    """
+    Fetch image from camera URL and save locally, returning the file path.
+    """
+    url = "http://127.0.0.1:8080/camera/0"
+    try:
+        response = requests.get(url, stream=True, timeout=5)
+        if response.status_code == 200:
+            images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+            if not os.path.exists(images_dir):
+                os.makedirs(images_dir)
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"camera_{timestamp}.jpg"
+            file_path = os.path.join(images_dir, filename)
+            with open(file_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"[Tool] Image saved to {file_path}")
+            return file_path
+        else:
+            print("[Tool] Failed to fetch image: Status code", response.status_code)
+            return "Error: Could not fetch image."
+    except Exception as e:
+        print("[Tool] Exception fetching image:", e)
+        return f"Error: {str(e)}"
 
+# New: Extract tool call from model response.
+def extract_tool_call(text):
+    import io
+    from contextlib import redirect_stdout
+    pattern = r"```tool_code\s*(.*?)\s*```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        code = match.group(1).strip()
+        f = io.StringIO()
+        with redirect_stdout(f):
+            try:
+                result = eval(code, globals())
+            except Exception as e:
+                result = f"Error executing tool: {e}"
+        output = f.getvalue()
+        r = result if output == '' else output
+        return f'```tool_output\n{r}\n```'
+    return None
+
+# Modified build_payload now includes tool calling instructions.
 def build_payload(user_message):
     messages = []
     if CONFIG["system"]:
         messages.append({"role": "system", "content": CONFIG["system"]})
+    # Append tool calling instructions so that the model knows about the available tool.
+    tool_instructions = (
+        "At each turn, if you decide to invoke any of the function(s), it should be wrapped with ```tool_code```. "
+        "The following Python method is available:\n\n"
+        "```python\n"
+        "def see_whats_around() -> str:\n"
+        "    \"\"\"Fetch image from camera URL and save locally, returning the file path.\"\"\"\n"
+        "```\n\n"
+        "When using a tool call, the generated code should be readable and efficient. "
+        "The response from a method call will be wrapped in ```tool_output```."
+    )
+    messages.append({"role": "system", "content": tool_instructions})
     # Truncate history to the last CONFIG["history_depth"] messages
     history_depth = CONFIG.get("history_depth", 40)
     if len(history_messages) > history_depth:
@@ -564,7 +611,7 @@ def chat_completion_nonstream(user_message):
 #############################################
 # Step 9: Processing the Model Output
 #############################################
-def process_text(text):
+def process_text(text, skip_tts=False):
     global stop_flag
     processed_text = convert_numbers_to_words(text)
     print("[Process] Processed text:", processed_text)
@@ -588,7 +635,8 @@ def process_text(text):
                 if sentence:
                     print(f"[Process] Detected complete sentence: {sentence!r}")
                     sentences.append(sentence)
-                    threading.Thread(target=enqueue_sentence_for_tts, args=(sentence,), daemon=True).start()
+                    if not skip_tts:
+                        threading.Thread(target=enqueue_sentence_for_tts, args=(sentence,), daemon=True).start()
             if done:
                 print("[Process] Inference indicated completion.")
                 break
@@ -597,7 +645,8 @@ def process_text(text):
             leftover = buffer.strip()
             print(f"[Process] Final leftover sentence: {leftover!r}")
             sentences.append(leftover)
-            threading.Thread(target=enqueue_sentence_for_tts, args=(leftover,), daemon=True).start()
+            if not skip_tts:
+                threading.Thread(target=enqueue_sentence_for_tts, args=(leftover,), daemon=True).start()
         full_text = "".join(sentences)
         print("[Process] Full assembled response:")
         print(full_text)
@@ -618,11 +667,13 @@ def process_text(text):
             buffer = buffer[end_index:].lstrip()
             if sentence:
                 sentences.append(sentence)
-                enqueue_sentence_for_tts(sentence)
+                if not skip_tts:
+                    enqueue_sentence_for_tts(sentence)
         if buffer.strip():
             leftover = buffer.strip()
             sentences.append(leftover)
-            enqueue_sentence_for_tts(leftover)
+            if not skip_tts:
+                enqueue_sentence_for_tts(leftover)
         full_text = "".join(sentences)
         print("[Process] Full assembled non-streamed response:")
         print(full_text)
@@ -651,16 +702,16 @@ stop_flag = False
 current_thread = None
 inference_lock = threading.Lock()
 
-def inference_thread(user_message, result_holder, model_actual_name):
+def inference_thread(user_message, result_holder, model_actual_name, skip_tts):
     global stop_flag
     stop_flag = False
     print("[Inference Thread] Starting inference for message:")
     print(user_message)
-    result = process_text(user_message)
+    result = process_text(user_message, skip_tts)
     print("[Inference Thread] Inference result obtained.")
     result_holder.append(result)
 
-def new_request(user_message, model_actual_name):
+def new_request(user_message, model_actual_name, depth=0, skip_tts=False):
     global stop_flag, current_thread
     print("[Request] New inference request received.")
     beep(120, 0.05)
@@ -680,11 +731,20 @@ def new_request(user_message, model_actual_name):
         result_holder = []
         current_thread = threading.Thread(
             target=inference_thread,
-            args=(user_message, result_holder, model_actual_name)
+            args=(user_message, result_holder, model_actual_name, skip_tts)
         )
         current_thread.start()
     current_thread.join()
     result = result_holder[0] if result_holder else ""
+    # If a tool call is detected in the response and we're in the first iteration, clear TTS
+    # and perform one more iteration with the tool output appended.
+    tool_call = extract_tool_call(result)
+    if tool_call and depth < 1:
+        print("[Tool] Tool call detected, executing tool function.")
+        stop_tts_thread()  # Clear any TTS from the current (intermediate) iteration.
+        new_message = user_message + "\n" + tool_call
+        # The final iteration should pass its result to TTS.
+        return new_request(new_message, model_actual_name, depth=depth+1, skip_tts=False)
     print("[Request] Inference complete. Returning result.")
     return result
 
@@ -816,6 +876,21 @@ def start_interactive_thread():
     thread = threading.Thread(target=interactive_loop, daemon=True)
     thread.start()
     print("[Interactive] Interactive command thread started.")
+
+#############################################
+# Utility: Remove Emojis from text
+#############################################
+def remove_emojis(text):
+    emoji_pattern = re.compile(
+        "["
+        u"\U0001F600-\U0001F64F"  # emoticons
+        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+        u"\U0001F680-\U0001F6FF"  # transport & map symbols
+        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        "]+",
+        flags=re.UNICODE
+    )
+    return emoji_pattern.sub(r'', text)
 
 #############################################
 # Main

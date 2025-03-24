@@ -13,6 +13,7 @@ import time
 from contextlib import redirect_stdout
 import inspect
 import curses
+import textwrap
 
 #############################################
 # Global Variables for Curses Display
@@ -84,7 +85,7 @@ DEFAULT_CONFIG = {
     "model": "gemma3:12b",
     "stream": True,
     "format": None,
-    "system": None,
+    "system": "YOU ARE EMBODIED INSIDE AN EGG SHAPED ROBOT, You can see the world and learn about things using TOOL CALLS which you have available to you! You have a set of chat messages back and forth, as well as a set of tools you can call, which are layed out as available functions, during each turn, you can choose to call a tool, but in calling the tool, do not  explain it or preface or read the contents of the function, simply wrap the function and any arguments passed in in triple backticks for the parser to catch it, and then the tool response will be passed to you, at which point you should package the tool response, and the initial user request into an appropriate concise reply, no verbose explaination of steps you are taking, words like (processing) just do all of that silently and only respond conversationally. Sometimes no tool call is needed and it is up to you to decide whether or not to use the tools available based on the users input during their turn.",
     "raw": False,
     "history": "chat.json",
     "history_depth": 100,
@@ -520,11 +521,31 @@ def curses_display(stdscr):
     while True:
         with display_lock:
             stdscr.erase()
-            stdscr.addstr(0, 0, f"User: {current_request}")
-            stdscr.addstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Flag: {tts_flag} | TTS Playing: {tts_playing}")
-            stdscr.hline(2, 0, '-', curses.COLS)
-            stdscr.addstr(3, 0, "Model Tokens:")
-            stdscr.addstr(4, 0, current_tokens)
+            max_height, max_width = stdscr.getmaxyx()
+            try:
+                stdscr.addnstr(0, 0, f"User: {current_request}", max_width)
+            except curses.error:
+                pass
+            try:
+                stdscr.addnstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Flag: {tts_flag} | TTS Playing: {tts_playing}", max_width)
+            except curses.error:
+                pass
+            try:
+                stdscr.hline(2, 0, '-', max_width)
+            except curses.error:
+                pass
+            try:
+                stdscr.addnstr(3, 0, "Model Tokens:", max_width)
+            except curses.error:
+                pass
+            wrapped_lines = textwrap.wrap(current_tokens, width=max_width)
+            for idx, line in enumerate(wrapped_lines):
+                if 4 + idx >= max_height:
+                    break
+                try:
+                    stdscr.addnstr(4 + idx, 0, line, max_width)
+                except curses.error:
+                    pass
         stdscr.refresh()
         time.sleep(0.5)
 
@@ -553,7 +574,6 @@ def synthesize_and_play(prompt):
                 tts_flag = False
                 tts_playing = False
                 return
-            # Redirect stdout and stderr to DEVNULL to prevent any console output from aplay
             aplay = subprocess.Popen(
                 ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
                 stdin=subprocess.PIPE,
@@ -611,7 +631,6 @@ def stop_tts_thread():
 def enqueue_sentence_for_tts(sentence):
     if tts_queue and not tts_stop_flag:
         tts_queue.put(sentence)
-
 
 #############################################
 # Step 7.1: Non-blocking beep while waiting #
@@ -907,7 +926,7 @@ def monitor_script(interval=5):
             pass
 
 #############################################
-# Curses Display Function
+# Curses Display Function with Scrolling/ Wrapping
 #############################################
 def curses_display(stdscr):
     global current_request, current_tokens, current_tool_calls, tts_flag, tts_playing
@@ -916,11 +935,31 @@ def curses_display(stdscr):
     while True:
         with display_lock:
             stdscr.erase()
-            stdscr.addstr(0, 0, f"User: {current_request}")
-            stdscr.addstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Flag: {tts_flag} | TTS Playing: {tts_playing}")
-            stdscr.hline(2, 0, '-', curses.COLS)
-            stdscr.addstr(3, 0, "Model Tokens:")
-            stdscr.addstr(4, 0, current_tokens)
+            max_height, max_width = stdscr.getmaxyx()
+            try:
+                stdscr.addnstr(0, 0, f"User: {current_request}", max_width)
+            except curses.error:
+                pass
+            try:
+                stdscr.addnstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Flag: {tts_flag} | TTS Playing: {tts_playing}", max_width)
+            except curses.error:
+                pass
+            try:
+                stdscr.hline(2, 0, '-', max_width)
+            except curses.error:
+                pass
+            try:
+                stdscr.addnstr(3, 0, "Model Tokens:", max_width)
+            except curses.error:
+                pass
+            wrapped_lines = textwrap.wrap(current_tokens, width=max_width)
+            for idx, line in enumerate(wrapped_lines):
+                if 4 + idx >= max_height:
+                    break
+                try:
+                    stdscr.addnstr(4 + idx, 0, line, max_width)
+                except curses.error:
+                    pass
         stdscr.refresh()
         time.sleep(0.5)
 

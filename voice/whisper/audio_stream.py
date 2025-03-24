@@ -42,9 +42,9 @@ CHANNELS = 1              # Mono
 FORMAT = None             # Will be set after PyAudio import
 CHUNK_DURATION = 5        # seconds (used for fixed-length chunks, if needed)
 BLOCK_DURATION = 0.2      # seconds per block
-BLOCK_SIZE = int(RATE * BLOCK_DURATION)
-# For the silence buffer: 1 second = 5 blocks of 0.2 sec each
-SILENCE_THRESHOLD_BLOCKS = 5
+BLOCK_SIZE = int(RATE * BLOCK_DURATION)  # samples per block
+# For the silence buffer: 3 seconds = 3/0.2 = 15 blocks
+SILENCE_THRESHOLD_BLOCKS = 15
 
 # ======================= Global Variables for Audio UI =================
 current_rms = 0.0
@@ -124,7 +124,7 @@ def find_tuning_device(vid=0x2886, pid=0x0018):
     return Tuning(dev)
 
 # ======================= System Volume Helpers =====================
-def fade_out_volume(duration=0.2, steps=10):
+def fade_out_volume(duration=0.1, steps=10):
     """
     Gradually reduce system volume from 100% to 0% over 'duration' seconds.
     """
@@ -142,13 +142,13 @@ def fade_out_volume(duration=0.2, steps=10):
             logger.warning(f"Fade-out step failed: {e}")
         time.sleep(interval)
 
-def fade_in_volume(duration=0.2, steps=10):
+def fade_in_volume(duration=0.1, steps=10):
     """
     Gradually restore system volume from 0% to 100% over 'duration' seconds.
     """
     interval = duration / steps
     for i in range(steps):
-        vol = int((100/steps) * (i+1))
+        vol = int((80/steps) * (i+1))
         try:
             if shutil.which("pactl"):
                 subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{vol}%"], check=True)
@@ -196,11 +196,9 @@ def audio_capture_thread(dev):
       - When speech is detected (via SPEECHDETECTED), if not already capturing,
         fade out the system volume over 1 second and begin capturing audio blocks.
       - While capturing, reset a silence counter for each block that has speech.
-      - If a block is encountered with no speech, increment the silence counter.
-      - Once silence has been present for at least 1 second (5 blocks), consider the utterance finished:
-          * Send the captured audio chunk downstream.
-          * Fade the system volume back in over 1 second.
-          * Reset the capturing state.
+      - If silence lasts for at least 3 seconds (15 blocks) with no speech,
+        finalize the chunk, send it downstream, fade the volume back in over 1 second,
+        and then reset capturing state.
       - If no speech is detected and not capturing, nothing is sent.
     """
     global current_rms, speech_detected_current, current_doa, last_sent_message, running, SERVER_URL
@@ -258,7 +256,7 @@ def audio_capture_thread(dev):
             silence_count = 0
             if not capturing:
                 # Speech just started – fade out volume and start capturing
-                fade_out_volume()
+                fade_out_volume(duration=1.0, steps=10)
                 capturing = True
                 current_chunk = []
             current_chunk.append(block_data)
@@ -267,11 +265,11 @@ def audio_capture_thread(dev):
             if capturing:
                 silence_count += 1
                 current_chunk.append(block_data)
-                # If silence lasts for at least 1 second (5 blocks), finalize the chunk.
+                # If silence lasts for at least 3 seconds (15 blocks), finalize the chunk.
                 if silence_count >= SILENCE_THRESHOLD_BLOCKS:
                     chunk_data = b"".join(current_chunk)
                     last_sent_message = "Sent captured chunk with speech."
-                    logger.info("Silence detected for 1 sec. Sending captured audio chunk.")
+                    logger.info("No speech detected for 3 seconds. Sending captured audio chunk.")
                     try:
                         response = requests.post(SERVER_URL, data=chunk_data)
                         if response.status_code == 200:
@@ -282,7 +280,7 @@ def audio_capture_thread(dev):
                         last_sent_message = f"Error sending chunk: {e}"
                         logger.error(last_sent_message)
                     # Fade the volume back in and reset capturing state
-                    fade_in_volume()
+                    fade_in_volume(duration=1.0, steps=10)
                     capturing = False
                     current_chunk = []
                     silence_count = 0
@@ -328,7 +326,7 @@ def curses_main(stdscr):
         except Exception:
             pass
         time.sleep(0.1)
-    
+
 def send_and_receive(prompt):
     """
     Handles sending the prompt to the server and receiving the response.
@@ -386,7 +384,7 @@ def main():
     try:
         tuning_dev.write('AECFREEZEONOFF', 0)
         tuning_dev.write('ECHOONOFF', 1)
-        tuning_dev.write('AECSILENCELEVEL', 1e-7)
+        tuning_dev.write('AECSILENCELEVEL', 1e-5)
         logger.info("AEC settings updated: AECFREEZEONOFF=0, ECHOONOFF=1, AECSILENCELEVEL=1e-7")
     except Exception as e:
         logger.warning(f"Could not set recommended AEC parameters: {e}")

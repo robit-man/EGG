@@ -25,7 +25,6 @@ if sys.prefix == sys.base_prefix:
 # ----------------- Imports (inside venv) -----------------
 import glob
 import socket
-import time
 from flask import Flask, Response, render_template_string
 
 # ----------------- Configuration -----------------
@@ -40,7 +39,6 @@ def get_camera_devices():
     return devices
 
 # ----------------- Spawn GStreamer Pipelines -----------------
-# For each camera device, start a gst-launch process that outputs an MJPEG stream over TCP.
 devices = get_camera_devices()
 if not devices:
     print("No camera devices found at /dev/video*")
@@ -49,8 +47,7 @@ if not devices:
 for i, device in enumerate(devices):
     port = BASE_PORT + i
     camera_ports[i] = port
-    # The pipeline is based on your working bash pipeline but modified to encode as JPEG and output via TCP.
-    # (We use 'jpegenc' and 'multipartmux' with boundary "frame" to produce a proper MJPEG stream.)
+    # Pipeline: encode as JPEG, mux into multipart stream over TCP.
     command = (
         f'gst-launch-1.0 nvv4l2camerasrc device={device} ! '
         f'"video/x-raw(memory:NVMM), format=(string)UYVY, width=(int)1920, height=(int)1080" ! '
@@ -60,8 +57,8 @@ for i, device in enumerate(devices):
         f'tcpserversink host=0.0.0.0 port={port}'
     )
     print(f"Starting GStreamer pipeline for {device} on port {port}:\n{command}\n")
-    # Start the process (stdout/stderr are captured so you can review logs if needed)
-    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(command, shell=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     gst_processes.append(proc)
 
 # ----------------- Flask Application -----------------
@@ -73,15 +70,15 @@ def index():
     <!doctype html>
     <html>
       <head>
-        <title>Camera Streams</title>
+        <title>Camera Snapshots</title>
       </head>
       <body>
-        <h1>Camera Streams</h1>
+        <h1>Camera Snapshots</h1>
         {% for i in camera_ids %}
           <div style="margin-bottom:20px;">
             <h3>Camera {{ i }} (TCP Port {{ camera_ports[i] }})</h3>
-            <!-- The img src points to our Flask proxy route -->
-            <img src="/camera/{{ i }}" width="1080" height="1920" alt="Camera {{ i }} stream">
+            <!-- The img src points to our snapshot route -->
+            <img src="/camera/{{ i }}" width="1080" height="1920" alt="Camera {{ i }} snapshot">
           </div>
           <hr>
         {% endfor %}
@@ -92,29 +89,40 @@ def index():
     return render_template_string(html, camera_ids=camera_ids, camera_ports=camera_ports)
 
 @app.route("/camera/<int:cam_id>")
-def camera_stream(cam_id):
+def camera_snapshot(cam_id):
     if cam_id not in camera_ports:
-        return "Camera not found", 404
+        return Response(b"Camera not found", status=404, mimetype="text/plain")
     port = camera_ports[cam_id]
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.connect(("127.0.0.1", port))
     except Exception as e:
-        return f"Error connecting to camera stream on port {port}: {e}", 500
+        error_msg = f"Error connecting to camera stream on port {port}: {e}"
+        return Response(error_msg.encode("utf-8"), status=500, mimetype="text/plain")
 
-    def generate():
-        try:
-            while True:
-                data = s.recv(1024)
-                if not data:
-                    break
-                yield data
-        except Exception as e:
-            print(f"Error reading from socket: {e}")
-        finally:
-            s.close()
+    # Read from the socket until a complete JPEG is received
+    data = b""
+    frame = None
+    try:
+        while True:
+            chunk = s.recv(1024)
+            if not chunk:
+                break
+            data += chunk
+            start = data.find(b'\xff\xd8')  # JPEG start marker
+            end = data.find(b'\xff\xd9')    # JPEG end marker
+            if start != -1 and end != -1 and end > start:
+                frame = data[start:end+2]
+                break
+    except Exception as e:
+        print(f"Error reading from socket: {e}")
+    finally:
+        s.close()
 
-    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    if frame:
+        return Response(frame, mimetype="image/jpeg")
+    else:
+        return Response(b"No frame received", status=500, mimetype="text/plain")
 
 # ----------------- Run Flask Server -----------------
 if __name__ == "__main__":

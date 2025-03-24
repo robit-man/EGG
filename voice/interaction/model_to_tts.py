@@ -17,7 +17,7 @@ from contextlib import redirect_stdout
 #############################################
 print("[VENV] Checking if running inside a virtual environment...")
 VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-NEEDED_PACKAGES = ["requests", "num2words", "ollama"]
+NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial"]
 
 def in_venv():
     is_in = hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
@@ -48,6 +48,8 @@ print("[Imports] Importing external modules...")
 import requests
 from num2words import num2words
 from ollama import chat  # Use Ollama Python library for inference
+import re
+import serial
 import psutil
 
 #############################################
@@ -346,17 +348,20 @@ def convert_numbers_to_words(text):
     return re.sub(r'\b\d+\b', replace_num, text)
 
 # New: Expose tool for capturing a camera image.
+
 def see_whats_around() -> str:
     """
     Fetch image from camera URL and save locally, returning the file path.
+    This should be used any time you want to gather more visual context.
     """
+    import requests
+    images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+    if not os.path.exists(images_dir):
+        os.makedirs(images_dir)
     url = "http://127.0.0.1:8080/camera/0"
     try:
         response = requests.get(url, stream=True, timeout=5)
         if response.status_code == 200:
-            images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
-            if not os.path.exists(images_dir):
-                os.makedirs(images_dir)
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"camera_{timestamp}.jpg"
@@ -364,47 +369,40 @@ def see_whats_around() -> str:
             with open(file_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"[Tool] Image saved to {file_path}")
             return file_path
         else:
-            print("[Tool] Failed to fetch image: Status code", response.status_code)
-            return "Error: Could not fetch image."
+            return f"Error: Received status code {response.status_code}"
     except Exception as e:
-        print("[Tool] Exception fetching image:", e)
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
-
-def get_battery_voltage():
+def get_battery_voltage() -> float:
     """
-    Returns an estimated battery voltage using psutil's sensors_battery().
+    Connect to the device via the serial port and read a raw ADC value.
+    The voltage is calculated using the formula:
     
-    The estimation maps battery.percent linearly between:
-      - EMPTY_VOLTAGE: 22.0 V (0%)
-      - FULLY_CHARGED_VOLTAGE: 29.4 V (100%)
-      
-    If battery information is unavailable, returns None.
+        voltage = (adc_value / 3030) * 29.0
+        
+    Adjust the port and baud rate as necessary.
     """
-    FULLY_CHARGED_VOLTAGE = 29.4
-    EMPTY_VOLTAGE = 22.0
-    battery = psutil.sensors_battery()
-    if battery is not None:
-        voltage = EMPTY_VOLTAGE + (battery.percent / 100.0) * (FULLY_CHARGED_VOLTAGE - EMPTY_VOLTAGE)
+    port = '/dev/ttyACM0'  # Update if necessary
+    baud_rate = 9600
+    try:
+        ser = serial.Serial(port, baud_rate, timeout=2)
+        # Read one line from the serial port
+        line = ser.readline().decode('utf-8').strip()
+        adc_value = int(line)
+        voltage = (adc_value / 3030) * 29.0
+        ser.close()
         return voltage
-    return None
+    except Exception as e:
+        return f"Error reading battery voltage: {e}"
 
-def get_system_utilization():
+def get_system_utilization() -> dict:
     """
-    Returns system utilization metrics as a dictionary:
-      - CPU usage percentage (averaged over 1 second)
-      - Memory usage percentage
-      - Disk usage percentage for the root partition
-      
-    Example return:
-        {
-            "cpu_usage": 12.3,
-            "memory_usage": 47.8,
-            "disk_usage": 67.2
-        }
+    Return system utilization metrics as a dictionary:
+      - 'cpu_usage': CPU usage percentage (averaged over 1 second)
+      - 'memory_usage': Memory usage percentage
+      - 'disk_usage': Disk usage percentage of the root partition
     """
     cpu_usage = psutil.cpu_percent(interval=1)
     memory_usage = psutil.virtual_memory().percent

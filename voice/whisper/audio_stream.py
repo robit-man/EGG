@@ -1,30 +1,59 @@
 #!/usr/bin/env python3
-
 import os
 import sys
 import subprocess
+
+# ----- Virtual Environment Bootstrapping (run BEFORE any external imports) -----
+VENV_DIR = "audio_venv"
+REQUIRED_PACKAGES = ["pyusb", "PyAudio", "requests"]
+
+if sys.prefix == sys.base_prefix:
+    # Not running inside a virtual environment; set it up.
+    if not os.path.exists(VENV_DIR):
+        print("Creating virtual environment...")
+        subprocess.check_call([sys.executable, "-m", "venv", VENV_DIR])
+    # Determine the correct Python executable for the venv.
+    if os.name == "nt":
+        python_executable = os.path.join(VENV_DIR, "Scripts", "python.exe")
+    else:
+        python_executable = os.path.join(VENV_DIR, "bin", "python")
+    # Upgrade pip and install required packages.
+    subprocess.check_call([python_executable, "-m", "pip", "install", "--upgrade", "pip"])
+    subprocess.check_call([python_executable, "-m", "pip", "install"] + REQUIRED_PACKAGES)
+    # Relaunch this script inside the virtual environment.
+    os.execv(python_executable, [python_executable] + sys.argv)
+# ----- End of Virtual Environment Bootstrapping -----
+
+
 import logging
 from pathlib import Path
 import time
+import threading
+import struct
+import math
+import curses
 
 # ======================= Configuration Constants =======================
-VENV_DIR = "audio_venv"
-REQUIRED_PACKAGES = [
-    "PyAudio",
-    "requests"
-]
-
 HOST = 'localhost'  # or the hostname/IP where the server runs
 PORT = 64167        # Updated port where the server listens for audio
 
 LOG_FILE = 'client_app.log'
 
-# Volume Threshold for Filtering Noise
-VOLUME_THRESHOLD = 300  # Adjust based on microphone sensitivity
-
-# Audio Chunk Size
+# Audio configuration
+RATE = 16000              # 16kHz
+CHANNELS = 1              # Mono
+FORMAT = None             # Will be set after PyAudio import
 CHUNK_DURATION = 5        # seconds
-CHUNK_SIZE = 16000 * CHUNK_DURATION  # 16kHz * seconds
+# We'll capture audio in smaller blocks for UI updates (200ms per block)
+BLOCK_DURATION = 0.2      # seconds
+BLOCK_SIZE = int(RATE * BLOCK_DURATION)  # samples per block
+NUM_BLOCKS = int(CHUNK_DURATION / BLOCK_DURATION)  # number of blocks per chunk
+
+# ======================= Global Variables for Audio UI =================
+current_rms = 0.0
+speech_detected_current = False
+last_sent_message = ""
+running = True  # Global flag to stop audio thread and UI
 
 # ======================= Logging Configuration ==========================
 logging.basicConfig(
@@ -34,223 +63,221 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================= Virtual Environment Management =================
+# ======================= USB Tuning Interface (for SPEECHDETECTED) =========
+import usb.core
+import usb.util
 
-def is_venv():
-    """
-    Check if the script is running inside a virtual environment.
-    """
-    return (
-        (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix) or
-        (hasattr(sys, 'real_prefix') and sys.real_prefix != sys.prefix)
-    )
+# For this script we only need the SPEECHDETECTED parameter.
+PARAMETERS = {
+    'SPEECHDETECTED': (19, 22, 'int', 1, 0, 'ro', 'Speech detection status.')
+}
 
-def create_venv():
-    """
-    Create a virtual environment in VENV_DIR if it doesn't exist.
-    """
-    if not os.path.exists(VENV_DIR):
-        logger.info("Creating virtual environment.")
-        print("Creating virtual environment...")
+class Tuning:
+    TIMEOUT = 100000
+
+    def __init__(self, dev):
+        self.dev = dev
+
+    def write(self, name, value):
         try:
-            subprocess.check_call([sys.executable, "-m", "venv", VENV_DIR])
-            logger.info("Virtual environment created successfully.")
-            print("Virtual environment created successfully.")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to create virtual environment: {e}")
-            sys.exit("Error: Failed to create virtual environment.")
-    else:
-        logger.info("Virtual environment already exists.")
-        print("Virtual environment already exists.")
-
-def install_dependencies():
-    """
-    Install required Python packages in the virtual environment.
-    """
-    logger.info("Installing dependencies in the virtual environment.")
-    print("Installing dependencies in the virtual environment...")
-    try:
-        if os.name == 'nt':
-            pip_executable = os.path.join(VENV_DIR, "Scripts", "pip.exe")
+            data = PARAMETERS[name]
+        except KeyError:
+            return
+        if data[5] == 'ro':
+            raise ValueError('{} is read-only'.format(name))
+        param_id = data[0]
+        if data[2] == 'int':
+            payload = struct.pack(b'iii', data[1], int(value), 1)
         else:
-            pip_executable = os.path.join(VENV_DIR, "bin", "pip")
-        
-        # Upgrade pip
-        subprocess.check_call([pip_executable, "install", "--upgrade", "pip"], stderr=subprocess.DEVNULL)
-        
-        # Install required packages
-        subprocess.check_call([pip_executable, "install"] + REQUIRED_PACKAGES, stderr=subprocess.DEVNULL)
-        logger.info("Dependencies installed successfully.")
-        print("Dependencies installed successfully.")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to install dependencies: {e}")
-        sys.exit("Error: Failed to install dependencies in the virtual environment.")
+            payload = struct.pack(b'ifi', data[1], float(value), 0)
+        self.dev.ctrl_transfer(
+            usb.util.CTRL_OUT | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_DEVICE,
+            0, 0, param_id, payload, self.TIMEOUT)
 
-def activate_venv():
-    """
-    Activate the virtual environment by modifying sys.path.
-    """
-    if os.name == 'nt':
-        venv_site_packages = Path(VENV_DIR) / "Lib" / "site-packages"
-    else:
-        venv_site_packages = Path(VENV_DIR) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
-    
-    if venv_site_packages.exists():
-        sys.path.insert(0, str(venv_site_packages))
-        logger.info("Virtual environment activated.")
-        print("Virtual environment activated.")
-    else:
-        logger.error(f"Site-packages directory not found in virtual environment at {venv_site_packages}.")
-        sys.exit("Error: Virtual environment site-packages directory not found.")
-
-def relaunch_in_venv():
-    """
-    Relaunch the current script within the virtual environment.
-    """
-    if os.name == 'nt':
-        python_executable = os.path.join(VENV_DIR, "Scripts", "python.exe")
-    else:
-        python_executable = os.path.join(VENV_DIR, "bin", "python")
-    
-    if not os.path.exists(python_executable):
-        logger.error(f"Python executable not found at {python_executable}")
-        sys.exit("Error: Python executable not found in the virtual environment.")
-    
-    logger.info("Relaunching the script within the virtual environment.")
-    print("Relaunching the script within the virtual environment...")
-    try:
-        subprocess.check_call([python_executable] + sys.argv)
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to relaunch the script within the virtual environment: {e}")
-        sys.exit("Error: Failed to relaunch the script within the virtual environment.")
-    sys.exit()
-
-def setup_virtual_environment():
-    """
-    Ensure that the virtual environment is set up and dependencies are installed.
-    If not running inside the virtual environment, set it up and relaunch the script within it.
-    """
-    if not is_venv():
-        create_venv()
-        install_dependencies()
-        relaunch_in_venv()
-    else:
-        activate_venv()
-
-# ======================= Audio Streaming Function =========================
-
-def send_audio_stream():
-    """
-    Captures audio from the microphone using PyAudio, filters out noise, and streams it to the server.
-    """
-    import pyaudio  # Import after activating venv
-    import requests  # Import after activating venv
-    import struct
-    import math
-
-    logger.info("Starting audio streaming.")
-    print("Starting audio streaming. Press Ctrl+C to stop.")
-    
-    # Configuration
-    FORMAT = pyaudio.paInt16  # 16-bit PCM
-    CHANNELS = 1              # Mono
-    RATE = 16000              # 16kHz
-    # CHUNK_DURATION and CHUNK_SIZE are already defined globally
-    
-    def calculate_rms(frames):
-        """
-        Calculate the Root Mean Square (RMS) amplitude of the audio frames.
-        
-        Parameters:
-            frames (bytes): The raw audio data.
-        
-        Returns:
-            float: The RMS value.
-        """
-        # Convert bytes to integers
-        count = len(frames) // 2  # 2 bytes per sample for paInt16
-        format = "<" + "h" * count  # little endian, signed short
+    def read(self, name):
         try:
-            samples = struct.unpack(format, frames)
-        except struct.error as e:
-            logger.error(f"Struct unpacking failed: {e}")
-            return 0.0
-        sum_squares = sum(sample**2 for sample in samples)
-        rms = math.sqrt(sum_squares / count) if count > 0 else 0.0
-        return rms
+            data = PARAMETERS[name]
+        except KeyError:
+            return None
+        param_id = data[0]
+        cmd = 0x80 | data[1]
+        if data[2] == 'int':
+            cmd |= 0x40
+        length = 8
+        response = self.dev.ctrl_transfer(
+            usb.util.CTRL_IN | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_DEVICE,
+            0, cmd, param_id, length, self.TIMEOUT)
+        response = struct.unpack(b'ii', response.tobytes())
+        if data[2] == 'int':
+            return response[0]
+        else:
+            return response[0] * (2.**response[1])
+
+    def close(self):
+        usb.util.dispose_resources(self.dev)
+
+def find_tuning_device(vid=0x2886, pid=0x0018):
+    dev = usb.core.find(idVendor=vid, idProduct=pid)
+    if not dev:
+        return None
+    return Tuning(dev)
+
+# ======================= Audio Streaming and Curses UI =====================
+def calculate_rms(frames):
+    """
+    Calculate the Root Mean Square (RMS) amplitude of the audio frames.
+    """
+    count = len(frames) // 2  # 2 bytes per sample for paInt16
+    if count == 0:
+        return 0.0
+    fmt = "<" + "h" * count
+    try:
+        samples = struct.unpack(fmt, frames)
+    except struct.error as e:
+        logger.error(f"Struct unpacking failed: {e}")
+        return 0.0
+    sum_squares = sum(sample**2 for sample in samples)
+    rms = math.sqrt(sum_squares / count)
+    return rms
+
+def audio_capture_thread(dev):
+    """
+    Captures audio from the microphone in blocks, monitors the SPEECHDETECTED
+    parameter via the USB device, and sends audio chunks downstream.
+    
+    If SPEECHDETECTED becomes 1 at any point within the chunk, the captured
+    chunk is sent; otherwise, no audio is sent.
+    """
+    global current_rms, speech_detected_current, last_sent_message, running, SERVER_URL
 
     try:
-        p = pyaudio.PyAudio()
-    except Exception as e:
-        logger.error(f"Failed to initialize PyAudio: {e}")
-        sys.exit(f"Error: Failed to initialize PyAudio: {e}")
+        import pyaudio
+        import requests
+        import wave
+    except ImportError as e:
+        logger.error(f"Failed to import required modules in audio thread: {e}")
+        running = False
+        return
+
+    p = pyaudio.PyAudio()
+    global FORMAT
+    FORMAT = pyaudio.paInt16  # 16-bit PCM
 
     try:
         stream = p.open(format=FORMAT,
                         channels=CHANNELS,
                         rate=RATE,
                         input=True,
-                        frames_per_buffer=CHUNK_SIZE)
+                        frames_per_buffer=BLOCK_SIZE)
         logger.info("Microphone stream opened.")
-        print("Microphone stream opened.")
     except Exception as e:
         logger.error(f"Failed to open microphone stream: {e}")
         p.terminate()
-        sys.exit(f"Error: Failed to open microphone stream: {e}")
+        running = False
+        return
+
+    # Optionally save noise for debugging.
+    DEBUG_SAVE_NOISE = True
+    DEBUG_AUDIO_DIR = "debug_noise"
+    os.makedirs(DEBUG_AUDIO_DIR, exist_ok=True)
+
+    while running:
+        chunk_blocks = []
+        speech_detected_current = False  # Reset flag for this chunk
+        for i in range(NUM_BLOCKS):
+            if not running:
+                break
+            try:
+                block_data = stream.read(BLOCK_SIZE, exception_on_overflow=False)
+            except Exception as e:
+                logger.error(f"Error reading audio block: {e}")
+                continue
+            current_rms = calculate_rms(block_data)
+            try:
+                # Poll the USB tuning device for speech detection state.
+                speech_state = dev.read("SPEECHDETECTED")
+                if speech_state == 1:
+                    speech_detected_current = True
+            except Exception as e:
+                logger.error(f"Error reading SPEECHDETECTED: {e}")
+            chunk_blocks.append(block_data)
+            time.sleep(BLOCK_DURATION * 0.1)  # slight pause for UI update
+
+        chunk_data = b"".join(chunk_blocks)
+        if speech_detected_current:
+            to_send = chunk_data
+            last_sent_message = "Sent chunk with speech."
+            logger.info("Speech detected in chunk. Sending audio chunk.")
+            try:
+                response = requests.post(SERVER_URL, data=to_send)
+                if response.status_code == 200:
+                    last_sent_message += " Downstream acknowledged."
+                else:
+                    last_sent_message += f" Downstream error: {response.status_code}"
+            except Exception as e:
+                last_sent_message = f"Error sending chunk: {e}"
+                logger.error(last_sent_message)
+        else:
+            # No speech detected; do not send any audio.
+            last_sent_message = "No speech detected. Chunk not sent."
+            logger.info("No speech detected in chunk. Not sending audio.")
 
     try:
-        while True:
-            try:
-                frames = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                if not frames:
-                    logger.warning("No audio frames received.")
-                    continue
-                
-                # Compute RMS to determine if audio contains speech
-                rms = calculate_rms(frames)
-                logger.debug(f"RMS: {rms}")
-                
-                if rms < VOLUME_THRESHOLD:
-                    logger.info("Audio chunk deemed as noise. Skipping transmission.")
-                    print("Noise detected. Skipping audio transmission.")
-                    continue  # Skip sending this chunk
-                
-                # Send the audio data via POST request
-                response = requests.post(SERVER_URL, data=frames)
-                
-                if response.status_code == 200:
-                    transcribed_text = response.json().get('transcribed_text', '')
-                    print(f"Transcribed Text: {transcribed_text}")
-                else:
-                    error = response.json().get('error', 'Unknown error')
-                    print(f"Error: {error}")
-            except KeyboardInterrupt:
-                logger.info("KeyboardInterrupt received. Stopping audio streaming.")
-                print("\nStopping audio streaming.")
-                break
-            except Exception as e:
-                logger.error(f"Error during audio streaming: {e}")
-                print(f"Error during audio streaming: {e}")
-                time.sleep(1)  # Brief pause before retrying
-    finally:
         stream.stop_stream()
         stream.close()
-        p.terminate()
-        logger.info("Microphone stream closed.")
-        print("Microphone stream closed.")
+    except Exception:
+        pass
+    p.terminate()
+    logger.info("Microphone stream closed.")
 
-# ======================= Socket Communication Functions ===================
+def curses_main(stdscr):
+    """
+    Curses interface that displays a continuously updating audio volume bar,
+    the current speech detection state, and the last sending status.
+    
+    Press 'q' to quit.
+    """
+    global current_rms, speech_detected_current, last_sent_message, running
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    stdscr.timeout(200)  # refresh every 200ms
+
+    while running:
+        stdscr.clear()
+        height, width = stdscr.getmaxyx()
+        title = "Audio Streaming Interface - Press 'q' to quit"
+        stdscr.addstr(0, 0, title[:width-1])
+        max_bar_length = width - 20
+        rms_for_display = min(current_rms, 3000)
+        bar_length = int((rms_for_display / 3000) * max_bar_length)
+        volume_bar = "[" + "#" * bar_length + "-" * (max_bar_length - bar_length) + "]"
+        stdscr.addstr(2, 0, f"Volume: {volume_bar} {current_rms:6.1f}")
+        speech_text = "Yes" if speech_detected_current else "No"
+        stdscr.addstr(4, 0, f"Speech Detected: {speech_text}")
+        stdscr.addstr(6, 0, f"Last Sent: {last_sent_message}")
+        stdscr.refresh()
+        try:
+            key = stdscr.getch()
+            if key == ord('q'):
+                running = False
+                break
+        except Exception:
+            pass
+        time.sleep(0.1)
+    # End of curses interface
+
+# ======================= Legacy Socket Communication Function ============
 def send_and_receive(prompt):
     """
     Handles sending the prompt to the server and receiving the response.
     """
+    import socket
     try:
         logger.debug(f"Attempting to send prompt: {prompt}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((HOST, PORT))
             s.sendall(prompt.encode('utf-8'))
             logger.debug("Prompt sent successfully. Awaiting response...")
-            # Receive the response from the server
             response = b""
             while True:
                 part = s.recv(4096)
@@ -275,14 +302,14 @@ def send_and_receive(prompt):
         logger.error(error_msg)
 
 # ======================= Main Function ======================================
-
 def main():
     """
-    Main function to set up virtual environment and start audio streaming.
+    Main function to set up the virtual environment, initialize USB tuning,
+    start the audio capture thread, and run the curses interface.
     """
-    setup_virtual_environment()
-    
-    # After setting up and activating the virtual environment, ensure that PyAudio and requests are importable
+    global SERVER_URL
+    SERVER_URL = f"http://{HOST}:{PORT}"
+
     try:
         import pyaudio
         import requests
@@ -290,12 +317,27 @@ def main():
         logger.error(f"Failed to import required modules after venv activation: {e}")
         sys.exit(f"Error: Required modules not found. {e}")
     
-    # Define the server URL after ensuring it's imported
-    global SERVER_URL
-    SERVER_URL = f"http://{HOST}:{PORT}"
+    tuning_dev = find_tuning_device()
+    if tuning_dev is None:
+        logger.error("No USB tuning device found. Exiting.")
+        sys.exit("Error: No USB tuning device found.")
+    else:
+        logger.info("USB tuning device connected.")
     
-    send_audio_stream()
+    audio_thread = threading.Thread(target=audio_capture_thread, args=(tuning_dev,), daemon=True)
+    audio_thread.start()
+    
+    try:
+        curses.wrapper(curses_main)
+    except Exception as e:
+        logger.error(f"Error in curses interface: {e}")
+        print("Error in curses interface:", e)
+    finally:
+        global running
+        running = False
+        audio_thread.join(timeout=5)
+        tuning_dev.close()
+        logger.info("Exiting main.")
 
-# ======================= Entry Point ======================================
 if __name__ == "__main__":
     main()

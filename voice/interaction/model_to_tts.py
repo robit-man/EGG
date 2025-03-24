@@ -377,23 +377,49 @@ def see_whats_around() -> str:
 
 def get_battery_voltage() -> float:
     """
-    Connect to the device via the serial port and read a raw ADC value.
-    The voltage is calculated using the formula:
+    Connect to the ESP32-C6 via the serial port and read one ADC value.
+    The ADC value is converted to a voltage using the following formula:
     
         voltage = (adc_value / 3030) * 29.0
-        
-    Adjust the port and baud rate as necessary.
+    
+    This function waits (up to 5 seconds) for data from the serial port.
+    
+    Returns:
+        A float representing the calculated battery voltage.
+        If an error occurs, a string describing the error is returned.
     """
-    port = '/dev/ttyACM0'  # Update if necessary
+    # Serial port and baud rate settings
+    port = '/dev/ttyACM0'  # Update this if needed.
     baud_rate = 9600
+
+    # Helper: Convert raw ADC value to voltage.
+    def calculate_voltage(adc_value):
+        # Using the observed relationship: ADC value ≈ 2400 corresponds to about 24.4V.
+        return (adc_value / 3030) * 29.0
+
     try:
+        # Open the serial port.
         ser = serial.Serial(port, baud_rate, timeout=2)
-        # Read one line from the serial port
+        print(f"Connected to {port} at {baud_rate} baud")
+        
+        # Wait until data is available (with a timeout).
+        start_time = time.time()
+        while ser.in_waiting == 0:
+            if time.time() - start_time > 5:
+                ser.close()
+                return "Error: No data received from serial within timeout."
+            time.sleep(0.1)
+        
+        # Read one line of data from the serial port.
         line = ser.readline().decode('utf-8').strip()
-        adc_value = int(line)
-        voltage = (adc_value / 3030) * 29.0
         ser.close()
+        
+        # Convert the line to an integer ADC value.
+        adc_value = int(line)
+        # Calculate the voltage.
+        voltage = calculate_voltage(adc_value)
         return voltage
+
     except Exception as e:
         return f"Error reading battery voltage: {e}"
 

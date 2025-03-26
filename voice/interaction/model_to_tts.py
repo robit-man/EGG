@@ -610,8 +610,7 @@ def build_payload(user_message):
         current_tokens = ""
         current_tool_calls = ""
     messages = []
-    if CONFIG["system"]:
-        messages.append({"role": "system", "content": CONFIG["system"]})
+
     tool_instructions = (
         "At each turn, if you decide to invoke any of the function(s), it should be wrapped with \n\n```tool_call\nfunction_name(arguments)\n```\n\n"
         "Review the following Python methods (source code provided for context) to determine if a tool call is appropriate:\n\n"
@@ -634,12 +633,21 @@ def build_payload(user_message):
         "When using a tool call, the generated code should be readable and efficient. "
         "The response from a tool call will be wrapped in ```tool_output```."
     )
-    messages.append({"role": "system", "content": tool_instructions})
-    if len(history_messages) > CONFIG.get("history_depth", 40):
-        messages.extend(history_messages[-CONFIG["history_depth"]:])
+    # Include the system message from configuration, appended with tool instructions.
+    if CONFIG["system"]:
+        system_message = CONFIG["system"] + tool_instructions
+        messages.append({"role": "system", "content": system_message})
+
+    # Read the chat history from file for inference.
+    chat_history = safe_load_json_file(CONFIG["history"], [])
+    history_depth = int(CONFIG.get("history_depth", 40))
+    if len(chat_history) > history_depth:
+        messages.extend(chat_history[-history_depth:])
     else:
-        messages.extend(history_messages)
+        messages.extend(chat_history)
+    # Append the latest user message.
     messages.append({"role": "user", "content": user_message})
+    
     payload = {
         "model": CONFIG["model"],
         "messages": messages,

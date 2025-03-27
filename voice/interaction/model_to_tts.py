@@ -7,54 +7,53 @@ import re
 import json
 import argparse
 import threading
-from queue import Queue
-import shutil
 import time
-from contextlib import redirect_stdout
 import inspect
+import shutil
 import curses
 import textwrap
+from queue import Queue
+from contextlib import redirect_stdout
+from datetime import datetime
+import sqlite3
+import numpy as np
 
 #############################################
-# Global Variables for Curses Display
+# Environment Setup (Venv)
 #############################################
-display_lock = threading.Lock()
-current_request = ""
-current_tokens = ""
-current_tool_calls = ""
-tts_flag = False      # Indicates if TTS process is active (flag for overall status)
-tts_playing = False   # Indicates if audio is currently being played
+class EnvironmentManager:
+    VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
+    NEEDED_PACKAGES = [
+        "requests", "num2words", "ollama", "pyserial", "dotenv",
+        "beautifulsoup4", "pywifi", "numpy"
+    ]
 
-#############################################
-# Step 1: Ensure we're running inside a venv #
-#############################################
-VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-NEEDED_PACKAGES = ["requests", "num2words", "ollama", "pyserial", "dotenv", "beautifulsoup4", "pywifi"]
+    @staticmethod
+    def in_venv():
+        return hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
 
-def in_venv():
-    return hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)
+    @staticmethod
+    def setup_venv():
+        if not os.path.isdir(EnvironmentManager.VENV_DIR):
+            subprocess.check_call([sys.executable, '-m', 'venv', EnvironmentManager.VENV_DIR])
+        pip_path = os.path.join(EnvironmentManager.VENV_DIR, 'bin', 'pip')
+        subprocess.check_call([pip_path, 'install'] + EnvironmentManager.NEEDED_PACKAGES)
 
-def setup_venv():
-    if not os.path.isdir(VENV_DIR):
-        subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
-    pip_path = os.path.join(VENV_DIR, 'bin', 'pip')
-    subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
+    @staticmethod
+    def relaunch_in_venv():
+        python_path = os.path.join(EnvironmentManager.VENV_DIR, 'bin', 'python')
+        os.execv(python_path, [python_path] + sys.argv)
 
-def relaunch_in_venv():
-    python_path = os.path.join(VENV_DIR, 'bin', 'python')
-    os.execv(python_path, [python_path] + sys.argv)
-
-if not in_venv():
-    setup_venv()
-    relaunch_in_venv()
+if not EnvironmentManager.in_venv():
+    EnvironmentManager.setup_venv()
+    EnvironmentManager.relaunch_in_venv()
 
 #############################################
-# Step 2: Imports after venv set up          #
+# Imports after venv set up
 #############################################
 import requests
 from num2words import num2words
-from ollama import chat  # Use Ollama Python library for inference
-import re
+from ollama import chat  # Ollama Python library for inference
 import serial
 import psutil
 from dotenv import load_dotenv
@@ -64,1147 +63,1188 @@ from pywifi import const
 load_dotenv()
 
 #############################################
-# Additional: Short Tone/Beep Utilities      #
+# Utility Functions (non-tool helpers)
 #############################################
-def beep(freq=3000, duration=0.05):
-    command = [
-        "play", "-n", "synth", "0.02",
-        "sine", "13000",
-        "sine", "14500",
-        "square", "16000",
-        "square", "19000"
-    ]
-    try:
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    except Exception:
-        pass
+class Utils:
+    @staticmethod
+    def remove_emojis(text):
+        emoji_pattern = re.compile(
+            "[" 
+            u"\U0001F600-\U0001F64F"  
+            u"\U0001F300-\U0001F5FF"
+            u"\U0001F680-\U0001F6FF"
+            u"\U0001F1E0-\U0001F1FF"
+            "]+",
+            flags=re.UNICODE
+        )
+        return emoji_pattern.sub(r'', text)
 
-#############################################
-# Step 3: Config Defaults & File             #
-#############################################
-DEFAULT_CONFIG = {
-    "model": "gemma3:12b",
-    "stream": True,
-    "format": None,
-    "system": "YOU ARE EMBODIED INSIDE AN EGG SHAPED ROBOT. You have a set of chat messages back and forth; use the available tools as needed without verbose explanation.",
-    "raw": False,
-    "history": "chat.json",
-    "history_depth": 100,
-    "images": [],
-    "tools": None,
-    "options": {},
-    "host": "0.0.0.0",
-    "port": 64162,
-    "tts_url": "http://localhost:61637/synthesize",
-    "ollama_url": "http://localhost:11434/api/chat"
-}
-CONFIG_PATH = "config.json"
+    @staticmethod
+    def convert_numbers_to_words(text):
+        def replace_num(match):
+            number_str = match.group(0)
+            try:
+                return num2words(int(number_str))
+            except ValueError:
+                return number_str
+        return re.sub(r'\b\d+\b', replace_num, text)
 
-def load_config():
-    if not os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, 'w') as f:
-            json.dump(DEFAULT_CONFIG, f, indent=2)
-        return dict(DEFAULT_CONFIG)
-    else:
+    @staticmethod
+    def get_current_time():
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    @staticmethod
+    def cosine_similarity(vec1, vec2):
+        # Compute cosine similarity between two numpy arrays
+        if np.linalg.norm(vec1) == 0 or np.linalg.norm(vec2) == 0:
+            return 0.0
+        return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+
+    @staticmethod
+    def safe_load_json_file(path, default):
+        if not path:
+            return default
+        if not os.path.exists(path):
+            if default == []:
+                with open(path, 'w') as f:
+                    json.dump([], f)
+            return default
         try:
-            with open(CONFIG_PATH, 'r') as f:
+            with open(path, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return default
+
+    @staticmethod
+    def load_format_schema(fmt):
+        if not fmt:
+            return None
+        if fmt.lower() == "json":
+            return "json"
+        if os.path.exists(fmt):
+            try:
+                with open(fmt, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def monitor_script(interval=5):
+        script_path = os.path.abspath(__file__)
+        last_mtime = os.path.getmtime(script_path)
+        while True:
+            time.sleep(interval)
+            try:
+                new_mtime = os.path.getmtime(script_path)
+                if new_mtime != last_mtime:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception:
+                pass
+
+    @staticmethod
+    def embed_text(text):
+        # Use Ollama's nomic-embed-text model to generate an embedding.
+        try:
+            # The embedding result is assumed to be a JSON string containing a list of floats.
+            response = chat(model="nomic-embed-text", messages=[{"role": "user", "content": text}], stream=False)
+            # For example, response["message"]["content"] may be " [0.1, 0.2, 0.3, ...] "
+            embedding = json.loads(response["message"]["content"])
+            vec = np.array(embedding, dtype=float)
+            # Normalize the vector
+            norm = np.linalg.norm(vec)
+            if norm == 0:
+                return vec
+            return vec / norm
+        except Exception as e:
+            return np.zeros(768)  # Fallback vector (size adjust as needed)
+
+#############################################
+# Tools Class (isolated tool functions)
+#############################################
+class Tools:
+    @staticmethod
+    def parse_tool_call(text):
+        # Extracts a function call wrapped in triple backticks with label 'tool_code'
+        pattern = r"```tool_(?:code|call)\s*(.*?)\s*```"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    # Additional utility methods (e.g. see_whats_around, battery voltage, etc.)
+    @staticmethod
+    def see_whats_around():
+        """
+        Fetch image from camera URL and save locally, returning the file path.
+        This should be used any time you want to gather more visual context.
+        """
+        images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+        if not os.path.exists(images_dir):
+            os.makedirs(images_dir)
+        url = "http://127.0.0.1:8080/camera/0"
+        try:
+            response = requests.get(url, stream=True, timeout=5)
+            if response.status_code == 200:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"camera_{timestamp}.jpg"
+                file_path = os.path.join(images_dir, filename)
+                with open(file_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                return file_path
+            else:
+                return f"Error: {response.status_code}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    @staticmethod
+    def get_battery_voltage():
+        """
+        Reads the battery voltage from a file located in the user's home directory.
+    
+        The file is expected to be at:
+            ~/voltage.txt
+        and contain a single line with the battery voltage as a floating point number.
+    
+        Returns:
+           A float representing the battery voltage.
+        
+        Raises:
+           RuntimeError if the file cannot be read or its content cannot be converted to float.
+        """
+        try:
+            home_dir = os.path.expanduser("~")
+            file_path = os.path.join(home_dir, "voltage.txt")
+            with open(file_path, "r") as f:
+                return float(f.readline().strip())
+        except Exception as e:
+            raise RuntimeError(f"Error reading battery voltage: {e}")
+
+    @staticmethod
+    def brave_search(topic):
+        """
+        Search Brave Web Search API for the specified topic.
+    
+        Args:
+            topic (str): The search query.
+    
+        Returns:
+            A string representing the JSON search results if successful,
+            or an error message if the search fails.
+        """
+        api_key = os.environ.get("BRAVE_API_KEY", "")
+        if not api_key:
+            return "Error: BRAVE_API_KEY not set."
+        endpoint = "https://api.search.brave.com/res/v1/web/search"
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "x-subscription-token": api_key
+        }
+        params = {"q": topic, "count": 3}
+        try:
+            response = requests.get(endpoint, headers=headers, params=params, timeout=5)
+            return response.text if response.status_code == 200 else f"Error {response.status_code}: {response.text}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    @staticmethod
+    def bs4_scrape(url):
+        """
+        Scrape the provided website URL using BeautifulSoup and return the prettified HTML.
+    
+        Args:
+            url (str): The URL of the website to scrape.
+        
+        Returns:
+            A string containing the prettified HTML of the page if successful,
+            or an error message if the scraping fails.
+        """
+        headers = {
+            'User-Agent': ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/42.0.2311.135 Safari/537.36 Edge/12.246")
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=5)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html5lib')
+            return soup.prettify()
+        except Exception as e:
+            return f"Error during scraping: {e}"
+
+    @staticmethod
+    def find_file(filename, search_path="."):
+        """
+        Search recursively for a file with the given filename starting from the specified search path.
+    
+        Args:
+            filename (str): The name of the file to search for.
+            search_path (str): The directory to start the search from. Defaults to the current directory.
+    
+        Returns:
+            str or None: The directory path where the file was found, or None if the file is not found.
+        """
+        for root, dirs, files in os.walk(search_path):
+            if filename in files:
+                return root
+        return None
+
+    @staticmethod
+    def get_current_location():
+        """
+        Retrieves the current location based on your IP address by querying an IP geolocation API.
+    
+        Returns:
+            dict: A dictionary with location information if successful.
+        """
+        try:
+            response = requests.get("http://ip-api.com/json", timeout=5)
+            return response.json() if response.status_code == 200 else {"error": f"HTTP error {response.status_code}"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def get_system_utilization():
+        """
+        Return system utilization metrics as a dictionary.
+        """
+        return {
+            "cpu_usage": psutil.cpu_percent(interval=1),
+            "memory_usage": psutil.virtual_memory().percent,
+            "disk_usage": psutil.disk_usage('/').percent
+        }
+
+    @staticmethod
+    def secondary_agent_tool(prompt: str) -> str:
+        # Use llama3.2:3b for tool calling (instead of gemma)
+        secondary_model = "llama3.2:3b"
+        payload = {
+            "model": secondary_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+        try:
+            response = chat(model=secondary_model, messages=payload["messages"], stream=False)
+            return response["message"]["content"]
+        except Exception as e:
+            return f"Error in secondary agent: {e}"
+
+#############################################
+# Memory Manager (Persistent vector storage using SQLite3)
+#############################################
+class MemoryManager:
+    def __init__(self, db_path="memory.db"):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.create_tables()
+
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        # Table for raw chat memory with embeddings stored as JSON text.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT,
+                role TEXT,
+                timestamp TEXT,
+                content TEXT,
+                embedding TEXT
+            )
+        """)
+        # Table for summary narrative (stores condensed summaries and narrative states)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS summary_narrative (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT,
+                summary_text TEXT,
+                narrative_state TEXT,
+                timestamp TEXT
+            )
+        """)
+        self.conn.commit()
+
+    def store_message(self, conversation_id, role, content, embedding):
+        timestamp = Utils.get_current_time()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO chat_memory (conversation_id, role, timestamp, content, embedding)
+            VALUES (?, ?, ?, ?, ?)
+        """, (conversation_id, role, timestamp, content, json.dumps(embedding.tolist())))
+        self.conn.commit()
+
+    def retrieve_similar(self, conversation_id, query_embedding, top_n=5, mode="conversational"):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, timestamp, role, content, embedding FROM chat_memory WHERE conversation_id=?", (conversation_id,))
+        rows = cursor.fetchall()
+        results = []
+        now = datetime.now()
+        for row in rows:
+            msg_id, ts, role, content, emb_text = row
+            try:
+                emb = np.array(json.loads(emb_text), dtype=float)
+            except Exception:
+                continue
+            sim = Utils.cosine_similarity(query_embedding, emb)
+            # Optionally adjust similarity based on recency in conversational mode.
+            if mode == "conversational":
+                try:
+                    msg_time = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                    age = (now - msg_time).total_seconds()
+                    decay = np.exp(-age / 3600)  # decay over 1 hour
+                    sim *= decay
+                except Exception:
+                    pass
+            results.append((sim, msg_id, ts, role, content))
+        results.sort(key=lambda x: x[0], reverse=True)
+        return results[:top_n]
+
+    def store_summary(self, conversation_id, summary_text, narrative_state):
+        timestamp = Utils.get_current_time()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO summary_narrative (conversation_id, summary_text, narrative_state, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (conversation_id, summary_text, narrative_state, timestamp))
+        self.conn.commit()
+
+    def retrieve_latest_summary(self, conversation_id):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT summary_text, narrative_state, timestamp FROM summary_narrative
+            WHERE conversation_id=?
+            ORDER BY id DESC LIMIT 1
+        """, (conversation_id,))
+        return cursor.fetchone()
+
+#############################################
+# Mode Manager (Automatic mode switching using llama3.2:3b)
+#############################################
+class ModeManager:
+    def __init__(self, model_id="llama3.2:3b"):
+        self.model_id = model_id
+        self.prompt_template = (
+            "You are a conversation mode classifier. Analyze the following conversation context and determine the appropriate mode. "
+            "The possible modes are: 'conversational', 'research', 'meditation'. Output a JSON object with key 'mode'.\n"
+            "Conversation context:\n{context}\n"
+            "Output only a JSON, for example: {{\"mode\": \"research\"}}."
+        )
+
+    def detect_mode(self, conversation_history):
+        context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in conversation_history[-5:]])
+        prompt = self.prompt_template.format(context=context)
+        payload = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+        try:
+            response = chat(model=self.model_id, messages=payload["messages"], stream=False)
+            mode_info = json.loads(response["message"]["content"])
+            return mode_info.get("mode", "conversational")
+        except Exception:
+            return "conversational"
+
+
+#############################################
+# Configuration Manager
+#############################################
+class ConfigManager:
+    DEFAULT_CONFIG = {
+        "model": "gemma3:12b",
+        "stream": True,
+        "format": None,
+        "system": "YOU ARE EMBODIED INSIDE AN EGG SHAPED ROBOT. You have a set of chat messages back and forth; use the available tools as needed without verbose explanation. To use a function, wrap the function call in triple backticks with the label `tool_code`. The Python methods described below are imported and available – you can only use these defined methods. The generated code should be readable and efficient. The response to a method will be wrapped in triple backticks with the label `tool_output` – use this to call additional functions or generate a helpful, friendly response. When using a function call, think step by step about why and how it should be used.\n\nThe following Python methods are available:\n\n```python\n" + "\n".join([inspect.getsource(getattr(Tools, attr)) for attr in dir(Tools) if not attr.startswith("_") and callable(getattr(Tools, attr))]) + "\n```",
+        "raw": False,
+        "history": "chat555.json",
+        "history_depth": 100,
+        "images": [],
+        "tools": None,
+        "options": {},
+        "host": "0.0.0.0",
+        "port": 64162,
+        "tts_url": "http://localhost:61637/synthesize",
+        "ollama_url": "http://localhost:11434/api/chat",
+        "conversation_id": "default_convo"
+    }
+
+    def __init__(self, config_path="config.json"):
+        self.config_path = config_path
+        self.config = self.load_config()
+
+    def load_config(self):
+        if not os.path.exists(self.config_path):
+            with open(self.config_path, 'w') as f:
+                json.dump(ConfigManager.DEFAULT_CONFIG, f, indent=2)
+            return dict(ConfigManager.DEFAULT_CONFIG)
+        try:
+            with open(self.config_path, 'r') as f:
                 cfg = json.load(f)
-            for key, value in DEFAULT_CONFIG.items():
+            for key, value in ConfigManager.DEFAULT_CONFIG.items():
                 if key not in cfg:
                     cfg[key] = value
             return cfg
         except Exception:
-            return dict(DEFAULT_CONFIG)
+            return dict(ConfigManager.DEFAULT_CONFIG)
 
-CONFIG = load_config()
-
-def update_config_file():
-    try:
-        with open(CONFIG_PATH, 'w') as f:
-            json.dump(CONFIG, f, indent=2)
-    except Exception:
-        pass
-
-#############################################
-# Step 4: Parse Command-Line Arguments       #
-#############################################
-parser = argparse.ArgumentParser(description="Ollama Chat Server with TTS and advanced features.")
-parser.add_argument("--model", type=str, help="Model name to use.")
-parser.add_argument("--stream", action="store_true", help="Enable streaming responses from the model.")
-parser.add_argument("--format", type=str, help="Structured output format: 'json' or path to JSON schema file.")
-parser.add_argument("--system", type=str, help="System message override.")
-parser.add_argument("--raw", action="store_true", help="If set, use raw mode (no template).")
-parser.add_argument("--history", type=str, nargs='?', const="chat.json",
-                    help="Path to a JSON file containing conversation history messages.")
-parser.add_argument("--images", type=str, nargs='*', help="List of base64-encoded image files.")
-parser.add_argument("--tools", type=str, help="Path to a JSON file defining tools.")
-parser.add_argument("--option", action="append", help="Additional model parameters (e.g. --option temperature=0.7)")
-args = parser.parse_args()
-
-def merge_config_and_args(config, args):
-    if args.model:
-        config["model"] = args.model
-    if args.stream:
-        config["stream"] = True
-    if args.format is not None:
-        config["format"] = args.format
-    if args.system is not None:
-        config["system"] = args.system
-    if args.raw:
-        config["raw"] = True
-    if args.history is not None:
-        config["history"] = args.history
-    if args.images is not None:
-        config["images"] = args.images
-    if args.tools is not None:
-        config["tools"] = args.tools
-    if args.option:
-        for opt in args.option:
-            if '=' in opt:
-                k, v = opt.split('=', 1)
-                k = k.strip()
-                v = v.strip()
-                if v.isdigit():
-                    v = int(v)
-                else:
-                    try:
-                        v = float(v)
-                    except ValueError:
-                        pass
-                config["options"][k] = v
-    return config
-
-CONFIG = merge_config_and_args(CONFIG, args)
-
-#############################################
-# Monitor Config & Script Changes
-#############################################
-def monitor_config(interval=5):
-    last_mtime = os.path.getmtime(CONFIG_PATH)
-    while True:
-        time.sleep(interval)
+    def update_config(self):
         try:
-            new_mtime = os.path.getmtime(CONFIG_PATH)
-            if new_mtime != last_mtime:
-                with display_lock:
-                    global current_tool_calls
-                    current_tool_calls = "Config changed; reloading..."
-                new_config = load_config()
-                CONFIG.update(new_config)
-                last_mtime = new_mtime
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=2)
         except Exception:
             pass
 
-def monitor_script(interval=5):
-    script_path = os.path.abspath(__file__)
-    last_mtime = os.path.getmtime(script_path)
-    while True:
-        time.sleep(interval)
+    def merge_args(self, args):
+        if args.model:
+            self.config["model"] = args.model
+        if args.stream:
+            self.config["stream"] = True
+        if args.format is not None:
+            self.config["format"] = args.format
+        if args.system is not None:
+            self.config["system"] = args.system
+        if args.raw:
+            self.config["raw"] = True
+        if args.history is not None:
+            self.config["history"] = args.history
+        if args.images is not None:
+            self.config["images"] = args.images
+        if args.tools is not None:
+            self.config["tools"] = args.tools
+        if args.option:
+            for opt in args.option:
+                if '=' in opt:
+                    k, v = opt.split('=', 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if v.isdigit():
+                        v = int(v)
+                    else:
+                        try:
+                            v = float(v)
+                        except ValueError:
+                            pass
+                    self.config["options"][k] = v
+
+    def monitor_config(self, interval=5):
+        last_mtime = os.path.getmtime(self.config_path)
+        while True:
+            time.sleep(interval)
+            try:
+                new_mtime = os.path.getmtime(self.config_path)
+                if new_mtime != last_mtime:
+                    with display_state.lock:
+                        display_state.current_tool_calls = "Config changed; reloading..."
+                    new_config = self.load_config()
+                    self.config.update(new_config)
+                    last_mtime = new_mtime
+            except Exception:
+                pass
+
+#############################################
+# History Manager (for chat history in JSON)
+#############################################
+class HistoryManager:
+    def __init__(self, history_path):
+        self.history_path = history_path
+        self.history = Utils.safe_load_json_file(history_path, [])
+
+    def add_entry(self, role, content):
+        timestamp = Utils.get_current_time()
+        entry = {"role": role, "content": content, "timestamp": timestamp}
+        with display_state.lock:
+            display_state.chat_history_state = "Writing"
+        self.history.append(entry)
         try:
-            new_mtime = os.path.getmtime(script_path)
-            if new_mtime != last_mtime:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            with open(self.history_path, 'w') as f:
+                json.dump(self.history, f, indent=2)
         except Exception:
             pass
+        with display_state.lock:
+            display_state.chat_history_state = "Reading"
 
 #############################################
-# Step 5: Load Optional Configurations       #
+# Model Manager (Ollama and Model Checks)
 #############################################
-def safe_load_json_file(path, default):
-    if not path:
-        return default
-    if not os.path.exists(path):
-        if path == CONFIG["history"] and default == []:
-            with open(path, 'w') as f:
-                json.dump([], f)
-        return default
-    try:
-        with open(path, 'r') as f:
-            return json.load(f)
-    except Exception:
-        return default
+class ModelManager:
+    def __init__(self, config_manager: ConfigManager):
+        self.config_manager = config_manager
 
-def load_format_schema(fmt):
-    if not fmt:
-        return None
-    if fmt.lower() == "json":
-        return "json"
-    if os.path.exists(fmt):
+    def check_ollama_installed(self):
+        return shutil.which('ollama') is not None
+
+    def install_ollama(self):
         try:
-            with open(fmt, 'r') as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
+            subprocess.check_call('curl -fsSL https://ollama.com/install.sh | sh', shell=True, executable='/bin/bash')
+        except subprocess.CalledProcessError:
+            sys.exit(1)
 
-# Global chat history is used for display only.
-history_messages = safe_load_json_file(CONFIG["history"], [])
-tools_data = safe_load_json_file(CONFIG["tools"], None)
-format_schema = load_format_schema(CONFIG["format"])
-
-#############################################
-# Step 5.1: Ensure Ollama and Model are Installed #
-#############################################
-def check_ollama_installed():
-    return shutil.which('ollama') is not None
-
-def install_ollama():
-    try:
-        subprocess.check_call('curl -fsSL https://ollama.com/install.sh | sh', shell=True, executable='/bin/bash')
-    except subprocess.CalledProcessError:
+    def wait_for_ollama(self):
+        ollama_tags_url = self.config_manager.config["ollama_url"].replace("/api/chat", "/api/tags")
+        max_retries = 10
+        for _ in range(max_retries):
+            try:
+                response = requests.get(ollama_tags_url)
+                if response.status_code == 200:
+                    return
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(2)
         sys.exit(1)
 
-def wait_for_ollama():
-    ollama_tags_url = "http://localhost:11434/api/tags"
-    max_retries = 10
-    for attempt in range(max_retries):
+    def get_available_models(self):
+        ollama_tags_url = self.config_manager.config["ollama_url"].replace("/api/chat", "/api/tags")
         try:
             response = requests.get(ollama_tags_url)
             if response.status_code == 200:
-                return
+                data = response.json()
+                available_models = data.get('models', [])
+                return [m.get('name') for m in available_models if 'name' in m]
+            else:
+                return []
         except requests.exceptions.RequestException:
-            pass
-        time.sleep(2)
-    sys.exit(1)
-
-def get_available_models():
-    ollama_tags_url = "http://localhost:11434/api/tags"
-    try:
-        response = requests.get(ollama_tags_url)
-        if response.status_code == 200:
-            data = response.json()
-            available_models = data.get('models', [])
-            return [m.get('name') for m in available_models if 'name' in m]
-        else:
             return []
-    except requests.exceptions.RequestException:
-        return []
 
-def check_model_exists_in_tags(model_name):
-    available_models = get_available_models()
-    if model_name in available_models:
-        return model_name
-    model_latest = f"{model_name}:latest"
-    if model_latest in available_models:
-        return model_latest
-    return None
+    def check_model_exists_in_tags(self, model_name):
+        available_models = self.get_available_models()
+        if model_name in available_models:
+            return model_name
+        model_latest = f"{model_name}:latest"
+        if model_latest in available_models:
+            return model_latest
+        return None
 
-def check_model_installed(model_name):
-    try:
-        result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
-        models = [m.strip() for m in result.stdout.splitlines()]
-        if model_name in models:
-            return True
-        if model_name.endswith(':latest'):
-            base_model = model_name.rsplit(':', 1)[0]
-            if base_model in models:
+    def check_model_installed(self, model_name):
+        try:
+            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, check=True)
+            models = [m.strip() for m in result.stdout.splitlines()]
+            if model_name in models:
                 return True
-        return False
-    except subprocess.CalledProcessError:
-        sys.exit(1)
-
-def pull_model(model_name):
-    try:
-        subprocess.check_call(['ollama', 'pull', model_name])
-    except subprocess.CalledProcessError:
-        sys.exit(1)
-
-def ensure_ollama_and_model():
-    if not check_ollama_installed():
-        install_ollama()
-        if not check_model_installed(CONFIG["model"]):
+            if model_name.endswith(':latest'):
+                base_model = model_name.rsplit(':', 1)[0]
+                if base_model in models:
+                    return True
+            return False
+        except subprocess.CalledProcessError:
             sys.exit(1)
-    wait_for_ollama()
-    model_name = CONFIG["model"]
-    model_actual_name = check_model_exists_in_tags(model_name)
-    if not model_actual_name:
-        sys.exit(1)
-    CONFIG["model"] = model_actual_name
 
-ensure_ollama_and_model()
-
-#############################################
-# Step 6: Ollama Chat Interaction
-#############################################
-OLLAMA_CHAT_URL = CONFIG["ollama_url"]
-
-def convert_numbers_to_words(text):
-    def replace_num(match):
-        number_str = match.group(0)
+    def pull_model(self, model_name):
         try:
-            number_int = int(number_str)
-            return num2words(number_int)
-        except ValueError:
-            return number_str
-    return re.sub(r'\b\d+\b', replace_num, text)
-    
-def secondary_agent_tool(prompt: str) -> str:
-    """
-    Uses the secondary agent model (gemma3:1b) to process the given prompt.
-    
-    This dedicated tool loads the smaller model gemma3:1b and passes the prompt to it via the Ollama API.
-    It is intended for tasks such as summarization or other on-the-fly processing.
-    
-    Returns:
-        str: The output generated by the secondary agent.
-    """
-    secondary_model = "gemma3:1b"
-    # Create a simple payload for the secondary agent.
-    payload = {
-        "model": secondary_model,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False
-    }
-    try:
-        response = chat(model=secondary_model, messages=payload["messages"], stream=False)
-        return response["message"]["content"]
-    except Exception as e:
-        return f"Error in secondary agent: {e}"
+            subprocess.check_call(['ollama', 'pull', model_name])
+        except subprocess.CalledProcessError:
+            sys.exit(1)
 
-def see_whats_around() -> str:
-    """
-    Fetch image from camera URL and save locally, returning the file path.
-    This should be used any time you want to gather more visual context.
-    """
-    import requests
-    images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
-    if not os.path.exists(images_dir):
-        os.makedirs(images_dir)
-    url = "http://127.0.0.1:8080/camera/0"
-    try:
-        response = requests.get(url, stream=True, timeout=5)
-        if response.status_code == 200:
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"camera_{timestamp}.jpg"
-            file_path = os.path.join(images_dir, filename)
-            with open(file_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return file_path
-        else:
-            return f"Error: {response.status_code}"
-    except Exception as e:
-        return f"Error: {e}"
-
-def get_battery_voltage() -> float:
-    """
-    Reads the battery voltage from a file located in the user's home directory.
-    
-    The file is expected to be at:
-        ~/voltage.txt
-    and contain a single line with the battery voltage as a floating point number.
-    
-    Returns:
-        A float representing the battery voltage.
-        
-    Raises:
-        RuntimeError if the file cannot be read or its content cannot be converted to float.
-    """
-    try:
-        home_dir = os.path.expanduser("~")
-        file_path = os.path.join(home_dir, "voltage.txt")
-        with open(file_path, "r") as f:
-            line = f.readline().strip()
-            voltage = float(line)
-        return voltage
-    except Exception as e:
-        raise RuntimeError(f"Error reading battery voltage: {e}")
-
-def brave_search(topic: str) -> str:
-    """
-    Search Brave Web Search API for the specified topic.
-
-    Args:
-        topic (str): The search query.
-
-    Returns:
-        A string representing the JSON search results if successful,
-        or an error message if the search fails.
-    
-    This function uses the following settings:
-      - API endpoint: https://api.search.brave.com/res/v1/web/search
-      - Headers:
-          Accept: application/json
-          Accept-Encoding: gzip
-          x-subscription-token: <BRAVE_API_KEY from .env>
-      - Query parameters:
-          q: topic
-          count: 3  (returns 3 results)
-    """
-    api_key = os.environ.get("BRAVE_API_KEY", "")
-    if not api_key:
-        return "Error: BRAVE_API_KEY not set."
-    endpoint = "https://api.search.brave.com/res/v1/web/search"
-    headers = {
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "x-subscription-token": api_key
-    }
-    params = {
-        "q": topic,
-        "count": 3
-    }
-    try:
-        response = requests.get(endpoint, headers=headers, params=params, timeout=5)
-        if response.status_code == 200:
-            return response.text
-        else:
-            return f"Error {response.status_code}: {response.text}"
-    except Exception as e:
-        return f"Error: {e}"
-
-def bs4_scrape(url: str) -> str:
-    """
-    Scrape the provided website URL using BeautifulSoup and return the prettified HTML.
-
-    Args:
-        url (str): The URL of the website to scrape.
-    
-    Returns:
-        A string containing the prettified HTML of the page if successful,
-        or an error message if the scraping fails.
-    
-    The function sets a browser User-Agent header to avoid potential "Not accepted" errors.
-    """
-    headers = {
-        'User-Agent': ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246")
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html5lib')
-        return soup.prettify()
-    except Exception as e:
-        return f"Error during scraping: {e}"
-
-def find_file(filename: str, search_path: str = ".") -> str:
-    """
-    Search recursively for a file with the given filename starting from the specified search path.
-
-    Args:
-        filename (str): The name of the file to search for.
-        search_path (str): The directory to start the search from. Defaults to the current directory.
-
-    Returns:
-        str or None: The directory path where the file was found, or None if the file is not found.
-
-    Example:
-        directory = find_file("example.txt", "/home/user")
-        if directory:
-            print(f"File found in: {directory}")
-        else:
-            print("File not found.")
-    """
-    for root, dirs, files in os.walk(search_path):
-        if filename in files:
-            return root
-    return None
-     
-def get_current_time() -> str:
-    """
-    Returns the current local time as a formatted string.
-    
-    The time is formatted as 'YYYY-MM-DD HH:MM:SS'.
-    
-    Returns:
-        str: The current local time.
-    
-    Example:
-        current_time = get_current_time()
-        # Might return: "2024-08-02 14:35:21"
-    """
-    from datetime import datetime
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def get_current_location() -> dict:
-    """
-    Retrieves the current location based on your IP address by querying an IP geolocation API.
-    
-    This function sends a GET request to 'http://ip-api.com/json' which returns a JSON response
-    containing various location details such as latitude ('lat') and longitude ('lon').
-    
-    Returns:
-        dict: A dictionary with location information if successful, for example:
-              {
-                  "status": "success",
-                  "country": "United States",
-                  "countryCode": "US",
-                  "region": "CA",
-                  "regionName": "California",
-                  "city": "Mountain View",
-                  "zip": "94043",
-                  "lat": 37.4192,
-                  "lon": -122.0574,
-                  "timezone": "America/Los_Angeles",
-                  "isp": "Google LLC",
-                  "org": "Google Public DNS",
-                  "as": "AS15169 Google LLC",
-                  "query": "8.8.8.8"
-              }
-              If the API request fails, the function returns a dictionary with an "error" key.
-    
-    Example:
-        location_info = get_current_location()
-        # Might return: {"status": "success", "lat": 37.4192, "lon": -122.0574, ...}
-    """
-    import requests
-    try:
-        response = requests.get("http://ip-api.com/json", timeout=5)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return {"error": f"HTTP error {response.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
-        
-def get_system_utilization() -> dict:
-    """
-    Return system utilization metrics as a dictionary:
-      - 'cpu_usage': CPU usage percentage (averaged over 1 second)
-      - 'memory_usage': Memory usage percentage
-      - 'disk_usage': Disk usage percentage of the root partition
-    """
-    cpu_usage = psutil.cpu_percent(interval=1)
-    memory_usage = psutil.virtual_memory().percent
-    disk_usage = psutil.disk_usage('/').percent
-    return {
-        "cpu_usage": cpu_usage,
-        "memory_usage": memory_usage,
-        "disk_usage": disk_usage
-    }
-
-def extract_tool_call(text):
-    import io
-    from contextlib import redirect_stdout
-    # Updated regex to accept both tool_code and tool_call
-    pattern = r"```tool_(?:code|call)\s*(.*?)\s*```"
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        code = match.group(1).strip()
-        f = io.StringIO()
-        with redirect_stdout(f):
-            try:
-                result = eval(code, globals())
-            except Exception as e:
-                result = f"Error executing tool: {e}"
-        output = f.getvalue()
-        r = result if output == '' else output
-        return f'```tool_output\n{r}\n```'
-    return None
-
-# New helper: Extract chat message text from a message's content.
-def extract_chat_message(content):
-    matches = re.findall(r"```tool_output\s*(.*?)\s*```", content, re.DOTALL)
-    if matches:
-        return "\n".join(matches)
-    else:
-        return content
-
-# Updated build_payload: Read the chat history from file and build a full chat log.
-def build_payload(user_message):
-    global current_request, current_tokens, current_tool_calls
-    with display_lock:
-        current_request = user_message
-        current_tokens = ""
-        current_tool_calls = ""
-    messages = []
-
-    tool_instructions = (
-        "At each turn, if you decide to invoke any of the function(s), it should be wrapped with \n\n```tool_call\nfunction_name(arguments)\n```\n\n"
-        "Review the following Python methods (source code provided for context) to determine if a tool call is appropriate:\n\n"
-        "```python\n" +
-        inspect.getsource(secondary_agent_tool) + "\n" +
-        inspect.getsource(see_whats_around) + "\n" +
-        inspect.getsource(brave_search) + "\n" +
-        inspect.getsource(get_battery_voltage) + "\n" +
-        inspect.getsource(get_current_time) + "\n" +
-        inspect.getsource(get_current_location) + "\n" +
-        inspect.getsource(bs4_scrape) + "\n" +
-        inspect.getsource(find_file) + "\n" +
-        inspect.getsource(pull_model) + "\n" +
-        inspect.getsource(get_available_models) + "\n" +
-        inspect.getsource(check_model_exists_in_tags) + "\n" +
-        inspect.getsource(check_model_installed) + "\n" +
-        inspect.getsource(ensure_ollama_and_model) + "\n" +
-        inspect.getsource(get_system_utilization) +
-        "\n```\n\n"
-        "When using a tool call, the generated code should be readable and efficient. "
-        "The response from a tool call will be wrapped in ```tool_output```."
-    )
-    # Include the system message from configuration, appended with tool instructions.
-    if CONFIG["system"]:
-        system_message = CONFIG["system"] + tool_instructions
-        messages.append({"role": "system", "content": system_message})
-
-    # Read the chat history from file for inference.
-    chat_history = safe_load_json_file(CONFIG["history"], [])
-    history_depth = int(CONFIG.get("history_depth", 40))
-    if len(chat_history) > history_depth:
-        messages.extend(chat_history[-history_depth:])
-    else:
-        messages.extend(chat_history)
-    # Append the latest user message.
-    messages.append({"role": "user", "content": user_message})
-    
-    payload = {
-        "model": CONFIG["model"],
-        "messages": messages,
-        "stream": CONFIG["stream"]
-    }
-    if format_schema:
-        payload["format"] = format_schema
-    if CONFIG["raw"]:
-        payload["raw"] = True
-    if CONFIG["images"]:
-        if payload["messages"] and payload["messages"][-1]["role"] == "user":
-            payload["messages"][-1]["images"] = CONFIG["images"]
-    if tools_data:
-        payload["tools"] = tools_data
-    if CONFIG["options"]:
-        payload["options"] = CONFIG["options"]
-    return payload
-
+    def ensure_ollama_and_model(self):
+        if not self.check_ollama_installed():
+            self.install_ollama()
+            if not self.check_model_installed(self.config_manager.config["model"]):
+                sys.exit(1)
+        self.wait_for_ollama()
+        model_name = self.config_manager.config["model"]
+        model_actual_name = self.check_model_exists_in_tags(model_name)
+        if not model_actual_name:
+            sys.exit(1)
+        self.config_manager.config["model"] = model_actual_name
 
 #############################################
-# Curses Display
+# TTS Manager
 #############################################
-def curses_display(stdscr):
-    global current_request, current_tokens, current_tool_calls, tts_flag, tts_playing
-    curses.curs_set(0)
-    stdscr.nodelay(True)
-    while True:
-        with display_lock:
-            stdscr.erase()
-            max_height, max_width = stdscr.getmaxyx()
-            try:
-                stdscr.addnstr(0, 0, f"User: {current_request}", max_width)
-            except curses.error:
-                pass
-            try:
-                stdscr.addnstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Playing: {tts_playing}", max_width)
-            except curses.error:
-                pass
-            try:
-                stdscr.hline(2, 0, '-', max_width)
-            except curses.error:
-                pass
-            try:
-                stdscr.addnstr(3, 0, "Model Tokens:", max_width)
-            except curses.error:
-                pass
-            wrapped_lines = textwrap.wrap(current_tokens, width=max_width)
-            current_y = 4
-            for idx, line in enumerate(wrapped_lines):
-                if current_y >= max_height:
-                    break
-                try:
-                    stdscr.addnstr(current_y, 0, line, max_width)
-                except curses.error:
-                    pass
-                current_y += 1
-            if current_y < max_height - 1:
-                try:
-                    stdscr.addnstr(current_y, 0, "-" * max_width, max_width)
-                except curses.error:
-                    pass
-                current_y += 1
-                try:
-                    stdscr.addnstr(current_y, 0, "Chat History:", max_width)
-                except curses.error:
-                    pass
-                current_y += 1
-                for message in history_messages:
-                    if current_y >= max_height:
+class TTSManager:
+    def __init__(self, tts_url):
+        self.tts_url = tts_url
+        self.queue = Queue()
+        self.thread = None
+        self.stop_flag = False
+        self.lock = threading.Lock()
+        self.tts_flag = False
+        self.tts_playing = False
+
+    def synthesize_and_play(self, prompt):
+        self.tts_flag = True
+        self.tts_playing = True
+        prompt = re.sub(r'[\*#]', '', prompt).strip()
+        prompt = Utils.remove_emojis(prompt)
+        if not prompt:
+            self.tts_flag = False
+            self.tts_playing = False
+            return
+        try:
+            payload = {"prompt": prompt}
+            with requests.post(self.tts_url, json=payload, stream=True) as response:
+                if response.status_code != 200:
+                    self.tts_flag = False
+                    self.tts_playing = False
+                    return
+                aplay = subprocess.Popen(
+                    ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                for chunk in response.iter_content(chunk_size=4096):
+                    if self.stop_flag:
                         break
-                    role = message.get("role", "unknown")
-                    content = message.get("content", "")
-                    if role == "user":
-                        msg_line = "User: " + content
-                    elif role == "assistant":
-                        msg_line = "Assistant: " + extract_chat_message(content)
-                    else:
-                        msg_line = f"{role.capitalize()}: " + content
-                    wrapped_msg = textwrap.wrap(msg_line, width=max_width)
-                    for w in wrapped_msg:
-                        if current_y >= max_height:
-                            break
-                        try:
-                            stdscr.addnstr(current_y, 0, w, max_width)
-                        except curses.error:
-                            pass
-                        current_y += 1
-        stdscr.refresh()
-        time.sleep(0.5)
+                    if chunk:
+                        aplay.stdin.write(chunk)
+                aplay.stdin.close()
+                aplay.wait()
+        except Exception:
+            pass
+        self.tts_flag = False
+        self.tts_playing = False
 
-#############################################
-# Step 7: TTS Playback with Queue and Thread
-#############################################
-tts_queue = None
-tts_stop_flag = False
-tts_thread = None
-tts_thread_lock = threading.Lock()
+    def tts_worker(self):
+        while not self.stop_flag:
+            try:
+                sentence = self.queue.get(timeout=0.1)
+            except Exception:
+                if self.stop_flag:
+                    break
+                continue
+            if self.stop_flag:
+                break
+            self.synthesize_and_play(sentence)
+        self.stop_flag = False
 
-def synthesize_and_play(prompt):
-    global tts_flag, tts_playing
-    tts_flag = True
-    tts_playing = True
-    prompt = re.sub(r'[\*#]', '', prompt).strip()
-    prompt = remove_emojis(prompt)
-    if not prompt:
-        tts_flag = False
-        tts_playing = False
-        return
-    try:
-        payload = {"prompt": prompt}
-        with requests.post(CONFIG["tts_url"], json=payload, stream=True) as response:
-            if response.status_code != 200:
-                tts_flag = False
-                tts_playing = True
+    def start(self):
+        with self.lock:
+            if self.thread and self.thread.is_alive():
                 return
-            aplay = subprocess.Popen(
-                ['aplay', '-r', '22050', '-f', 'S16_LE', '-t', 'raw'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            for chunk in response.iter_content(chunk_size=4096):
-                if tts_stop_flag:
+            self.stop_flag = False
+            self.thread = threading.Thread(target=self.tts_worker, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                self.stop_flag = True
+                with self.queue.mutex:
+                    self.queue.queue.clear()
+                self.thread.join()
+            self.stop_flag = False
+            self.queue = Queue()
+            self.thread = None
+
+    def enqueue(self, sentence):
+        if self.queue and not self.stop_flag:
+            self.queue.put(sentence)
+
+#############################################
+# Wait Beep Manager (for non-blocking beep)
+#############################################
+class WaitBeepManager:
+    def __init__(self):
+        self.thread = None
+        self.flag = False
+        self.lock = threading.Lock()
+
+    def wait_beeps_worker(self):
+        while True:
+            with self.lock:
+                if not self.flag:
                     break
-                if chunk:
-                    aplay.stdin.write(chunk)
-            aplay.stdin.close()
-            aplay.wait()
-    except Exception:
-        pass
-    tts_flag = False
-    tts_playing = False
+            Utils.beep(80, 0.05)
+            time.sleep(0.1)
+            Utils.beep(80, 0.05)
+            time.sleep(0.1)
+            Utils.beep(80, 0.05)
+            time.sleep(0.65)
 
-def tts_worker():
-    global tts_stop_flag
-    while not tts_stop_flag:
-        try:
-            sentence = tts_queue.get(timeout=0.1)
-        except Exception:
-            if tts_stop_flag:
-                break
-            continue
-        if tts_stop_flag:
-            break
-        synthesize_and_play(sentence)
-    tts_stop_flag = False
+    def start(self):
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                return
+            self.flag = True
+        self.thread = threading.Thread(target=self.wait_beeps_worker, daemon=True)
+        self.thread.start()
 
-def start_tts_thread():
-    global tts_queue, tts_thread, tts_stop_flag
-    with tts_thread_lock:
-        if tts_thread and tts_thread.is_alive():
-            return
-        tts_stop_flag = False
-        tts_queue = Queue()
-        tts_thread = threading.Thread(target=tts_worker, daemon=True)
-        tts_thread.start()
-
-def stop_tts_thread():
-    global tts_stop_flag, tts_thread, tts_queue
-    with tts_thread_lock:
-        if tts_thread and tts_thread.is_alive():
-            tts_stop_flag = True
-            with tts_queue.mutex:
-                tts_queue.queue.clear()
-            tts_thread.join()
-        tts_stop_flag = False
-        tts_queue = None
-        tts_thread = None
-
-def enqueue_sentence_for_tts(sentence):
-    if tts_queue and not tts_stop_flag:
-        tts_queue.put(sentence)
+    def stop(self):
+        with self.lock:
+            self.flag = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join()
+        self.thread = None
 
 #############################################
-# Step 7.1: Non-blocking beep while waiting #
+# Chat Manager (Conversation, Inference, Tool Calling & Memory Integration)
 #############################################
-wait_beeps_thread = None
-wait_beeps_flag = False
-wait_beeps_lock = threading.Lock()
+class ChatManager:
+    def __init__(self, config_manager: ConfigManager, history_manager: HistoryManager,
+                 tts_manager: TTSManager, tools_data, format_schema,
+                 memory_manager: MemoryManager, mode_manager: ModeManager):
+        self.config_manager = config_manager
+        self.history_manager = history_manager
+        self.tts_manager = tts_manager
+        self.tools_data = tools_data
+        self.format_schema = format_schema
+        self.memory_manager = memory_manager
+        self.mode_manager = mode_manager
+        self.current_tokens = ""
+        self.current_tool_calls = ""
+        self.stop_flag = False
+        self.inference_lock = threading.Lock()
+        self.current_thread = None
+        # We also track the current mode and memory retrieval results in display_state.
+        self.conversation_id = self.config_manager.config.get("conversation_id", "default_convo")
 
-def wait_beeps_worker():
-    while True:
-        with wait_beeps_lock:
-            if not wait_beeps_flag:
-                break
-        beep(80, 0.05)
-        time.sleep(0.1)
-        beep(80, 0.05)
-        time.sleep(0.1)
-        beep(80, 0.05)
-        time.sleep(0.65)
-
-def start_wait_beeps():
-    global wait_beeps_thread, wait_beeps_flag
-    with wait_beeps_lock:
-        if wait_beeps_thread and wait_beeps_thread.is_alive():
-            return
-        wait_beeps_flag = True
-    wait_beeps_thread = threading.Thread(target=wait_beeps_worker, daemon=True)
-    wait_beeps_thread.start()
-
-def stop_wait_beeps():
-    global wait_beeps_thread, wait_beeps_flag
-    with wait_beeps_lock:
-        wait_beeps_flag = False
-    if wait_beeps_thread and wait_beeps_thread.is_alive():
-        wait_beeps_thread.join()
-    wait_beeps_thread = None
-
-#############################################
-# Step 8: Streaming the Output via Ollama Library
-#############################################
-def chat_completion_stream(user_message):
-    global current_tokens, current_tool_calls
-    payload = build_payload(user_message)
-    tokens = ""
-    try:
-        stream = chat(model=CONFIG["model"], messages=payload["messages"], stream=CONFIG["stream"])
-        for part in stream:
-            content = part["message"]["content"]
-            done = part.get("done", False)
-            tokens += content
-            with display_lock:
-                current_tokens = tokens
-            yield content, done
-            if done:
-                break
-    except Exception:
-        yield "", True
-
-def chat_completion_nonstream(user_message):
-    payload = build_payload(user_message)
-    try:
-        response = chat(model=CONFIG["model"], messages=payload["messages"], stream=False)
-        result = response["message"]["content"]
-        return result
-    except Exception:
-        return ""
-
-#############################################
-# Step 9: Processing the Model Output
-#############################################
-def process_text(text, skip_tts=False):
-    global current_tokens, current_tool_calls
-    processed_text = convert_numbers_to_words(text)
-    sentence_endings = re.compile(r'[.?!]+')
-    tokens = ""
-    if CONFIG["stream"]:
-        buffer = ""
-        for content, done in chat_completion_stream(processed_text):
-            buffer += content
-            tokens += content
-            with display_lock:
-                current_tokens = tokens
-            while True:
-                match = sentence_endings.search(buffer)
-                if not match:
-                    break
-                end_index = match.end()
-                sentence = buffer[:end_index].strip()
-                buffer = buffer[end_index:].lstrip()
-                if sentence:
-                    if not skip_tts:
-                        threading.Thread(target=enqueue_sentence_for_tts, args=(sentence,), daemon=True).start()
-            if done:
-                break
-        if buffer.strip():
-            leftover = buffer.strip()
-            tokens += leftover
-            with display_lock:
-                current_tokens = tokens
-        return tokens
-    else:
-        result = chat_completion_nonstream(processed_text)
-        tokens = result
-        with display_lock:
-            current_tokens = tokens
-        return tokens
-
-#############################################
-# Step 10: Update History File with New Messages
-#############################################
-def update_history(user_message, assistant_message):
-    if not CONFIG["history"]:
-        return
-    current_history = safe_load_json_file(CONFIG["history"], [])
-    current_history.append({"role": "user", "content": user_message})
-    current_history.append({"role": "assistant", "content": assistant_message})
-    try:
-        with open(CONFIG["history"], 'w') as f:
-            json.dump(current_history, f, indent=2)
-        global history_messages
-        history_messages = current_history
-    except Exception:
-        pass
-
-#############################################
-# Step 11: Handling Concurrent Requests and Cancellation
-#############################################
-stop_flag = False
-current_thread = None
-inference_lock = threading.Lock()
-
-def inference_thread(user_message, result_holder, model_actual_name, skip_tts):
-    global stop_flag
-    stop_flag = False
-    result = process_text(user_message, skip_tts)
-    result_holder.append(result)
-
-def new_request(user_message, model_actual_name, depth=0, skip_tts=False):
-    global stop_flag, current_thread, current_tool_calls, current_request
-    with display_lock:
-        current_request = user_message
-        current_tool_calls = ""
-    with inference_lock:
-        if current_thread and current_thread.is_alive():
-            stop_flag = True
-            current_thread.join()
-            stop_flag = False
-        stop_tts_thread()
-        start_tts_thread()
-        result_holder = []
-        current_thread = threading.Thread(
-            target=inference_thread,
-            args=(user_message, result_holder, model_actual_name, skip_tts)
+    def build_payload(self):
+        cfg = self.config_manager.config
+        system_prompt = cfg.get("system", "")
+        tools_source = ""
+        for attr in dir(Tools):
+            if not attr.startswith("_"):
+                method = getattr(Tools, attr)
+                if callable(method):
+                    try:
+                        tools_source += "\n" + inspect.getsource(method)
+                    except Exception:
+                        pass
+        tool_instructions = (
+            "At each turn, if you decide to invoke any of the function(s), wrap the function call in triple backticks with the label `tool_code`.\n\n"
+            "Review the following Python methods (source provided for context) to determine if a function call is appropriate:\n\n"
+            "```python\n" + tools_source + "\n```\n\n"
+            "When a function call is executed, its response will be wrapped in triple backticks with the label `tool_output`."
         )
-        current_thread.start()
-    current_thread.join()
-    result = result_holder[0] if result_holder else ""
-    tool_call = extract_tool_call(result)
-    if tool_call and depth < 1:
-        with display_lock:
-            current_tool_calls = tool_call
-        stop_tts_thread()
-        new_message = user_message + "\n" + tool_call
-        return new_request(new_message, model_actual_name, depth=depth+1, skip_tts=False)
-    return result
+        system_message = {"role": "system", "content": system_prompt + "\n\n" + tool_instructions}
+        
+        # Retrieve memory context based on the current query embedding
+        # For this payload, we assume that the last user message (if available) is our query
+        if self.history_manager.history:
+            last_user_msg = next((msg["content"] for msg in reversed(self.history_manager.history) if msg["role"] == "user"), "")
+            query_embedding = Utils.embed_text(last_user_msg)
+            current_mode = self.mode_manager.detect_mode(self.history_manager.history)
+            # Update display state with current mode
+            with display_state.lock:
+                display_state.current_mode = current_mode
+            memory_items = self.memory_manager.retrieve_similar(self.conversation_id, query_embedding, top_n=3, mode=current_mode)
+            mem_context = "\n".join([f"[{ts}] {role}: {content}" for (_, _, ts, role, content) in memory_items])
+        else:
+            current_mode = "conversational"
+            mem_context = ""
+        
+        # Also retrieve the latest summary narrative (if any)
+        summary = self.memory_manager.retrieve_latest_summary(self.conversation_id)
+        if summary:
+            summary_text, narrative_state, sum_ts = summary
+        else:
+            summary_text = ""
+        
+        memory_context = f"Memory Context:\n{mem_context}\n\nSummary Narrative:\n{summary_text}\n"
+        memory_message = {"role": "system", "content": memory_context}
+        
+        messages = [system_message, memory_message] + self.history_manager.history
+        payload = {
+            "model": cfg["model"],
+            "messages": messages,
+            "stream": cfg["stream"]
+        }
+        if self.format_schema:
+            payload["format"] = self.format_schema
+        if cfg["raw"]:
+            payload["raw"] = True
+        if cfg["images"]:
+            if self.history_manager.history and self.history_manager.history[-1].get("role") == "user":
+                self.history_manager.history[-1]["images"] = cfg["images"]
+        if self.tools_data:
+            payload["tools"] = self.tools_data
+        if cfg["options"]:
+            payload["options"] = cfg["options"]
+        return payload
 
-#############################################
-# Step 12: Interactive Command-Line Interface
-#############################################
-def interactive_loop():
-    while True:
+    def chat_completion_stream(self, processed_text):
+        payload = self.build_payload()
+        tokens = ""
         try:
-            cmd = input("[Interactive] > ").strip()
-        except EOFError:
-            break
-        if not cmd:
-            continue
-        if cmd.startswith("/send "):
-            message = cmd[len("/send "):].strip()
-            with display_lock:
-                global current_request
-                current_request = message
-            result = new_request(message, CONFIG["model"])
-            update_history(message, result)
-        elif cmd.startswith("/model "):
-            new_model = cmd[len("/model "):].strip()
-            CONFIG["model"] = new_model
-            ensure_ollama_and_model()
-            update_config_file()
-        elif cmd.startswith("/history_depth "):
-            try:
-                depth = int(cmd[len("/history_depth "):].strip())
-                CONFIG["history_depth"] = depth
-                update_config_file()
-            except ValueError:
-                pass
-        elif cmd == "/quit":
-            break
+            stream = chat(model=self.config_manager.config["model"],
+                          messages=payload["messages"],
+                          stream=self.config_manager.config["stream"])
+            for part in stream:
+                if self.stop_flag:
+                    yield "", True
+                    return
+                content = part["message"]["content"]
+                done = part.get("done", False)
+                tokens += content
+                with display_state.lock:
+                    display_state.current_tokens = tokens
+                yield content, done
+                if done:
+                    break
+        except Exception:
+            yield "", True
 
-def start_interactive_thread():
-    thread = threading.Thread(target=interactive_loop, daemon=True)
-    thread.start()
-
-#############################################
-# Step 13: Start Server with Enhanced Interrupt Handling
-#############################################
-HOST = CONFIG["host"]
-PORT = CONFIG["port"]
-
-client_threads = []
-client_threads_lock = threading.Lock()
-
-def handle_client_connection(client_socket, address, model_actual_name):
-    try:
-        data = client_socket.recv(65536)
-        if not data:
-            return
-        user_message = data.decode('utf-8').strip()
-        if not user_message:
-            return
-        result = new_request(user_message, model_actual_name)
-        client_socket.sendall(result.encode('utf-8'))
-        update_history(user_message, result)
-    except Exception:
-        pass
-    finally:
-        client_socket.close()
-
-def start_server():
-    global client_threads
-    start_tts_thread()
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        server.bind((HOST, PORT))
-    except Exception:
-        server.bind(('0.0.0.0', 64162))
-    server.listen(5)
-    model_actual_name = CONFIG["model"]
-    while True:
+    def chat_completion_nonstream(self, processed_text):
+        payload = self.build_payload()
         try:
-            client_sock, addr = server.accept()
-            client_thread = threading.Thread(
-                target=handle_client_connection,
-                args=(client_sock, addr, model_actual_name)
+            response = chat(model=self.config_manager.config["model"],
+                            messages=payload["messages"],
+                            stream=False)
+            return response["message"]["content"]
+        except Exception:
+            return ""
+
+    def process_text(self, text, skip_tts=False):
+        processed_text = Utils.convert_numbers_to_words(text)
+        sentence_endings = re.compile(r'[.?!]+')
+        tokens = ""
+        if self.config_manager.config["stream"]:
+            buffer = ""
+            for content, done in self.chat_completion_stream(processed_text):
+                buffer += content
+                tokens += content
+                with display_state.lock:
+                    display_state.current_tokens = tokens
+                while True:
+                    match = sentence_endings.search(buffer)
+                    if not match:
+                        break
+                    end_index = match.end()
+                    sentence = buffer[:end_index].strip()
+                    buffer = buffer[end_index:].lstrip()
+                    if sentence and not skip_tts:
+                        threading.Thread(target=self.tts_manager.enqueue, args=(sentence,), daemon=True).start()
+                if done:
+                    break
+            if buffer.strip():
+                tokens += buffer.strip()
+                with display_state.lock:
+                    display_state.current_tokens = tokens
+            return tokens
+        else:
+            result = self.chat_completion_nonstream(processed_text)
+            tokens = result
+            with display_state.lock:
+                display_state.current_tokens = tokens
+            return tokens
+
+    def inference_thread(self, user_message, result_holder, skip_tts):
+        result = self.process_text(user_message, skip_tts)
+        result_holder.append(result)
+
+    def run_inference(self, prompt, skip_tts=False):
+        result_holder = []
+        with self.inference_lock:
+            if self.current_thread and self.current_thread.is_alive():
+                self.stop_flag = True
+                self.current_thread.join()
+                self.stop_flag = False
+            self.tts_manager.stop()
+            self.tts_manager.start()
+            self.current_thread = threading.Thread(
+                target=self.inference_thread,
+                args=(prompt, result_holder, skip_tts)
             )
-            client_thread.start()
-            with client_threads_lock:
-                client_threads.append(client_thread)
-        except KeyboardInterrupt:
-            break
-        except Exception:
-            pass
-    server.close()
-    stop_tts_thread()
-    with client_threads_lock:
-        for t in client_threads:
-            t.join()
+            self.current_thread.start()
+        self.current_thread.join()
+        return result_holder[0] if result_holder else ""
 
-#############################################
-# Step 14: Interactive Command-Line Interface Thread
-#############################################
-def start_interactive_thread():
-    thread = threading.Thread(target=interactive_loop, daemon=True)
-    thread.start()
-
-#############################################
-# Utility: Remove Emojis from text
-#############################################
-def remove_emojis(text):
-    emoji_pattern = re.compile(
-        "["
-        u"\U0001F600-\U0001F64F"
-        u"\U0001F300-\U0001F5FF"
-        u"\U0001F680-\U0001F6FF"
-        u"\U0001F1E0-\U0001F1FF"
-        "]+",
-        flags=re.UNICODE
-    )
-    return emoji_pattern.sub(r'', text)
-
-#############################################
-# New: Monitor the script file for changes and restart
-#############################################
-def monitor_script(interval=5):
-    script_path = os.path.abspath(__file__)
-    last_mtime = os.path.getmtime(script_path)
-    while True:
-        time.sleep(interval)
+    def run_tool(self, tool_code):
+        allowed_tools = {}
+        for attr in dir(Tools):
+            if not attr.startswith("_"):
+                method = getattr(Tools, attr)
+                if callable(method):
+                    allowed_tools[attr] = method
         try:
-            new_mtime = os.path.getmtime(script_path)
-            if new_mtime != last_mtime:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception:
-            pass
+            result = eval(tool_code, {"__builtins__": {}}, allowed_tools)
+            return str(result)
+        except Exception as e:
+            return f"Error executing tool: {e}"
+
+    def new_request(self, user_message, skip_tts=False):
+        # Add user message to history and store it in memory (with embedding)
+        self.history_manager.add_entry("user", user_message)
+        user_embedding = Utils.embed_text(user_message)
+        self.memory_manager.store_message(self.config_manager.config["conversation_id"], "user", user_message, user_embedding)
+        with display_state.lock:
+            display_state.current_request = user_message
+            display_state.current_tool_calls = ""
+        result = self.run_inference(user_message, skip_tts)
+        tool_code = Tools.parse_tool_call(result)
+        if tool_code:
+            tool_output = self.run_tool(tool_code)
+            formatted_output = f"```tool_output\n{tool_output}\n```"
+            combined_prompt = f"{user_message}\n{formatted_output}"
+            self.history_manager.add_entry("user", combined_prompt)
+            # Store the combined prompt in memory as well
+            combined_embedding = Utils.embed_text(combined_prompt)
+            self.memory_manager.store_message(self.config_manager.config["conversation_id"], "user", combined_prompt, combined_embedding)
+            final_result = self.new_request(combined_prompt, skip_tts=False)
+            return final_result
+        else:
+            self.history_manager.add_entry("assistant", result)
+            assistant_embedding = Utils.embed_text(result)
+            self.memory_manager.store_message(self.config_manager.config["conversation_id"], "assistant", result, assistant_embedding)
+            return result
 
 #############################################
-# Curses Display Function with Scrolling/ Wrapping
+# Display State and Manager (using curses)
 #############################################
-def curses_display(stdscr):
-    global current_request, current_tokens, current_tool_calls, tts_flag, tts_playing
-    curses.curs_set(0)
-    stdscr.nodelay(True)
-    while True:
-        with display_lock:
+class DisplayState:
+    def __init__(self):
+        self.current_request = ""
+        self.current_tokens = ""
+        self.current_tool_calls = ""
+        self.tts_flag = False
+        self.tts_playing = False
+        self.chat_history_state = "Idle"
+        self.current_mode = "conversational"
+        self.memory_list = []  # List of retrieved memory items
+        self.lock = threading.Lock()
+
+class DisplayManager:
+    def __init__(self, display_state: DisplayState, history_manager: HistoryManager, memory_manager: MemoryManager):
+        self.display_state = display_state
+        self.history_manager = history_manager
+        self.memory_manager = memory_manager
+
+    def curses_display(self, stdscr):
+        curses.curs_set(0)
+        stdscr.nodelay(True)
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_YELLOW, -1)  # Function call output
+        curses.init_pair(2, curses.COLOR_CYAN, -1)    # Assistant response
+        curses.init_pair(3, curses.COLOR_WHITE, -1)   # User input
+        curses.init_pair(4, curses.COLOR_MAGENTA, -1) # Memory info / mode
+
+        while True:
             stdscr.erase()
             max_height, max_width = stdscr.getmaxyx()
+            with self.display_state.lock:
+                current_request = self.display_state.current_request
+                current_tokens = self.display_state.current_tokens
+                current_tool_calls = self.display_state.current_tool_calls
+                current_mode = self.display_state.current_mode
+                memory_list = self.display_state.memory_list
+
+            # Header: show current mode
+            header = f"[Mode: {current_mode}]"
             try:
-                stdscr.addnstr(0, 0, f"User: {current_request}", max_width)
+                stdscr.addnstr(0, 0, header, max_width, curses.color_pair(4) | curses.A_BOLD)
             except curses.error:
                 pass
+
+            # Display user input
+            top_line = 2
+            wrapped_input = textwrap.wrap(current_request, width=max_width)
+            for line in wrapped_input:
+                try:
+                    stdscr.addnstr(top_line, 0, f"User: {line}", max_width, curses.color_pair(3))
+                except curses.error:
+                    pass
+                top_line += 1
+            top_line += 1
+
+            # Display function/tool output if any.
+            if current_tool_calls:
+                try:
+                    stdscr.addnstr(top_line, 0, "Function Call:", max_width, curses.color_pair(1) | curses.A_BOLD)
+                except curses.error:
+                    pass
+                top_line += 1
+                wrapped_tool = textwrap.wrap(current_tool_calls, width=max_width)
+                for line in wrapped_tool:
+                    if top_line >= max_height:
+                        break
+                    try:
+                        stdscr.addnstr(top_line, 0, line, max_width, curses.color_pair(1))
+                    except curses.error:
+                        pass
+                    top_line += 1
+                top_line += 1
+
+            # Display assistant response.
             try:
-                stdscr.addnstr(1, 0, f"Characteristics: Tools Called: {current_tool_calls} | TTS Playing: {tts_playing}", max_width)
+                stdscr.addnstr(top_line, 0, "Response:", max_width, curses.color_pair(2) | curses.A_BOLD)
             except curses.error:
                 pass
-            try:
-                stdscr.hline(2, 0, '-', max_width)
-            except curses.error:
-                pass
-            try:
-                stdscr.addnstr(3, 0, "Model Tokens:", max_width)
-            except curses.error:
-                pass
-            wrapped_lines = textwrap.wrap(current_tokens, width=max_width)
-            current_y = 4
-            for idx, line in enumerate(wrapped_lines):
-                if current_y >= max_height:
+            top_line += 1
+            wrapped_response = textwrap.wrap(current_tokens, width=max_width)
+            for line in wrapped_response:
+                if top_line >= max_height:
                     break
                 try:
-                    stdscr.addnstr(current_y, 0, line, max_width)
+                    stdscr.addnstr(top_line, 0, line, max_width, curses.color_pair(2))
                 except curses.error:
                     pass
-                current_y += 1
-            if current_y < max_height - 1:
+                top_line += 1
+
+            # Display retrieved memory context
+            mem_top = top_line + 1
+            try:
+                stdscr.addnstr(mem_top, 0, "Retrieved Memory:", max_width, curses.color_pair(4) | curses.A_BOLD)
+            except curses.error:
+                pass
+            mem_top += 1
+            for mem in memory_list:
+                # Each memory: (similarity, id, timestamp, role, content)
+                sim, msg_id, ts, role, content = mem
+                mem_str = f"[{ts}] ({role}) (score:{sim:.2f}): {content[:80]}..."
                 try:
-                    stdscr.addnstr(current_y, 0, "-" * max_width, max_width)
+                    stdscr.addnstr(mem_top, 0, mem_str, max_width, curses.color_pair(4))
                 except curses.error:
                     pass
-                current_y += 1
-                try:
-                    stdscr.addnstr(current_y, 0, "Chat History:", max_width)
-                except curses.error:
-                    pass
-                current_y += 1
-                for message in history_messages:
-                    if current_y >= max_height:
-                        break
-                    role = message.get("role", "unknown")
-                    content = message.get("content", "")
-                    if role == "user":
-                        msg_line = "User: " + content
-                    elif role == "assistant":
-                        msg_line = "Assistant: " + extract_chat_message(content)
-                    else:
-                        msg_line = f"{role.capitalize()}: " + content
-                    wrapped_msg = textwrap.wrap(msg_line, width=max_width)
-                    for w in wrapped_msg:
-                        if current_y >= max_height:
-                            break
-                        try:
-                            stdscr.addnstr(current_y, 0, w, max_width)
-                        except curses.error:
-                            pass
-                        current_y += 1
-        stdscr.refresh()
-        time.sleep(0.5)
+                mem_top += 1
+                if mem_top >= max_height:
+                    break
+
+            stdscr.refresh()
+            time.sleep(0.5)
 
 #############################################
-# Main: Launch Curses and Start Threads
+# Interactive CLI
 #############################################
-def main(stdscr):
-    curses_thread = threading.Thread(target=curses_display, args=(stdscr,), daemon=True)
-    curses_thread.start()
-    monitor_thread = threading.Thread(target=monitor_config, daemon=True)
-    monitor_thread.start()
-    script_monitor_thread = threading.Thread(target=monitor_script, daemon=True)
-    script_monitor_thread.start()
-    start_interactive_thread()
-    server_thread = threading.Thread(target=start_server, daemon=True)
-    server_thread.start()
-    while True:
+class InteractiveCLI:
+    def __init__(self, chat_manager: ChatManager, config_manager: ConfigManager):
+        self.chat_manager = chat_manager
+        self.config_manager = config_manager
+
+    def interactive_loop(self):
+        while True:
+            try:
+                cmd = input("[Interactive] > ").strip()
+            except EOFError:
+                break
+            if not cmd:
+                continue
+            if cmd.startswith("/send "):
+                message = cmd[len("/send "):].strip()
+                self.chat_manager.new_request(message)
+            elif cmd.startswith("/model "):
+                new_model = cmd[len("/model "):].strip()
+                self.config_manager.config["model"] = new_model
+                ModelManager(self.config_manager).ensure_ollama_and_model()
+                self.config_manager.update_config()
+            elif cmd.startswith("/history_depth "):
+                try:
+                    depth = int(cmd[len("/history_depth "):].strip())
+                    self.config_manager.config["history_depth"] = depth
+                    self.config_manager.update_config()
+                except ValueError:
+                    pass
+            elif cmd == "/quit":
+                break
+
+    def start(self):
+        thread = threading.Thread(target=self.interactive_loop, daemon=True)
+        thread.start()
+
+#############################################
+# Server Manager (TCP Server)
+#############################################
+class ServerManager:
+    def __init__(self, host, port, chat_manager: ChatManager):
+        self.host = host
+        self.port = port
+        self.chat_manager = chat_manager
+        self.client_threads = []
+        self.client_threads_lock = threading.Lock()
+
+    def handle_client_connection(self, client_socket, address):
         try:
-            time.sleep(1)
-        except KeyboardInterrupt:
-            break
+            data = client_socket.recv(65536)
+            if not data:
+                return
+            user_message = data.decode('utf-8').strip()
+            if not user_message:
+                return
+            result = self.chat_manager.new_request(user_message)
+            client_socket.sendall(result.encode('utf-8'))
+        except Exception:
+            pass
+        finally:
+            client_socket.close()
 
+    def start_server(self):
+        self.chat_manager.tts_manager.start()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server.bind((self.host, self.port))
+        except Exception:
+            server.bind(('0.0.0.0', 64162))
+        server.listen(5)
+        while True:
+            try:
+                client_sock, addr = server.accept()
+                client_thread = threading.Thread(
+                    target=self.handle_client_connection,
+                    args=(client_sock, addr),
+                    daemon=True
+                )
+                client_thread.start()
+                with self.client_threads_lock:
+                    self.client_threads.append(client_thread)
+            except KeyboardInterrupt:
+                break
+            except Exception:
+                pass
+        server.close()
+        self.chat_manager.tts_manager.stop()
+        with self.client_threads_lock:
+            for t in self.client_threads:
+                t.join()
+
+#############################################
+# Main Application Class
+#############################################
+class MainApp:
+    def __init__(self):
+        parser = argparse.ArgumentParser(description="Ollama Chat Server with TTS, Memory, Mode Switching, and advanced features.")
+        parser.add_argument("--model", type=str, help="Model name to use.")
+        parser.add_argument("--stream", action="store_true", help="Enable streaming responses from the model.")
+        parser.add_argument("--format", type=str, help="Structured output format: 'json' or path to JSON schema file.")
+        parser.add_argument("--system", type=str, help="System message override.")
+        parser.add_argument("--raw", action="store_true", help="If set, use raw mode (no template).")
+        parser.add_argument("--history", type=str, nargs='?', const="chat404.json",
+                            help="Path to a JSON file containing conversation history messages.")
+        parser.add_argument("--images", type=str, nargs='*', help="List of base64-encoded image files.")
+        parser.add_argument("--tools", type=str, help="Path to a JSON file defining tools.")
+        parser.add_argument("--option", action="append", help="Additional model parameters (e.g. --option temperature=0.7)")
+        self.args = parser.parse_args()
+
+        self.config_manager = ConfigManager()
+        self.config_manager.merge_args(self.args)
+        self.history_manager = HistoryManager(self.config_manager.config.get("history", "chat404.json"))
+        self.tools_data = Utils.safe_load_json_file(self.config_manager.config.get("tools"), None)
+        self.format_schema = Utils.load_format_schema(self.config_manager.config.get("format"))
+        self.tts_manager = TTSManager(self.config_manager.config.get("tts_url"))
+        # Initialize MemoryManager and ModeManager
+        self.memory_manager = MemoryManager(db_path="memory.db")
+        self.mode_manager = ModeManager(model_id="llama3.2:3b")
+        self.chat_manager = ChatManager(self.config_manager, self.history_manager,
+                                        self.tts_manager, self.tools_data, self.format_schema,
+                                        self.memory_manager, self.mode_manager)
+        global display_state
+        display_state = DisplayState()
+        self.display_manager = DisplayManager(display_state, self.history_manager, self.memory_manager)
+        self.server_manager = ServerManager(
+            self.config_manager.config.get("host", "0.0.0.0"),
+            self.config_manager.config.get("port", 64162),
+            self.chat_manager
+        )
+        self.interactive_cli = InteractiveCLI(self.chat_manager, self.config_manager)
+        ModelManager(self.config_manager).ensure_ollama_and_model()
+        self.config_monitor_thread = threading.Thread(target=self.config_manager.monitor_config, daemon=True)
+        self.script_monitor_thread = threading.Thread(target=Utils.monitor_script, daemon=True)
+
+    def run(self, stdscr):
+        curses_thread = threading.Thread(target=self.display_manager.curses_display, args=(stdscr,), daemon=True)
+        curses_thread.start()
+        self.config_monitor_thread.start()
+        self.script_monitor_thread.start()
+        self.interactive_cli.start()
+        server_thread = threading.Thread(target=self.server_manager.start_server, daemon=True)
+        server_thread.start()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+#############################################
+# Main Execution
+#############################################
 if __name__ == "__main__":
-    curses.wrapper(main)
+    curses.wrapper(MainApp().run)

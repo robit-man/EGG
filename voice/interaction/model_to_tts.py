@@ -182,7 +182,7 @@ class Tools:
         images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
         if not os.path.exists(images_dir):
             os.makedirs(images_dir)
-        url = "http://127.0.0.1:8080/camera/0"
+        url = "http://127.0.0.1:8080/camera/default_0"
         try:
             response = requests.get(url, stream=True, timeout=5)
             if response.status_code == 200:

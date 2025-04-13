@@ -7,6 +7,7 @@ import json
 import wave
 import time
 import socket
+import struct
 
 import whisper
 import torch
@@ -20,10 +21,33 @@ PORT_AUDIO = 64167             # Updated Port to receive audio streams
 PORT_SEND = 64162              # Port to send consolidated transcriptions
 TIMEOUT = 1                    # Timeout in seconds to wait before sending transcription
 
+SILENCE_RMS_THRESHOLD = 300    # Threshold for RMS below which audio is considered silent
+
 # Global variables to store the latest transcription and last received time
 latest_transcription = ""
 transcription_lock = threading.Lock()
 last_received_time = time.time()
+
+def compute_rms(audio_bytes):
+    """
+    Compute the RMS amplitude for 16-bit little-endian PCM audio.
+    
+    Args:
+        audio_bytes (bytes): Raw audio data.
+    
+    Returns:
+        float: The computed RMS value.
+    """
+    count = len(audio_bytes) // 2
+    if count == 0:
+        return 0.0
+    fmt = "<" + "h" * count
+    try:
+        samples = struct.unpack(fmt, audio_bytes)
+    except Exception:
+        return 0.0
+    sum_squares = sum(sample * sample for sample in samples)
+    return (sum_squares / count) ** 0.5
 
 def load_whisper_model(model_name: str, model_dir: str) -> whisper.Whisper:
     """
@@ -60,6 +84,17 @@ class AudioHandler(BaseHTTPRequestHandler):
 
         # Read the audio data from the request
         audio_data = self.rfile.read(content_length)
+        
+        # Sanity check: Discard transcription if audio is silent
+        rms_value = compute_rms(audio_data)
+        if rms_value < SILENCE_RMS_THRESHOLD:
+            print(f"Audio chunk deemed silent (RMS: {rms_value:.2f}). Discarding transcription.")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            response = {"status": "No speech detected, transcription discarded due to silence."}
+            self.wfile.write(json.dumps(response).encode())
+            return
 
         # Update the last received time
         with transcription_lock:

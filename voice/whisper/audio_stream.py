@@ -44,7 +44,7 @@ CHUNK_DURATION = 5        # seconds (used for fixed-length chunks, if needed)
 BLOCK_DURATION = 0.2      # seconds per block
 BLOCK_SIZE = int(RATE * BLOCK_DURATION)  # samples per block
 # For the silence buffer: 3 seconds = 3/0.2 = 15 blocks
-SILENCE_THRESHOLD_BLOCKS = 15
+SILENCE_THRESHOLD_BLOCKS = 5
 
 # ======================= Global Variables for Audio UI =================
 current_rms = 0.0
@@ -255,7 +255,8 @@ def audio_capture_thread(dev):
             speech_detected_current = True
             silence_count = 0
             if not capturing:
-                # Speech just started – fade out volume and start capturing
+                # Speech just started – fade out volume and start capturing.
+                # (Reducing output volume helps prevent self-heard audio.)
                 fade_out_volume(duration=1.0, steps=10)
                 capturing = True
                 current_chunk = []
@@ -364,8 +365,8 @@ def send_and_receive(prompt):
 def main():
     """
     Main function to set up the virtual environment, initialize USB tuning,
-    set recommended AEC parameters (including AECSILENCELEVEL=1e-7), start the voice-activated
-    audio capture thread, and run the curses interface.
+    set recommended AEC parameters (including adjusted AECSILENCELEVEL to help mask self-generated audio),
+    start the voice-activated audio capture thread, and run the curses interface.
     """
     global SERVER_URL
     SERVER_URL = f"http://{HOST}:{PORT}"
@@ -384,8 +385,10 @@ def main():
     try:
         tuning_dev.write('AECFREEZEONOFF', 0)
         tuning_dev.write('ECHOONOFF', 1)
-        tuning_dev.write('AECSILENCELEVEL', 1e-5)
-        logger.info("AEC settings updated: AECFREEZEONOFF=0, ECHOONOFF=1, AECSILENCELEVEL=1e-7")
+        # Adjust AECSILENCELEVEL to a higher threshold (from 1e-5 to 1e-4)
+        # to help filter out low-level self-generated (feedback) audio.
+        tuning_dev.write('AECSILENCELEVEL', 1e-4)
+        logger.info("AEC settings updated: AECFREEZEONOFF=0, ECHOONOFF=1, AECSILENCELEVEL=1e-4")
     except Exception as e:
         logger.warning(f"Could not set recommended AEC parameters: {e}")
     audio_thread = threading.Thread(target=audio_capture_thread, args=(tuning_dev,), daemon=True)

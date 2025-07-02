@@ -23,6 +23,10 @@ TIMEOUT = 1                    # Timeout in seconds to wait before sending trans
 
 SILENCE_RMS_THRESHOLD = 50    # Threshold for RMS below which audio is considered silent
 
+# File monitoring
+SCRIPT_FILE = os.path.realpath(__file__)
+CHECK_INTERVAL = 1  # seconds
+
 # Global variables to store the latest transcription and last received time
 latest_transcription = ""
 transcription_lock = threading.Lock()

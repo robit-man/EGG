@@ -21,7 +21,7 @@ PORT_AUDIO = 64167             # Updated Port to receive audio streams
 PORT_SEND = 64162              # Port to send consolidated transcriptions
 TIMEOUT = 1                    # Timeout in seconds to wait before sending transcription
 
-SILENCE_RMS_THRESHOLD = 300    # Threshold for RMS below which audio is considered silent
+SILENCE_RMS_THRESHOLD = 50    # Threshold for RMS below which audio is considered silent
 
 # Global variables to store the latest transcription and last received time
 latest_transcription = ""
@@ -205,12 +205,32 @@ def run_server(server_class=HTTPServer, handler_class=AudioHandler, port=PORT_AU
     print(f"Audio server running on port {port}")
     httpd.serve_forever()
 
+class ScriptWatcher(threading.Thread):
+    def __init__(self, script_file, interval=1):
+        super().__init__(daemon=True)
+        self.script_file = script_file
+        self.interval = interval
+        self.last_mtime = os.path.getmtime(script_file)
+
+    def run(self):
+        while True:
+            try:
+                current_mtime = os.path.getmtime(self.script_file)
+                if current_mtime != self.last_mtime:
+                    print(f"Script file '{self.script_file}' changed, restarting...")
+                    os.execv(sys.executable, [sys.executable, self.script_file])
+                time.sleep(self.interval)
+            except Exception as e:
+                print(f"Error monitoring script file: {e}")
+                time.sleep(self.interval)
+
 def main():
-    # Start the TranscriptionSender thread
+    watcher = ScriptWatcher(SCRIPT_FILE, CHECK_INTERVAL)
+    watcher.start()
+
     sender = TranscriptionSender(send_port=PORT_SEND, timeout=TIMEOUT)
     sender.start()
 
-    # Start the Audio Server
     run_server()
 
 if __name__ == "__main__":

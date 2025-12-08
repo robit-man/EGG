@@ -230,22 +230,6 @@ def api_cameras():
     """Return basic info about all cameras."""
     return jsonify(camera_manager.to_list())
 
-
-@app.route("/api/cameras/<int:cam_id>/resolution", methods=["POST"])
-def api_set_resolution(cam_id: int):
-    """Update requested resolution (and optional framerate) for a camera."""
-    payload = request.get_json(force=True) or {}
-    width = int(payload.get("width", 1920))
-    height = int(payload.get("height", 1080))
-    framerate = payload.get("framerate")
-    if framerate is not None:
-        framerate = int(framerate)
-    try:
-        camera_manager.update_resolution(cam_id, width, height, framerate)
-    except KeyError as exc:
-        return jsonify({"error": str(exc)}), 404
-    return jsonify(camera_manager.get(cam_id).to_dict())
-
 @app.route("/")
 def index():
     html = """
@@ -556,7 +540,7 @@ def index():
       <div class="side-panel-header">
         <div class="side-panel-title">
           <i class="fas fa-cubes"></i>
-          <span>Multi-Cam Depth</span>
+          <span>EGG DEPTH STREAM</span>
         </div>
         <button class="side-panel-toggle" type="button" aria-expanded="false">
           <i class="fas fa-chevron-down"></i>
@@ -771,24 +755,24 @@ def index():
       let currentPointSize = 0.02;
       const depthMinIntervalMs = 1500;
 
-      // Explicit yaw angles (in degrees) per original camera index in videoStreams.
-      // Index 0 in this array corresponds to videoStreams[0], etc.
-      // Fill this with your actual rig layout if you want explicit per-cam yaws.
-      const cameraYawDegByIndex = [
-        // 0,   // camera 0 at   0°
-        // 60,  // camera 1 at  60°
-        // 120, // camera 2 at 120°
-        // 180, // ...
-        // 240,
-        // 300
-      ];
-
       let da3Ensuring = false;
       let modelList   = [];
       let selectedModelId = settings.modelId || null;
 
+      // polling timer for model list retry
+      let modelRefreshRetryTimer = null;
+
       // depthStates[i] = { busy, jobId, auto, lastRequestTime, group }
       const DA3_BASE_PC_FOV = 90; // nominal “zero correction” FOV for X/Y
+
+      // Optional explicit yaw (degrees) per original camera index in videoStreams.
+      // Fill this if you want each physical camera index to have a fixed yaw.
+      const cameraYawDegByIndex = [
+        // 0,   // cam 0 at   0°
+        // 60,  // cam 1 at  60°
+        // 120, // cam 2 at 120°
+        // ...
+      ];
 
       init();
       animate();
@@ -841,7 +825,7 @@ def index():
         });
         aspectHInput.addEventListener('change', () => {
           saveSettings({
-            aspectW: parseFloat(aspectWInput.value) || 9,
+            aspectW: parseFloat(aspectHInput.value) || 9,
             aspectH: parseFloat(aspectHInput.value) || 16
           });
           rebuildLayout();
@@ -850,6 +834,7 @@ def index():
         angleStepInput.addEventListener('change', () => {
           let v = parseFloat(angleStepInput.value);
           if (!isFinite(v) || v < 0) v = 0;
+          angleStepInput.value = String(v);
           saveSettings({ camAngleIncrementDeg: v });
           rebuildLayout();
         });
@@ -882,6 +867,7 @@ def index():
         apiBaseInput.addEventListener('change', () => {
           const base = apiBaseInput.value.trim();
           saveSettings({ apiBase: base });
+          clearModelRefreshRetry();
           refreshModelList(true);
         });
 
@@ -895,6 +881,7 @@ def index():
         });
 
         modelRefreshBtn.addEventListener('click', () => {
+          clearModelRefreshRetry();
           refreshModelList(true);
         });
 
@@ -942,8 +929,6 @@ def index():
           const nowCollapsed = !controlPanel.classList.contains('collapsed');
           setCollapsed(nowCollapsed);
         });
-
-        // Initial collapsed state already applied by applyInitialSettings()
       }
 
       function applyInitialSettings() {
@@ -957,7 +942,7 @@ def index():
         if (typeof settings.aspectW === 'number') aspectWInput.value = String(settings.aspectW);
         if (typeof settings.aspectH === 'number') aspectHInput.value = String(settings.aspectH);
 
-        // Camera angle step (degrees, 0 = auto)
+        // Camera angle step (deg; 0 = auto / per-camera / uniform)
         const angleStep = (typeof settings.camAngleIncrementDeg === 'number')
           ? settings.camAngleIncrementDeg
           : 0;
@@ -979,14 +964,14 @@ def index():
         const auto = !!settings.depthAuto;
         depthAutoCheckbox.checked = auto;
 
-        // Camera order (now supports arbitrary length & repeats)
+        // Camera order: arbitrary length & repeats allowed, but indices must be valid
         const cameraCount = videoStreams.length;
         const defaultOrder = Array.from({ length: cameraCount }, (_, i) => i);
         if (Array.isArray(settings.cameraOrder)) {
           const filtered = settings.cameraOrder
             .map(x => Number(x))
             .filter(n => Number.isInteger(n) && n >= 0 && n < cameraCount);
-          cameraOrder = filtered.length > 0 ? filtered : defaultOrder;
+          cameraOrder = filtered.length ? filtered : defaultOrder;
         } else {
           cameraOrder = defaultOrder;
         }
@@ -1068,11 +1053,9 @@ def index():
           const srcIndex = order[slot];
           if (srcIndex == null || srcIndex < 0 || srcIndex >= cameraCount) continue;
           const url = videoStreams[srcIndex];
-
           const panel = createCameraPanel(slot, url);
-          // Remember which original camera this panel represents
+          // remember which physical camera this panel is mirroring
           panel.cameraIndex = srcIndex;
-
           cameraPanels.push(panel);
           depthStates.push({
             busy: false,
@@ -1101,11 +1084,7 @@ def index():
             .map(p => parseInt(p, 10))
             .filter(n => Number.isInteger(n) && n >= 0 && n < cameraCount);
 
-          if (nums.length === 0) {
-            cameraOrder = Array.from({ length: cameraCount }, (_, i) => i);
-          } else {
-            cameraOrder = nums;
-          }
+          cameraOrder = nums.length ? nums : Array.from({ length: cameraCount }, (_, i) => i);
         }
 
         saveSettings({ cameraOrder });
@@ -1135,18 +1114,17 @@ def index():
         for (let i = 0; i < count; i++) {
           const panel = cameraPanels[i];
 
-          // Original camera index this panel represents
           const idx = (typeof panel.cameraIndex === 'number') ? panel.cameraIndex : i;
 
           let yawDeg;
           if (angleStepSetting !== null) {
-            // Hard-set increment: simply i * step
+            // Hard-set increment per slot in the current ring
             yawDeg = angleStepSetting * i;
           } else if (typeof cameraYawDegByIndex[idx] === 'number') {
-            // Explicit per-camera yaw, if provided
+            // Optional per-physical-camera yaw if configured
             yawDeg = cameraYawDegByIndex[idx];
           } else {
-            // Default: evenly distribute around full 360°
+            // Fallback: evenly distribute around full circle
             yawDeg = i * 360 / Math.max(1, count);
           }
 
@@ -1332,6 +1310,98 @@ def index():
         }
       }
 
+      // ---------- Port-parsing + model list helpers ----------
+      function parseBasePort(base) {
+        try {
+          let urlStr = base;
+          if (!/^https?:\\/\\//i.test(urlStr)) {
+            urlStr = "http://" + urlStr;
+          }
+          const url = new URL(urlStr);
+          const protocol = url.protocol;
+          const hostname = url.hostname;
+          const portNum = url.port ? parseInt(url.port, 10) : 5000;
+          return {
+            protocol,
+            hostname,
+            port: Number.isFinite(portNum) ? portNum : 5000
+          };
+        } catch (err) {
+          console.warn("Could not parse API base for port hopping", err);
+          return null;
+        }
+      }
+
+      function buildBaseWithPort(info, port) {
+        const p = port || 5000;
+        return info.protocol + "//" + info.hostname + ":" + p;
+      }
+
+      async function fetchModelsRaw(base) {
+        try {
+          const res = await fetch(base + "/api/models/list");
+          if (!res.ok) {
+            return { ok: false, models: [], base, status: res.status };
+          }
+          const data = await res.json();
+          const models = data.models || data.data || [];
+          return { ok: true, models, base, status: res.status };
+        } catch (err) {
+          console.error("Model list error for", base, err);
+          return { ok: false, models: [], base, status: 0 };
+        }
+      }
+
+      function applyModelsToUi(models, showStatus) {
+        modelList = models;
+        modelSelect.innerHTML = "";
+
+        if (!models.length) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "(no models from API)";
+          modelSelect.appendChild(opt);
+          if (showStatus) statusLine.textContent = "DA3: no models from API";
+          return false;
+        }
+
+        let current = models.find(m => m.current) ||
+                      models.find(m => m.id === selectedModelId) ||
+                      models[0];
+
+        models.forEach(m => {
+          const opt = document.createElement("option");
+          opt.value = m.id;
+          opt.textContent = m.name || m.id;
+          if (current && m.id === current.id) opt.selected = true;
+          modelSelect.appendChild(opt);
+        });
+
+        selectedModelId = current.id;
+        saveSettings({ modelId: selectedModelId });
+
+        if (showStatus) {
+          const name = current.name || current.id;
+          statusLine.textContent = `DA3: models loaded (${models.length}), current: ${name}`;
+        }
+        return true;
+      }
+
+      function scheduleModelRefreshRetry() {
+        if (modelRefreshRetryTimer !== null) return;
+        modelRefreshRetryTimer = setTimeout(() => {
+          modelRefreshRetryTimer = null;
+          refreshModelList(false);
+        }, 5000);
+      }
+
+      function clearModelRefreshRetry() {
+        if (modelRefreshRetryTimer !== null) {
+          clearTimeout(modelRefreshRetryTimer);
+          modelRefreshRetryTimer = null;
+        }
+      }
+
       // ---------- Model list + selection (dropdown) ----------
       async function refreshModelList(showStatus = true) {
         const base = getApiBase();
@@ -1339,47 +1409,66 @@ def index():
           if (showStatus) statusLine.textContent = "DA3: API base URL not set";
           return;
         }
-        try {
-          const res = await fetch(base + "/api/models/list");
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          const data = await res.json();
-          const models = data.models || data.data || [];
-          modelList = models;
 
-          modelSelect.innerHTML = "";
+        const results = [];
 
-          if (!models.length) {
-            const opt = document.createElement("option");
-            opt.value = "";
-            opt.textContent = "(no models from API)";
-            modelSelect.appendChild(opt);
-            if (showStatus) statusLine.textContent = "DA3: no models from API";
-            return;
+        // 1) Try current base
+        const primary = await fetchModelsRaw(base);
+        results.push(primary);
+
+        const portInfo = parseBasePort(base);
+
+        if (portInfo) {
+          let currentPort = portInfo.port || 5000;
+          let nextPort = currentPort + 1;
+          if (nextPort > 5001) nextPort = 5000;  // increment up to 5001, then wrap to 5000
+
+          const altBase = buildBaseWithPort(portInfo, nextPort);
+          if (altBase !== base) {
+            const alt = await fetchModelsRaw(altBase);
+            results.push(alt);
+
+            // If neither attempt has hit 5000 yet, explicitly try 5000 as "restart"
+            if (currentPort !== 5000 && nextPort !== 5000) {
+              const base5000 = buildBaseWithPort(portInfo, 5000);
+              if (base5000 !== base && base5000 !== altBase) {
+                const r5000 = await fetchModelsRaw(base5000);
+                results.push(r5000);
+              }
+            }
           }
-
-          let current = models.find(m => m.current) ||
-                        models.find(m => m.id === selectedModelId) ||
-                        models[0];
-
-          models.forEach(m => {
-            const opt = document.createElement("option");
-            opt.value = m.id;
-            opt.textContent = m.name || m.id;
-            if (current && m.id === current.id) opt.selected = true;
-            modelSelect.appendChild(opt);
-          });
-
-          selectedModelId = current.id;
-          saveSettings({ modelId: selectedModelId });
-
-          if (showStatus) {
-            const name = current.name || current.id;
-            statusLine.textContent = `DA3: models loaded (${models.length}), current: ${name}`;
-          }
-        } catch (err) {
-          console.error("Model list error", err);
-          if (showStatus) statusLine.textContent = "DA3: model list error";
         }
+
+        // Prefer any base that returned models successfully
+        const bestSuccess = results.find(r => r.ok && r.models.length);
+        if (bestSuccess) {
+          if (bestSuccess.base !== base) {
+            apiBaseInput.value = bestSuccess.base;
+            saveSettings({ apiBase: bestSuccess.base });
+          }
+          applyModelsToUi(bestSuccess.models, showStatus);
+          clearModelRefreshRetry();
+          return;
+        }
+
+        // Next-best: any OK response but empty models
+        const okNoModels = results.find(r => r.ok && !r.models.length);
+        if (okNoModels) {
+          if (okNoModels.base !== base) {
+            apiBaseInput.value = okNoModels.base;
+            saveSettings({ apiBase: okNoModels.base });
+          }
+          applyModelsToUi(okNoModels.models, showStatus);
+          // Poll until we actually see models on some port
+          scheduleModelRefreshRetry();
+          return;
+        }
+
+        // Everything failed
+        if (showStatus) {
+          statusLine.textContent = "DA3: model list error";
+        }
+        scheduleModelRefreshRetry();
       }
 
       async function loadSelectedModel() {
@@ -1695,6 +1784,7 @@ def index():
         streams_json=streams_json,
         da3_api_base=DA3_API_BASE
     )
+
 
 
 

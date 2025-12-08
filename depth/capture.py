@@ -249,7 +249,7 @@ def index():
     }
     </script>
 
-    <!-- Font Awesome for icons (match DA3 UI vibe) -->
+    <!-- Font Awesome for icons -->
     <link rel="stylesheet"
           href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
 
@@ -264,8 +264,8 @@ def index():
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #000;
-        color: #fff;
+        background: #050505;
+        color: #f9fafb;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
 
@@ -282,12 +282,12 @@ def index():
         max-width: 320px;
       }
 
-      /* Borrowed style language from DA3 side panels: dark, rounded, glassy */
+      /* Monochrome side panel */
       .side-panel {
-        background: rgba(0, 0, 0, 0.85);
+        background: rgba(10, 10, 10, 0.92);
         border-radius: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+        border: 1px solid rgba(156, 163, 175, 0.4);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
         backdrop-filter: blur(16px);
         overflow: hidden;
       }
@@ -299,9 +299,10 @@ def index():
         padding: 8px 10px;
         cursor: pointer;
         background: radial-gradient(circle at top left,
-                                    rgba(59, 130, 246, 0.22),
-                                    rgba(15, 23, 42, 0.9));
-        border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+                                    rgba(156, 163, 175, 0.35),
+                                    rgba(15, 23, 42, 0.98));
+        border-bottom: 1px solid rgba(148, 163, 184, 0.5);
+        column-gap: 8px;
       }
 
       .side-panel-title {
@@ -312,26 +313,27 @@ def index():
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
-        color: #cbd5ff;
+        color: #e5e7eb;
       }
 
       .side-panel-title i {
         font-size: 14px;
-        color: #93c5fd;
+        color: #d1d5db;
       }
 
       .side-panel-toggle {
         width: 28px;
         height: 26px;
         border-radius: 8px;
-        border: 1px solid rgba(148, 163, 184, 0.7);
-        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(156, 163, 175, 0.9);
+        background: rgba(17, 24, 39, 0.98);
         color: #e5e7eb;
         display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
         transition: background 0.15s ease, transform 0.15s ease;
+        margin-left: 4px; /* add gap between title and arrow */
       }
 
       .side-panel-toggle i {
@@ -339,7 +341,7 @@ def index():
       }
 
       .side-panel-toggle:hover {
-        background: rgba(30, 64, 175, 0.9);
+        background: rgba(31, 41, 55, 1);
       }
 
       .side-panel-body {
@@ -361,8 +363,8 @@ def index():
       .panel-section {
         padding: 8px;
         border-radius: 10px;
-        background: rgba(15, 23, 42, 0.93);
-        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(17, 24, 39, 0.96);
+        border: 1px solid rgba(75, 85, 99, 0.8);
       }
 
       .panel-section + .panel-section {
@@ -413,8 +415,8 @@ def index():
         width: 100%;
         padding: 6px 8px;
         border-radius: 8px;
-        border: 1px solid rgba(148, 163, 184, 0.6);
-        background: rgba(15, 23, 42, 0.95);
+        border: 1px solid rgba(75, 85, 99, 0.9);
+        background: rgba(15, 23, 42, 0.98);
         color: #e5e7eb;
         font-size: 12px;
         outline: none;
@@ -422,29 +424,29 @@ def index():
 
       .panel-input-text:focus,
       .panel-select:focus {
-        border-color: rgba(96, 165, 250, 0.9);
-        box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.6);
+        border-color: rgba(209, 213, 219, 0.95);
+        box-shadow: 0 0 0 1px rgba(209, 213, 219, 0.7);
       }
 
       .panel-input-number {
         width: 60px;
         padding: 4px 6px;
         border-radius: 7px;
-        border: 1px solid rgba(148, 163, 184, 0.6);
-        background: rgba(15, 23, 42, 0.95);
+        border: 1px solid rgba(75, 85, 99, 0.9);
+        background: rgba(15, 23, 42, 0.98);
         color: #e5e7eb;
         font-size: 11px;
         outline: none;
       }
 
       .panel-input-number:focus {
-        border-color: rgba(96, 165, 250, 0.9);
-        box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.5);
+        border-color: rgba(209, 213, 219, 0.95);
+        box-shadow: 0 0 0 1px rgba(209, 213, 219, 0.7);
       }
 
       .panel-range {
         flex: 1 1 auto;
-        accent-color: #60a5fa;
+        accent-color: #9ca3af; /* grey, not blue */
       }
 
       .panel-value {
@@ -464,10 +466,10 @@ def index():
         flex: 1 1 auto;
         padding: 6px 10px;
         border-radius: 8px;
-        border: 1px solid rgba(148, 163, 184, 0.7);
+        border: 1px solid rgba(107, 114, 128, 0.9);
         background: radial-gradient(circle at top left,
-                                    rgba(79, 70, 229, 0.35),
-                                    rgba(15, 23, 42, 0.98));
+                                    rgba(75, 85, 99, 0.8),
+                                    rgba(15, 23, 42, 1));
         color: #f9fafb;
         font-size: 12px;
         display: inline-flex;
@@ -490,8 +492,8 @@ def index():
 
       .panel-button:hover {
         background: radial-gradient(circle at top left,
-                                    rgba(96, 165, 250, 0.45),
-                                    rgba(15, 23, 42, 1));
+                                    rgba(156, 163, 175, 0.9),
+                                    rgba(17, 24, 39, 1));
         transform: translateY(-1px);
       }
 
@@ -512,7 +514,7 @@ def index():
       .panel-checkbox input[type="checkbox"] {
         width: 14px;
         height: 14px;
-        accent-color: #60a5fa;
+        accent-color: #9ca3af; /* grey */
       }
 
       .panel-footer {
@@ -535,12 +537,12 @@ def index():
     </style>
   </head>
   <body>
-    <!-- Collapsible control panel (styled like DA3 side panels) -->
+    <!-- Collapsible control panel -->
     <div id="control-panel" class="side-panel collapsed">
       <div class="side-panel-header">
         <div class="side-panel-title">
           <i class="fas fa-cubes"></i>
-          <span>EGG DEPTH STREAM</span>
+          <span>Multi-Cam Depth</span>
         </div>
         <button class="side-panel-toggle" type="button" aria-expanded="false">
           <i class="fas fa-chevron-down"></i>
@@ -649,6 +651,31 @@ def index():
               <span id="pc-fov-y-value" class="panel-value">90°</span>
             </div>
           </div>
+
+          <div class="panel-row">
+            <div class="panel-label">Depth Scale Z</div>
+            <div class="panel-control">
+              <input id="pc-depth-scale" type="range" min="0.25" max="4.0" step="0.01"
+                     value="1.00" class="panel-range" />
+              <span id="pc-depth-scale-value" class="panel-value">1.00×</span>
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">Depth Offset</div>
+            <div class="panel-control">
+              <input id="pc-depth-offset" type="range" min="-5" max="5" step="0.1"
+                     value="0.0" class="panel-range" />
+              <span id="pc-depth-offset-value" class="panel-value">0.0</span>
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <button id="pc-auto-align" type="button" class="panel-button wide">
+              <i class="fas fa-magic"></i>
+              <span>Auto stitch / Z-align</span>
+            </button>
+          </div>
         </div>
 
         <div class="panel-section">
@@ -740,6 +767,13 @@ def index():
       const pcFovYSlider       = document.getElementById('pc-fov-y');
       const pcFovYLabel        = document.getElementById('pc-fov-y-value');
 
+      const pcDepthScaleSlider  = document.getElementById('pc-depth-scale');
+      const pcDepthScaleLabel   = document.getElementById('pc-depth-scale-value');
+      const pcDepthOffsetSlider = document.getElementById('pc-depth-offset');
+      const pcDepthOffsetLabel  = document.getElementById('pc-depth-offset-value');
+
+      const pcAutoAlignButton   = document.getElementById('pc-auto-align');
+
       const cameraOrderInput   = document.getElementById('camera-order');
       const cameraOrderApply   = document.getElementById('camera-order-apply');
 
@@ -762,16 +796,14 @@ def index():
       // polling timer for model list retry
       let modelRefreshRetryTimer = null;
 
-      // depthStates[i] = { busy, jobId, auto, lastRequestTime, group }
-      const DA3_BASE_PC_FOV = 90; // nominal “zero correction” FOV for X/Y
+      // depthStates[i] = { busy, jobId, auto, lastRequestTime, group, zScale, stats }
+      const DA3_BASE_PC_FOV = 90; // nominal "zero correction" FOV for X/Y
 
       // Optional explicit yaw (degrees) per original camera index in videoStreams.
-      // Fill this if you want each physical camera index to have a fixed yaw.
       const cameraYawDegByIndex = [
         // 0,   // cam 0 at   0°
         // 60,  // cam 1 at  60°
         // 120, // cam 2 at 120°
-        // ...
       ];
 
       init();
@@ -825,7 +857,7 @@ def index():
         });
         aspectHInput.addEventListener('change', () => {
           saveSettings({
-            aspectW: parseFloat(aspectHInput.value) || 9,
+            aspectW: parseFloat(aspectWInput.value) || 9,
             aspectH: parseFloat(aspectHInput.value) || 16
           });
           rebuildLayout();
@@ -862,6 +894,31 @@ def index():
         });
         pcFovYSlider.addEventListener('input', () => {
           updatePointCloudFovFromSliders();
+        });
+
+        pcDepthScaleSlider.addEventListener('input', () => {
+          let v = parseFloat(pcDepthScaleSlider.value);
+          if (!isFinite(v) || v <= 0) v = 1;
+          pcDepthScaleLabel.textContent = v.toFixed(2) + '×';
+          saveSettings({ pcScaleZ: v });
+          applyPointCloudScaleToAll();
+        });
+
+        pcDepthOffsetSlider.addEventListener('input', () => {
+          let v = parseFloat(pcDepthOffsetSlider.value);
+          if (!isFinite(v)) v = 0;
+          pcDepthOffsetLabel.textContent = v.toFixed(1);
+          saveSettings({ pcDepthOffset: v });
+          // Reposition all existing clouds using new offset
+          for (let i = 0; i < depthStates.length; i++) {
+            if (depthStates[i].group) {
+              orientDepthGroupForCamera(i);
+            }
+          }
+        });
+
+        pcAutoAlignButton.addEventListener('click', () => {
+          autoAlignDepthClouds();
         });
 
         apiBaseInput.addEventListener('change', () => {
@@ -942,7 +999,7 @@ def index():
         if (typeof settings.aspectW === 'number') aspectWInput.value = String(settings.aspectW);
         if (typeof settings.aspectH === 'number') aspectHInput.value = String(settings.aspectH);
 
-        // Camera angle step (deg; 0 = auto / per-camera / uniform)
+        // Camera angle step (deg; 0 = auto/uniform)
         const angleStep = (typeof settings.camAngleIncrementDeg === 'number')
           ? settings.camAngleIncrementDeg
           : 0;
@@ -987,7 +1044,7 @@ def index():
           panelToggle.setAttribute('aria-expanded', 'true');
         }
 
-        // Point cloud FOV adjust (per-axis)
+        // Point cloud FOV adjust (per-axis X/Y)
         const baseFov = DA3_BASE_PC_FOV;
         const fovX = typeof settings.pcFovX === 'number' ? settings.pcFovX : baseFov;
         const fovY = typeof settings.pcFovY === 'number' ? settings.pcFovY : baseFov;
@@ -1002,7 +1059,23 @@ def index():
 
         if (typeof settings.pcScaleX !== 'number') settings.pcScaleX = sx;
         if (typeof settings.pcScaleY !== 'number') settings.pcScaleY = sy;
-        saveSettings({ pcFovX: fovX, pcFovY: fovY, pcScaleX: settings.pcScaleX, pcScaleY: settings.pcScaleY });
+        if (typeof settings.pcScaleZ !== 'number') settings.pcScaleZ = 1;
+        if (typeof settings.pcDepthOffset !== 'number') settings.pcDepthOffset = 0;
+
+        // Depth Z scale & offset UI
+        pcDepthScaleSlider.value = settings.pcScaleZ.toFixed(2);
+        pcDepthScaleLabel.textContent = settings.pcScaleZ.toFixed(2) + '×';
+        pcDepthOffsetSlider.value = settings.pcDepthOffset.toFixed(1);
+        pcDepthOffsetLabel.textContent = settings.pcDepthOffset.toFixed(1);
+
+        saveSettings({
+          pcFovX: fovX,
+          pcFovY: fovY,
+          pcScaleX: settings.pcScaleX,
+          pcScaleY: settings.pcScaleY,
+          pcScaleZ: settings.pcScaleZ,
+          pcDepthOffset: settings.pcDepthOffset
+        });
       }
 
       // ---------- Layout helpers ----------
@@ -1062,7 +1135,9 @@ def index():
             jobId: null,
             auto: depthAutoCheckbox.checked,
             lastRequestTime: 0,
-            group: null
+            group: null,
+            zScale: 1,
+            stats: null
           });
         }
       }
@@ -1669,6 +1744,68 @@ def index():
         }, 1000);
       }
 
+      // ---------- Depth stats + auto stitch ----------
+      function computeDepthStats(geometry) {
+        const pos = geometry.getAttribute("position");
+        if (!pos) return null;
+        const arr = pos.array;
+        let sum = 0;
+        let count = 0;
+        let min = Infinity;
+        let max = -Infinity;
+        for (let i = 2; i < arr.length; i += 3) {
+          const z = arr[i];        // camera-space z
+          const d = Math.abs(z);   // treat depth as |z|
+          if (!isFinite(d)) continue;
+          sum += d;
+          count++;
+          if (d < min) min = d;
+          if (d > max) max = d;
+        }
+        if (!count) return null;
+        return { mean: sum / count, min, max, count };
+      }
+
+      function autoAlignDepthClouds() {
+        const statsList = [];
+
+        for (let i = 0; i < depthStates.length; i++) {
+          const state = depthStates[i];
+          const group = state.group;
+          if (!group || !group.children.length) continue;
+          const points = group.children[0];
+          if (!points.geometry) continue;
+          const stats = computeDepthStats(points.geometry);
+          if (!stats) continue;
+          state.stats = stats;
+          statsList.push({ index: i, stats });
+        }
+
+        if (!statsList.length) {
+          statusLine.textContent = "DA3: no depth clouds to auto-align";
+          return;
+        }
+
+        // Use median mean-depth as target to be robust to outliers
+        const means = statsList.map(e => e.stats.mean).sort((a, b) => a - b);
+        const median = means[Math.floor(means.length / 2)];
+
+        for (const entry of statsList) {
+          const idx = entry.index;
+          const s = entry.stats.mean > 0 ? (median / entry.stats.mean) : 1;
+          depthStates[idx].zScale = s;
+        }
+
+        // Re-apply orientation/scales with per-camera Z scale
+        for (let i = 0; i < depthStates.length; i++) {
+          if (depthStates[i].group) {
+            orientDepthGroupForCamera(i);
+          }
+        }
+
+        statusLine.textContent = "DA3: auto stitch / Z-align applied";
+      }
+
       // ---------- Point cloud construction & alignment ----------
       function handlePointCloudForCamera(index, pointcloud) {
         const vertices = pointcloud.vertices || [];
@@ -1716,6 +1853,7 @@ def index():
         if (!group) {
           group = new THREE.Group();
           depthStates[index].group = group;
+          depthStates[index].zScale = depthStates[index].zScale ?? 1;
           scene.add(group);
         } else {
           while (group.children.length) {
@@ -1727,6 +1865,12 @@ def index():
 
         const points = new THREE.Points(geometry, material);
         group.add(points);
+
+        // Update stats for auto-stitcher
+        const stats = computeDepthStats(geometry);
+        if (stats) {
+          depthStates[index].stats = stats;
+        }
 
         orientDepthGroupForCamera(index);
       }
@@ -1742,11 +1886,16 @@ def index():
         const quat         = new THREE.Quaternion().setFromUnitVectors(da3Forward, forwardWorld);
 
         group.quaternion.copy(quat);
-        group.position.set(0, 0, 0);
 
         const sx = settings.pcScaleX ?? 1;
         const sy = settings.pcScaleY ?? 1;
-        group.scale.set(sx, sy, 1);
+        const baseSz = settings.pcScaleZ ?? 1;
+        const perZ   = state.zScale ?? 1;
+        const sz     = baseSz * perZ;
+        group.scale.set(sx, sy, sz);
+
+        const offset = settings.pcDepthOffset ?? 0;
+        group.position.copy(forwardWorld.multiplyScalar(offset));
       }
 
       // ---------- Point cloud FOV-based scaling ----------
@@ -1769,9 +1918,12 @@ def index():
       function applyPointCloudScaleToAll() {
         const sx = settings.pcScaleX ?? 1;
         const sy = settings.pcScaleY ?? 1;
-        for (const state of depthStates) {
+        const baseSz = settings.pcScaleZ ?? 1;
+        for (let i = 0; i < depthStates.length; i++) {
+          const state = depthStates[i];
           if (state.group) {
-            state.group.scale.set(sx, sy, 1);
+            const perZ = state.zScale ?? 1;
+            state.group.scale.set(sx, sy, baseSz * perZ);
           }
         }
       }
@@ -1784,6 +1936,8 @@ def index():
         streams_json=streams_json,
         da3_api_base=DA3_API_BASE
     )
+
+
 
 
 

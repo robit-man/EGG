@@ -246,8 +246,6 @@ def api_set_resolution(cam_id: int):
         return jsonify({"error": str(exc)}), 404
     return jsonify(camera_manager.get(cam_id).to_dict())
 
-
-# Index route serves the immersive Three.js room.
 @app.route("/")
 def index():
     html = """
@@ -255,84 +253,9 @@ def index():
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Multi‑Camera + Depth Anything 3</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: #000;
-        color: #fff;
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
+    <title>Multi-Camera + Depth Anything 3</title>
 
-      #overlay-ui {
-        position: fixed;
-        top: 10px;
-        left: 10px;
-        padding: 10px 12px;
-        background: rgba(0,0,0,0.55);
-        border-radius: 8px;
-        font-size: 12px;
-        z-index: 10;
-        backdrop-filter: blur(8px);
-      }
-
-      #overlay-ui label {
-        display: block;
-        margin-bottom: 4px;
-      }
-
-      #overlay-ui input[type="number"],
-      #overlay-ui input[type="text"] {
-        width: 70px;
-        font-size: 11px;
-        margin-left: 4px;
-        border-radius: 4px;
-        border: 1px solid rgba(255,255,255,0.1);
-        background: rgba(0,0,0,0.4);
-        color: #fff;
-        padding: 2px 4px;
-      }
-
-      #overlay-ui input#api-base {
-        width: 180px;
-      }
-
-      #overlay-ui input[type="range"] {
-        width: 150px;
-      }
-
-      #overlay-ui button {
-        margin-top: 4px;
-        margin-right: 4px;
-        padding: 4px 8px;
-        font-size: 11px;
-        border-radius: 4px;
-        border: 1px solid rgba(255,255,255,0.25);
-        background: rgba(255,255,255,0.08);
-        color: #fff;
-        cursor: pointer;
-      }
-
-      #overlay-ui button:hover {
-        background: rgba(255,255,255,0.18);
-      }
-
-      #overlay-ui input[type="checkbox"] {
-        vertical-align: middle;
-      }
-
-      #status-line {
-        margin-top: 6px;
-        font-size: 11px;
-        opacity: 0.8;
-      }
-    </style>
-
-    <!-- Import map so the browser knows what "three" means -->
+    <!-- Three.js import map -->
     <script type="importmap">
     {
       "imports": {
@@ -341,74 +264,543 @@ def index():
       }
     }
     </script>
+
+    <!-- Font Awesome for icons (match DA3 UI vibe) -->
+    <link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        color: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+
+      canvas {
+        display: block;
+      }
+
+      /* Root control panel container (top-left) */
+      #control-panel {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        z-index: 20;
+        max-width: 320px;
+      }
+
+      /* Borrowed style language from DA3 side panels: dark, rounded, glassy */
+      .side-panel {
+        background: rgba(0, 0, 0, 0.85);
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(16px);
+        overflow: hidden;
+      }
+
+      .side-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 10px;
+        cursor: pointer;
+        background: radial-gradient(circle at top left,
+                                    rgba(59, 130, 246, 0.22),
+                                    rgba(15, 23, 42, 0.9));
+        border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+      }
+
+      .side-panel-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #cbd5ff;
+      }
+
+      .side-panel-title i {
+        font-size: 14px;
+        color: #93c5fd;
+      }
+
+      .side-panel-toggle {
+        width: 28px;
+        height: 26px;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.7);
+        background: rgba(15, 23, 42, 0.9);
+        color: #e5e7eb;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 0.15s ease, transform 0.15s ease;
+      }
+
+      .side-panel-toggle i {
+        transition: transform 0.15s ease;
+      }
+
+      .side-panel-toggle:hover {
+        background: rgba(30, 64, 175, 0.9);
+      }
+
+      .side-panel-body {
+        padding: 10px 10px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .side-panel.collapsed .side-panel-body {
+        display: none;
+      }
+
+      .side-panel.collapsed .side-panel-toggle i {
+        transform: rotate(-90deg);
+      }
+
+      /* Sections & rows inside the panel */
+      .panel-section {
+        padding: 8px;
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.93);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+      }
+
+      .panel-section + .panel-section {
+        margin-top: 6px;
+      }
+
+      .panel-section-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #9ca3af;
+        margin-bottom: 6px;
+      }
+
+      .panel-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 4px 0;
+        font-size: 12px;
+      }
+
+      .panel-label {
+        flex: 0 0 90px;
+        color: #e5e7eb;
+        font-weight: 500;
+      }
+
+      .panel-control {
+        flex: 1 1 auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .panel-control.aspect {
+        gap: 4px;
+      }
+
+      .panel-control.aspect span {
+        font-size: 11px;
+        color: #9ca3af;
+      }
+
+      .panel-input-text,
+      .panel-select {
+        width: 100%;
+        padding: 6px 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.6);
+        background: rgba(15, 23, 42, 0.95);
+        color: #e5e7eb;
+        font-size: 12px;
+        outline: none;
+      }
+
+      .panel-input-text:focus,
+      .panel-select:focus {
+        border-color: rgba(96, 165, 250, 0.9);
+        box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.6);
+      }
+
+      .panel-input-number {
+        width: 60px;
+        padding: 4px 6px;
+        border-radius: 7px;
+        border: 1px solid rgba(148, 163, 184, 0.6);
+        background: rgba(15, 23, 42, 0.95);
+        color: #e5e7eb;
+        font-size: 11px;
+        outline: none;
+      }
+
+      .panel-input-number:focus {
+        border-color: rgba(96, 165, 250, 0.9);
+        box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.5);
+      }
+
+      .panel-range {
+        flex: 1 1 auto;
+        accent-color: #60a5fa;
+      }
+
+      .panel-value {
+        min-width: 40px;
+        text-align: right;
+        font-size: 11px;
+        color: #9ca3af;
+      }
+
+      .panel-buttons-row {
+        display: flex;
+        gap: 6px;
+        margin-top: 4px;
+      }
+
+      .panel-button {
+        flex: 1 1 auto;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.7);
+        background: radial-gradient(circle at top left,
+                                    rgba(79, 70, 229, 0.35),
+                                    rgba(15, 23, 42, 0.98));
+        color: #f9fafb;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        cursor: pointer;
+        transition: background 0.15s ease, transform 0.1s ease;
+      }
+
+      .panel-button.small {
+        flex: 0 0 auto;
+        padding-inline: 8px;
+        font-size: 11px;
+      }
+
+      .panel-button.wide {
+        width: 100%;
+      }
+
+      .panel-button:hover {
+        background: radial-gradient(circle at top left,
+                                    rgba(96, 165, 250, 0.45),
+                                    rgba(15, 23, 42, 1));
+        transform: translateY(-1px);
+      }
+
+      .panel-button:disabled {
+        opacity: 0.5;
+        cursor: default;
+        transform: none;
+      }
+
+      .panel-checkbox {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #e5e7eb;
+      }
+
+      .panel-checkbox input[type="checkbox"] {
+        width: 14px;
+        height: 14px;
+        accent-color: #60a5fa;
+      }
+
+      .panel-footer {
+        margin-top: 4px;
+        padding-top: 6px;
+        border-top: 1px solid rgba(31, 41, 55, 0.9);
+        font-size: 11px;
+        color: #9ca3af;
+      }
+
+      #status-line {
+        white-space: normal;
+      }
+
+      @media (max-width: 720px) {
+        #control-panel {
+          max-width: 260px;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="overlay-ui">
-      <div>
-        <label>
-          Panel FOV
-          <input id="panel-fov" type="range" min="20" max="120" step="1" value="60">
-          <span id="panel-fov-value">60°</span>
-        </label>
+    <!-- Collapsible control panel (styled like DA3 side panels) -->
+    <div id="control-panel" class="side-panel collapsed">
+      <div class="side-panel-header">
+        <div class="side-panel-title">
+          <i class="fas fa-cubes"></i>
+          <span>Multi-Cam Depth</span>
+        </div>
+        <button class="side-panel-toggle" type="button" aria-expanded="false">
+          <i class="fas fa-chevron-down"></i>
+        </button>
       </div>
-      <div>
-        <label>
-          Aspect
-          W <input id="aspect-w" type="number" min="1" step="1" value="9">
-          H <input id="aspect-h" type="number" min="1" step="1" value="16">
-        </label>
+      <div class="side-panel-body">
+        <div class="panel-section">
+          <div class="panel-section-title">DA3 Server</div>
+          <div class="panel-row">
+            <div class="panel-label">API Base</div>
+            <div class="panel-control">
+              <input id="api-base" type="text" class="panel-input-text" />
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">Model</div>
+            <div class="panel-control">
+              <select id="model-select" class="panel-select">
+                <option value="">(loading…)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="panel-buttons-row">
+            <button id="model-refresh" type="button" class="panel-button small">
+              <i class="fas fa-sync-alt"></i><span>Refresh</span>
+            </button>
+            <button id="model-load" type="button" class="panel-button small">
+              <i class="fas fa-download"></i><span>Load</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-section-title">Ring Layout</div>
+          <div class="panel-row">
+            <div class="panel-label">Panel FOV</div>
+            <div class="panel-control">
+              <input id="panel-fov" type="range" min="20" max="120" step="1"
+                     value="60" class="panel-range" />
+              <span id="panel-fov-value" class="panel-value">60°</span>
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">Aspect</div>
+            <div class="panel-control aspect">
+              <span>W</span>
+              <input id="aspect-w" type="number" min="1" step="1"
+                     value="9" class="panel-input-number" />
+              <span>H</span>
+              <input id="aspect-h" type="number" min="1" step="1"
+                     value="16" class="panel-input-number" />
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">Angle step</div>
+            <div class="panel-control">
+              <input id="angle-step" type="number" min="0" max="360" step="1"
+                     value="0" class="panel-input-number" />
+              <span class="panel-value">0° = auto</span>
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">Order</div>
+            <div class="panel-control">
+              <input id="camera-order" type="text" class="panel-input-text"
+                     placeholder="e.g. 0,1,2,0,1,2" />
+              <button id="camera-order-apply" type="button"
+                      class="panel-button small">
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-section-title">Point Cloud</div>
+
+          <div class="panel-row">
+            <div class="panel-label">Point Size</div>
+            <div class="panel-control">
+              <input id="point-size" type="range" min="0.002" max="0.08" step="0.001"
+                     value="0.020" class="panel-range" />
+              <span id="point-size-value" class="panel-value">0.020</span>
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">PC FOV X</div>
+            <div class="panel-control">
+              <input id="pc-fov-x" type="range" min="60" max="120" step="1"
+                     value="90" class="panel-range" />
+              <span id="pc-fov-x-value" class="panel-value">90°</span>
+            </div>
+          </div>
+
+          <div class="panel-row">
+            <div class="panel-label">PC FOV Y</div>
+            <div class="panel-control">
+              <input id="pc-fov-y" type="range" min="60" max="120" step="1"
+                     value="90" class="panel-range" />
+              <span id="pc-fov-y-value" class="panel-value">90°</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-section-title">Depth Capture</div>
+          <div class="panel-row">
+            <button id="depth-once" type="button" class="panel-button wide">
+              <i class="fas fa-bolt"></i>
+              <span>Depth snapshot (all cams)</span>
+            </button>
+          </div>
+          <div class="panel-row">
+            <label class="panel-checkbox">
+              <input id="depth-auto" type="checkbox" />
+              <span>Auto depth (per camera)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="panel-footer">
+          <div id="status-line">DA3: idle</div>
+        </div>
       </div>
-      <div style="margin-top:4px;">
-        <label>
-          DA3 API
-          <input id="api-base" type="text" value="{{ da3_api_base }}">
-        </label>
-      </div>
-      <div style="margin-top:4px;">
-        <button id="depth-once">Depth snapshot (all cams)</button>
-        <label style="margin-left:4px;">
-          <input id="depth-auto" type="checkbox"> Auto depth
-        </label>
-      </div>
-      <div id="status-line">DA3: idle</div>
     </div>
 
     <script type="module">
       import * as THREE from 'three';
       import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-      // MJPEG camera stream URLs injected from Flask
-      const streams = {{ streams_json|safe }};
+      // Raw camera stream URLs from Flask; blanks are replaced by tiny PNGs
+      const rawStreams = {{ streams_json|safe }};
+      const videoStreams = rawStreams.filter(u =>
+        typeof u === 'string' && !u.startsWith('data:image')
+      );
 
-      // --- UI elements ---
-      const apiBaseInput      = document.getElementById('api-base');
-      const fovSlider         = document.getElementById('panel-fov');
-      const fovLabel          = document.getElementById('panel-fov-value');
-      const aspectWInput      = document.getElementById('aspect-w');
-      const aspectHInput      = document.getElementById('aspect-h');
-      const depthOnceButton   = document.getElementById('depth-once');
-      const depthAutoCheckbox = document.getElementById('depth-auto');
-      const statusLine        = document.getElementById('status-line');
+      // ---------- Settings persistence ----------
+      const LS_KEY = 'multiCamDa3Settings';
 
-      function getApiBase() {
-        const v = apiBaseInput.value.trim();
-        return v.replace(/\\/+$/, ''); // strip trailing slashes
+      function loadSettings() {
+        try {
+          const raw = localStorage.getItem(LS_KEY);
+          const base = raw ? JSON.parse(raw) : {};
+          // Back-compat with DA3 API base key
+          if (!base.apiBase) {
+            const legacy = localStorage.getItem('da3_api_base');
+            if (legacy) base.apiBase = legacy;
+          }
+          return base;
+        } catch (err) {
+          console.warn('Failed to load settings', err);
+          return {};
+        }
       }
 
-      // --- Three.js globals ---
-      let scene, camera, renderer, controls;
-      const cameraPanels = [];
-      const depthStates = [];
+      function saveSettings(patch) {
+        try {
+          settings = { ...settings, ...patch };
+          localStorage.setItem(LS_KEY, JSON.stringify(settings));
+          if (patch.apiBase) {
+            try { localStorage.setItem('da3_api_base', patch.apiBase); } catch (_) {}
+          }
+        } catch (err) {
+          console.warn('Failed to save settings', err);
+        }
+      }
 
-      // Per-camera depth scheduling
+      let settings = loadSettings();
+
+      // ---------- UI elements ----------
+      const controlPanel       = document.getElementById('control-panel');
+      const panelToggle        = controlPanel.querySelector('.side-panel-toggle');
+      const panelHeader        = controlPanel.querySelector('.side-panel-header');
+
+      const apiBaseInput       = document.getElementById('api-base');
+      const modelSelect        = document.getElementById('model-select');
+      const modelRefreshBtn    = document.getElementById('model-refresh');
+      const modelLoadBtn       = document.getElementById('model-load');
+
+      const fovSlider          = document.getElementById('panel-fov');
+      const fovLabel           = document.getElementById('panel-fov-value');
+      const aspectWInput       = document.getElementById('aspect-w');
+      const aspectHInput       = document.getElementById('aspect-h');
+      const angleStepInput     = document.getElementById('angle-step');
+
+      const pointSizeSlider    = document.getElementById('point-size');
+      const pointSizeLabel     = document.getElementById('point-size-value');
+
+      const pcFovXSlider       = document.getElementById('pc-fov-x');
+      const pcFovXLabel        = document.getElementById('pc-fov-x-value');
+      const pcFovYSlider       = document.getElementById('pc-fov-y');
+      const pcFovYLabel        = document.getElementById('pc-fov-y-value');
+
+      const cameraOrderInput   = document.getElementById('camera-order');
+      const cameraOrderApply   = document.getElementById('camera-order-apply');
+
+      const depthOnceButton    = document.getElementById('depth-once');
+      const depthAutoCheckbox  = document.getElementById('depth-auto');
+      const statusLine         = document.getElementById('status-line');
+
+      // ---------- Three.js globals ----------
+      let scene, camera, renderer, controls;
+      let cameraPanels = [];
+      let depthStates  = [];
+      let cameraOrder  = [];
+      let currentPointSize = 0.02;
       const depthMinIntervalMs = 1500;
+
+      // Explicit yaw angles (in degrees) per original camera index in videoStreams.
+      // Index 0 in this array corresponds to videoStreams[0], etc.
+      // Fill this with your actual rig layout if you want explicit per-cam yaws.
+      const cameraYawDegByIndex = [
+        // 0,   // camera 0 at   0°
+        // 60,  // camera 1 at  60°
+        // 120, // camera 2 at 120°
+        // 180, // ...
+        // 240,
+        // 300
+      ];
+
       let da3Ensuring = false;
+      let modelList   = [];
+      let selectedModelId = settings.modelId || null;
+
+      // depthStates[i] = { busy, jobId, auto, lastRequestTime, group }
+      const DA3_BASE_PC_FOV = 90; // nominal “zero correction” FOV for X/Y
 
       init();
       animate();
 
+      // ============================================================
+      // INIT
+      // ============================================================
       function init() {
-        // Scene / camera / renderer
+        applyInitialSettings();
+        setupPanelCollapsible();
+
+        // Three.js scene
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0x000000);
 
@@ -418,7 +810,6 @@ def index():
           0.01,
           1000
         );
-        // Slight offset so OrbitControls behave nicely
         camera.position.set(0, 0, 0.01);
 
         renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -430,28 +821,86 @@ def index():
         controls.enableDamping = true;
         controls.dampingFactor = 0.08;
 
-        // Build camera panels & depth state
-        for (let i = 0; i < streams.length; i++) {
-          const panel = createCameraPanel(i, streams[i]);
-          cameraPanels.push(panel);
-          depthStates.push({
-            busy: false,
-            jobId: null,
-            auto: false,
-            lastRequestTime: 0,
-            group: null
-          });
-        }
+        buildCameraPanels();
+        rebuildLayout();
 
         // UI wiring
         fovSlider.addEventListener('input', () => {
-          fovLabel.textContent = `${fovSlider.value}°`;
+          const v = parseFloat(fovSlider.value) || 60;
+          fovLabel.textContent = `${v.toFixed(0)}°`;
+          saveSettings({ panelFov: v });
           rebuildLayout();
         });
-        fovLabel.textContent = `${fovSlider.value}°`;
 
-        aspectWInput.addEventListener('change', rebuildLayout);
-        aspectHInput.addEventListener('change', rebuildLayout);
+        aspectWInput.addEventListener('change', () => {
+          saveSettings({
+            aspectW: parseFloat(aspectWInput.value) || 9,
+            aspectH: parseFloat(aspectHInput.value) || 16
+          });
+          rebuildLayout();
+        });
+        aspectHInput.addEventListener('change', () => {
+          saveSettings({
+            aspectW: parseFloat(aspectWInput.value) || 9,
+            aspectH: parseFloat(aspectHInput.value) || 16
+          });
+          rebuildLayout();
+        });
+
+        angleStepInput.addEventListener('change', () => {
+          let v = parseFloat(angleStepInput.value);
+          if (!isFinite(v) || v < 0) v = 0;
+          saveSettings({ camAngleIncrementDeg: v });
+          rebuildLayout();
+        });
+
+        pointSizeSlider.addEventListener('input', () => {
+          const v = parseFloat(pointSizeSlider.value);
+          if (!isFinite(v)) return;
+          currentPointSize = v;
+          pointSizeLabel.textContent = v.toFixed(3);
+          saveSettings({ pointSize: v });
+          // Update existing depth materials
+          for (const state of depthStates) {
+            if (!state.group) continue;
+            state.group.traverse(obj => {
+              if (obj.isPoints && obj.material) {
+                obj.material.size = currentPointSize;
+                obj.material.needsUpdate = true;
+              }
+            });
+          }
+        });
+
+        pcFovXSlider.addEventListener('input', () => {
+          updatePointCloudFovFromSliders();
+        });
+        pcFovYSlider.addEventListener('input', () => {
+          updatePointCloudFovFromSliders();
+        });
+
+        apiBaseInput.addEventListener('change', () => {
+          const base = apiBaseInput.value.trim();
+          saveSettings({ apiBase: base });
+          refreshModelList(true);
+        });
+
+        cameraOrderApply.addEventListener('click', () => {
+          applyCameraOrderFromInput();
+        });
+
+        modelSelect.addEventListener('change', () => {
+          selectedModelId = modelSelect.value || null;
+          saveSettings({ modelId: selectedModelId });
+        });
+
+        modelRefreshBtn.addEventListener('click', () => {
+          refreshModelList(true);
+        });
+
+        modelLoadBtn.addEventListener('click', () => {
+          loadSelectedModel();
+        });
 
         depthOnceButton.addEventListener('click', () => {
           for (let i = 0; i < depthStates.length; i++) {
@@ -461,20 +910,117 @@ def index():
 
         depthAutoCheckbox.addEventListener('change', () => {
           const enabled = depthAutoCheckbox.checked;
+          saveSettings({ depthAuto: enabled });
           for (let i = 0; i < depthStates.length; i++) {
             depthStates[i].auto = enabled;
-            if (enabled) {
-              requestDepthForCamera(i);
-            }
+            if (enabled) requestDepthForCamera(i);
           }
         });
 
         window.addEventListener('resize', onWindowResize);
 
-        // Initial layout: cameras tiled around a circle, default portrait 9:16
-        rebuildLayout();
+        // Try to hydrate model list once at startup
+        refreshModelList(false);
       }
 
+      function setupPanelCollapsible() {
+        const setCollapsed = (collapsed) => {
+          controlPanel.classList.toggle('collapsed', collapsed);
+          panelToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+          saveSettings({ panelCollapsed: collapsed });
+        };
+
+        panelHeader.addEventListener('click', (e) => {
+          // If click was on the toggle button, let its handler run
+          if (e.target.closest('.side-panel-toggle')) return;
+          const nowCollapsed = !controlPanel.classList.contains('collapsed');
+          setCollapsed(nowCollapsed);
+        });
+
+        panelToggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const nowCollapsed = !controlPanel.classList.contains('collapsed');
+          setCollapsed(nowCollapsed);
+        });
+
+        // Initial collapsed state already applied by applyInitialSettings()
+      }
+
+      function applyInitialSettings() {
+        // Panel FOV
+        if (typeof settings.panelFov === 'number') {
+          fovSlider.value = String(settings.panelFov);
+        }
+        fovLabel.textContent = `${parseFloat(fovSlider.value || '60').toFixed(0)}°`;
+
+        // Aspect (default 9:16 portrait)
+        if (typeof settings.aspectW === 'number') aspectWInput.value = String(settings.aspectW);
+        if (typeof settings.aspectH === 'number') aspectHInput.value = String(settings.aspectH);
+
+        // Camera angle step (degrees, 0 = auto)
+        const angleStep = (typeof settings.camAngleIncrementDeg === 'number')
+          ? settings.camAngleIncrementDeg
+          : 0;
+        angleStepInput.value = String(angleStep);
+
+        // API base
+        const defaultApiBase = "{{ da3_api_base }}";
+        const apiBase = settings.apiBase || defaultApiBase;
+        apiBaseInput.value = apiBase;
+        saveSettings({ apiBase });
+
+        // Point size
+        currentPointSize = typeof settings.pointSize === 'number' ? settings.pointSize : 0.02;
+        currentPointSize = Math.min(Math.max(currentPointSize, 0.002), 0.08);
+        pointSizeSlider.value = currentPointSize.toFixed(3);
+        pointSizeLabel.textContent = currentPointSize.toFixed(3);
+
+        // Depth auto
+        const auto = !!settings.depthAuto;
+        depthAutoCheckbox.checked = auto;
+
+        // Camera order (now supports arbitrary length & repeats)
+        const cameraCount = videoStreams.length;
+        const defaultOrder = Array.from({ length: cameraCount }, (_, i) => i);
+        if (Array.isArray(settings.cameraOrder)) {
+          const filtered = settings.cameraOrder
+            .map(x => Number(x))
+            .filter(n => Number.isInteger(n) && n >= 0 && n < cameraCount);
+          cameraOrder = filtered.length > 0 ? filtered : defaultOrder;
+        } else {
+          cameraOrder = defaultOrder;
+        }
+        updateCameraOrderInput();
+
+        // Panel collapsed
+        const collapsed = !!settings.panelCollapsed;
+        if (collapsed) {
+          controlPanel.classList.add('collapsed');
+          panelToggle.setAttribute('aria-expanded', 'false');
+        } else {
+          controlPanel.classList.remove('collapsed');
+          panelToggle.setAttribute('aria-expanded', 'true');
+        }
+
+        // Point cloud FOV adjust (per-axis)
+        const baseFov = DA3_BASE_PC_FOV;
+        const fovX = typeof settings.pcFovX === 'number' ? settings.pcFovX : baseFov;
+        const fovY = typeof settings.pcFovY === 'number' ? settings.pcFovY : baseFov;
+        pcFovXSlider.value = String(fovX);
+        pcFovYSlider.value = String(fovY);
+        pcFovXLabel.textContent = `${fovX.toFixed(0)}°`;
+        pcFovYLabel.textContent = `${fovY.toFixed(0)}°`;
+
+        const baseRad = THREE.MathUtils.degToRad(baseFov);
+        const sx = Math.tan(THREE.MathUtils.degToRad(fovX) / 2) / Math.tan(baseRad / 2);
+        const sy = Math.tan(THREE.MathUtils.degToRad(fovY) / 2) / Math.tan(baseRad / 2);
+
+        if (typeof settings.pcScaleX !== 'number') settings.pcScaleX = sx;
+        if (typeof settings.pcScaleY !== 'number') settings.pcScaleY = sy;
+        saveSettings({ pcFovX: fovX, pcFovY: fovY, pcScaleX: settings.pcScaleX, pcScaleY: settings.pcScaleY });
+      }
+
+      // ---------- Layout helpers ----------
       function onWindowResize() {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
@@ -487,23 +1033,124 @@ def index():
         return w / h;
       }
 
-      // Lay the panels around a circle, sized by FOV & aspect
+      function clearCameraPanelsAndDepth() {
+        for (const panel of cameraPanels) {
+          scene.remove(panel.group);
+          if (panel.mesh.geometry) panel.mesh.geometry.dispose();
+          if (panel.mesh.material) panel.mesh.material.dispose();
+          if (panel.texture) panel.texture.dispose();
+        }
+        cameraPanels = [];
+
+        for (const state of depthStates) {
+          if (state.group) {
+            scene.remove(state.group);
+            state.group.traverse(obj => {
+              if (obj.isPoints && obj.geometry) obj.geometry.dispose();
+              if (obj.material) obj.material.dispose();
+            });
+          }
+        }
+        depthStates = [];
+      }
+
+      function buildCameraPanels() {
+        clearCameraPanelsAndDepth();
+
+        const cameraCount = videoStreams.length;
+        const order = (Array.isArray(cameraOrder) && cameraOrder.length > 0)
+          ? cameraOrder
+          : Array.from({ length: cameraCount }, (_, i) => i);
+
+        const panelCount = order.length;
+
+        for (let slot = 0; slot < panelCount; slot++) {
+          const srcIndex = order[slot];
+          if (srcIndex == null || srcIndex < 0 || srcIndex >= cameraCount) continue;
+          const url = videoStreams[srcIndex];
+
+          const panel = createCameraPanel(slot, url);
+          // Remember which original camera this panel represents
+          panel.cameraIndex = srcIndex;
+
+          cameraPanels.push(panel);
+          depthStates.push({
+            busy: false,
+            jobId: null,
+            auto: depthAutoCheckbox.checked,
+            lastRequestTime: 0,
+            group: null
+          });
+        }
+      }
+
+      function updateCameraOrderInput() {
+        if (!cameraOrderInput) return;
+        cameraOrderInput.value = cameraOrder.join(',');
+      }
+
+      function applyCameraOrderFromInput() {
+        const cameraCount = videoStreams.length;
+        const text = cameraOrderInput.value.trim();
+
+        if (!text) {
+          cameraOrder = Array.from({ length: cameraCount }, (_, i) => i);
+        } else {
+          const parts = text.split(',').map(s => s.trim()).filter(Boolean);
+          const nums = parts
+            .map(p => parseInt(p, 10))
+            .filter(n => Number.isInteger(n) && n >= 0 && n < cameraCount);
+
+          if (nums.length === 0) {
+            cameraOrder = Array.from({ length: cameraCount }, (_, i) => i);
+          } else {
+            cameraOrder = nums;
+          }
+        }
+
+        saveSettings({ cameraOrder });
+        updateCameraOrderInput();
+        buildCameraPanels();
+        rebuildLayout();
+        applyPointCloudScaleToAll();
+      }
+
       function rebuildLayout() {
         const aspect = getAspect();
-        const fovDeg = parseFloat(fovSlider.value) || 60;
-        const fovRad = THREE.MathUtils.degToRad(fovDeg);
-        const radius = 4.0;
+        const fovDeg  = parseFloat(fovSlider.value) || 60;
+        const fovRad  = THREE.MathUtils.degToRad(fovDeg);
+        const radius  = 4.0;
 
         const count = cameraPanels.length;
-        const angleStep = (2 * Math.PI) / Math.max(1, count);
+        if (!count) return;
 
-        // Panel size so that from the center, they subtend ~fovDeg horizontally
         const panelWidth  = 2 * radius * Math.tan(fovRad / 2);
-        const panelHeight = panelWidth / aspect; // portrait-friendly
+        const panelHeight = panelWidth / aspect;
+
+        const angleStepSetting =
+          (typeof settings.camAngleIncrementDeg === 'number' && settings.camAngleIncrementDeg > 0)
+            ? settings.camAngleIncrementDeg
+            : null;
 
         for (let i = 0; i < count; i++) {
           const panel = cameraPanels[i];
-          const yaw = i * angleStep;
+
+          // Original camera index this panel represents
+          const idx = (typeof panel.cameraIndex === 'number') ? panel.cameraIndex : i;
+
+          let yawDeg;
+          if (angleStepSetting !== null) {
+            // Hard-set increment: simply i * step
+            yawDeg = angleStepSetting * i;
+          } else if (typeof cameraYawDegByIndex[idx] === 'number') {
+            // Explicit per-camera yaw, if provided
+            yawDeg = cameraYawDegByIndex[idx];
+          } else {
+            // Default: evenly distribute around full 360°
+            yawDeg = i * 360 / Math.max(1, count);
+          }
+
+          const yaw = THREE.MathUtils.degToRad(yawDeg);
 
           const x = radius * Math.sin(yaw);
           const z = radius * Math.cos(yaw);
@@ -514,7 +1161,6 @@ def index():
           if (panel.mesh.geometry) panel.mesh.geometry.dispose();
           panel.mesh.geometry = new THREE.PlaneGeometry(panelWidth, panelHeight);
 
-          // Forward direction this camera covers in the sphere
           panel.forward.set(
             panel.group.position.x,
             panel.group.position.y,
@@ -522,7 +1168,7 @@ def index():
           ).normalize();
         }
 
-        // Re-orient any existing point clouds after layout changes
+        // Re-orient & rescale existing point clouds after layout changes
         for (let i = 0; i < depthStates.length; i++) {
           if (depthStates[i].group) {
             orientDepthGroupForCamera(i);
@@ -530,13 +1176,13 @@ def index():
         }
       }
 
-      // Create a streaming panel: MJPEG -> <img> -> <canvas> -> CanvasTexture
+      // ---------- Camera panel creation ----------
       function createCameraPanel(index, url) {
         const group = new THREE.Group();
         scene.add(group);
 
         const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const ctx    = canvas.getContext('2d', { willReadFrequently: true });
         canvas.width  = 0;
         canvas.height = 0;
 
@@ -547,7 +1193,7 @@ def index():
 
         const material = new THREE.MeshBasicMaterial({
           map: texture,
-          side: THREE.BackSide, // inside the ring
+          side: THREE.BackSide,
           transparent: true,
           opacity: 1.0
         });
@@ -555,7 +1201,6 @@ def index():
         const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
         group.add(mesh);
 
-        // MJPEG image stream
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.decoding = "async";
@@ -566,7 +1211,6 @@ def index():
         return { index, group, mesh, img, canvas, ctx, texture, forward };
       }
 
-      // Draw current frame into canvas (center-cropped to target aspect)
       function copyImageToCanvas(img, canvas, ctx) {
         if (!img.naturalWidth || !img.naturalHeight) return;
 
@@ -586,13 +1230,11 @@ def index():
         let sx, sy, sw, sh;
 
         if (srcAspect > destAspect) {
-          // Source wider than target: crop left/right
           sh = sHeight;
           sw = sh * destAspect;
           sx = (sWidth - sw) * 0.5;
           sy = 0;
         } else {
-          // Source taller: crop top/bottom
           sw = sWidth;
           sh = sw / destAspect;
           sx = 0;
@@ -602,8 +1244,7 @@ def index():
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
       }
 
-      // Main render loop:
-      // - just sample whatever frame the browser has *right now* (no manual buffering)
+      // ---------- Animation loop ----------
       function animate() {
         requestAnimationFrame(animate);
 
@@ -614,21 +1255,25 @@ def index():
           panel.texture.needsUpdate = true;
         }
 
-        if (controls) controls.update();
+        controls.update();
         renderer.render(scene, camera);
       }
 
-      // --- Depth Anything 3 integration (mirrors DA3's own client logic) ---
-
-      function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+      // ============================================================
+      // DA3 API helpers
+      // ============================================================
+      function getApiBase() {
+        const v = apiBaseInput.value.trim();
+        return v.replace(/\\/+$/, '');
       }
+
+      const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
       async function fetchModelStatus() {
         const base = getApiBase();
         if (!base) return null;
         try {
-          const res = await fetch(`${base}/api/model_status`);
+          const res = await fetch(base + "/api/model_status");
           if (!res.ok) return null;
           return await res.json();
         } catch (err) {
@@ -657,28 +1302,26 @@ def index():
         return false;
       }
 
-      // Lightweight variant of DA3's ensureModelReady() that works against the API-only server
       async function ensureDa3ModelReady() {
-        if (da3Ensuring) {
-          return waitForModelReady();
+        const base = getApiBase();
+        if (!base) {
+          statusLine.textContent = "DA3: API base URL not set";
+          return false;
         }
+
+        if (da3Ensuring) return waitForModelReady();
         da3Ensuring = true;
         try {
           const status = await fetchModelStatus();
-          if (status?.status === "ready") {
+          if (status && status.status === "ready") {
             statusLine.textContent = "DA3: model ready";
             return true;
           }
-          if (status?.status === "loading") {
+          if (status && status.status === "loading") {
             return await waitForModelReady();
           }
-          const base = getApiBase();
-          if (!base) {
-            statusLine.textContent = "DA3: API base URL not set";
-            return false;
-          }
           statusLine.textContent = "DA3: starting model load...";
-          const res = await fetch(`${base}/api/load_model`, { method: "POST" });
+          const res = await fetch(base + "/api/load_model", { method: "POST" });
           if (!res.ok) {
             statusLine.textContent = "DA3: failed to start model load";
             return false;
@@ -689,7 +1332,99 @@ def index():
         }
       }
 
-      // Send the *latest* frame for this camera to /api/v1/infer
+      // ---------- Model list + selection (dropdown) ----------
+      async function refreshModelList(showStatus = true) {
+        const base = getApiBase();
+        if (!base) {
+          if (showStatus) statusLine.textContent = "DA3: API base URL not set";
+          return;
+        }
+        try {
+          const res = await fetch(base + "/api/models/list");
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const data = await res.json();
+          const models = data.models || data.data || [];
+          modelList = models;
+
+          modelSelect.innerHTML = "";
+
+          if (!models.length) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "(no models from API)";
+            modelSelect.appendChild(opt);
+            if (showStatus) statusLine.textContent = "DA3: no models from API";
+            return;
+          }
+
+          let current = models.find(m => m.current) ||
+                        models.find(m => m.id === selectedModelId) ||
+                        models[0];
+
+          models.forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m.id;
+            opt.textContent = m.name || m.id;
+            if (current && m.id === current.id) opt.selected = true;
+            modelSelect.appendChild(opt);
+          });
+
+          selectedModelId = current.id;
+          saveSettings({ modelId: selectedModelId });
+
+          if (showStatus) {
+            const name = current.name || current.id;
+            statusLine.textContent = `DA3: models loaded (${models.length}), current: ${name}`;
+          }
+        } catch (err) {
+          console.error("Model list error", err);
+          if (showStatus) statusLine.textContent = "DA3: model list error";
+        }
+      }
+
+      async function loadSelectedModel() {
+        const base = getApiBase();
+        if (!base) {
+          statusLine.textContent = "DA3: API base URL not set";
+          return;
+        }
+        const modelId = selectedModelId || (modelSelect && modelSelect.value) || null;
+        if (!modelId) {
+          statusLine.textContent = "DA3: select a model first";
+          return;
+        }
+
+        try {
+          statusLine.textContent = `DA3: selecting model ${modelId}...`;
+          const selRes = await fetch(base + "/api/models/select", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model_id: modelId })
+          });
+          const selJson = await selRes.json().catch(() => ({}));
+          if (!selRes.ok) {
+            statusLine.textContent = `DA3: select failed: ${selJson.error || selJson.message || selRes.status}`;
+            return;
+          }
+
+          statusLine.textContent = `DA3: loading model ${modelId}...`;
+          const loadRes = await fetch(base + "/api/load_model", { method: "POST" });
+          const loadJson = await loadRes.json().catch(() => ({}));
+          if (!loadRes.ok) {
+            statusLine.textContent = `DA3: load failed: ${loadJson.error || loadJson.message || loadRes.status}`;
+            return;
+          }
+
+          await waitForModelReady();
+          // Refresh list so "current" flags update
+          refreshModelList(false);
+        } catch (err) {
+          console.error("Model load error", err);
+          statusLine.textContent = "DA3: model load error (see console)";
+        }
+      }
+
+      // ---------- Depth per camera ----------
       async function requestDepthForCamera(index) {
         const state = depthStates[index];
         const panel = cameraPanels[index];
@@ -722,7 +1457,6 @@ def index():
         state.lastRequestTime = now;
         statusLine.textContent = `DA3: capturing depth for camera ${index}...`;
 
-        // Freeze the current frame into the canvas so the blob is exactly what we show
         copyImageToCanvas(panel.img, panel.canvas, panel.ctx);
 
         panel.canvas.toBlob(async (blob) => {
@@ -733,7 +1467,6 @@ def index():
 
           const file = new File([blob], `camera-${index}-${Date.now()}.jpg`, { type: "image/jpeg" });
 
-          // Match DA3's own form keys (handleFileSelect → /api/process). 
           const formData = new FormData();
           formData.append("file", file);
           formData.append("resolution", "504");
@@ -749,8 +1482,7 @@ def index():
           formData.append("feat_vis_fps", "15");
 
           try {
-            // /api/v1/infer is an alias for /api/process and accepts multipart form-data. :contentReference[oaicite:4]{index=4}
-            const response = await fetch(`${base}/api/v1/infer`, {
+            const response = await fetch(base + "/api/v1/infer", {
               method: "POST",
               body: formData
             });
@@ -766,9 +1498,10 @@ def index():
               return;
             }
 
-            if (data.pointcloud) {
+            if (data.pointcloud || data.point_cloud) {
+              const pc = data.pointcloud || data.point_cloud;
               statusLine.textContent = `DA3: depth ready (camera ${index})`;
-              handlePointCloudForCamera(index, data.pointcloud);
+              handlePointCloudForCamera(index, pc);
               state.busy = false;
               if (state.auto) {
                 requestDepthForCamera(index);
@@ -805,7 +1538,7 @@ def index():
 
         const intervalId = setInterval(async () => {
           try {
-            const res = await fetch(`${base}/api/v1/jobs/${jobId}`);
+            const res = await fetch(base + "/api/v1/jobs/" + jobId);
             const data = await res.json().catch(() => null);
 
             if (!res.ok) {
@@ -823,8 +1556,9 @@ def index():
               clearInterval(intervalId);
               state.jobId = null;
               statusLine.textContent = `DA3: depth ready (camera ${index})`;
-              if (data.pointcloud) {
-                handlePointCloudForCamera(index, data.pointcloud);
+              if (data.pointcloud || data.point_cloud) {
+                const pc = data.pointcloud || data.point_cloud;
+                handlePointCloudForCamera(index, pc);
               }
               state.busy = false;
               if (state.auto) {
@@ -846,7 +1580,7 @@ def index():
         }, 1000);
       }
 
-      // Build a THREE.Points from DA3's point cloud JSON and attach it to this camera
+      // ---------- Point cloud construction & alignment ----------
       function handlePointCloudForCamera(index, pointcloud) {
         const vertices = pointcloud.vertices || [];
         if (!vertices.length) {
@@ -882,7 +1616,7 @@ def index():
         geometry.computeBoundingSphere();
 
         const material = new THREE.PointsMaterial({
-          size: 0.005,
+          size: currentPointSize,
           sizeAttenuation: true,
           vertexColors: hasColors,
           depthWrite: false,
@@ -908,25 +1642,60 @@ def index():
         orientDepthGroupForCamera(index);
       }
 
-      // Align DA3's canonical camera-forward (-Z in OpenGL/Three.js space) to this rig camera's segment
       function orientDepthGroupForCamera(index) {
-        const state  = depthStates[index];
-        const group  = state.group;
-        const panel  = cameraPanels[index];
+        const state = depthStates[index];
+        const group = state.group;
+        const panel = cameraPanels[index];
         if (!group || !panel) return;
 
-        const forwardWorld  = panel.forward.clone().normalize();
-        const da3Forward    = new THREE.Vector3(0, 0, -1); // DA3 points are in an OpenGL-like camera space. 
-        const quat          = new THREE.Quaternion().setFromUnitVectors(da3Forward, forwardWorld);
+        const forwardWorld = panel.forward.clone().normalize();
+        const da3Forward   = new THREE.Vector3(0, 0, -1); // DA3 camera-forward in OpenGL space
+        const quat         = new THREE.Quaternion().setFromUnitVectors(da3Forward, forwardWorld);
 
         group.quaternion.copy(quat);
         group.position.set(0, 0, 0);
+
+        const sx = settings.pcScaleX ?? 1;
+        const sy = settings.pcScaleY ?? 1;
+        group.scale.set(sx, sy, 1);
+      }
+
+      // ---------- Point cloud FOV-based scaling ----------
+      function updatePointCloudFovFromSliders() {
+        const base = DA3_BASE_PC_FOV;
+        const fovX = parseFloat(pcFovXSlider.value) || base;
+        const fovY = parseFloat(pcFovYSlider.value) || base;
+
+        pcFovXLabel.textContent = `${fovX.toFixed(0)}°`;
+        pcFovYLabel.textContent = `${fovY.toFixed(0)}°`;
+
+        const baseRad = THREE.MathUtils.degToRad(base);
+        const sx = Math.tan(THREE.MathUtils.degToRad(fovX) / 2) / Math.tan(baseRad / 2);
+        const sy = Math.tan(THREE.MathUtils.degToRad(fovY) / 2) / Math.tan(baseRad / 2);
+
+        saveSettings({ pcFovX: fovX, pcFovY: fovY, pcScaleX: sx, pcScaleY: sy });
+        applyPointCloudScaleToAll();
+      }
+
+      function applyPointCloudScaleToAll() {
+        const sx = settings.pcScaleX ?? 1;
+        const sy = settings.pcScaleY ?? 1;
+        for (const state of depthStates) {
+          if (state.group) {
+            state.group.scale.set(sx, sy, 1);
+          }
+        }
       }
     </script>
   </body>
 </html>
     """
-    return render_template_string(html, streams_json=streams_json, da3_api_base=DA3_API_BASE)
+    return render_template_string(
+        html,
+        streams_json=streams_json,
+        da3_api_base=DA3_API_BASE
+    )
+
 
 
 

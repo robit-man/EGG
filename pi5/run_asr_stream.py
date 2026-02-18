@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import platform
 import subprocess
 import sys
 
@@ -56,9 +57,24 @@ def _ensure_whispercpp_available(python_exe: str, base_dir: str) -> bool:
     wheel_dir = os.path.join(whispercpp_dir, "dist")
     wheel_candidates = []
     try:
+        machine = platform.machine().lower()
+        py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+        preferred_tokens = []
+        if "aarch64" in machine or "arm64" in machine:
+            preferred_tokens = ["aarch64", "arm64"]
+        elif "arm" in machine:
+            preferred_tokens = ["armv7", "arm"]
+        elif "x86_64" in machine or "amd64" in machine:
+            preferred_tokens = ["x86_64", "amd64"]
         for entry in pathlib.Path(wheel_dir).glob("*.whl"):
-            wheel_candidates.append(str(entry))
-        wheel_candidates.sort(reverse=True)
+            name = entry.name.lower()
+            score = 0
+            if py_tag in name:
+                score += 5
+            if any(token in name for token in preferred_tokens):
+                score += 10
+            wheel_candidates.append((score, str(entry)))
+        wheel_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     except Exception:
         wheel_candidates = []
 
@@ -72,7 +88,7 @@ def _ensure_whispercpp_available(python_exe: str, base_dir: str) -> bool:
         pass
 
     if wheel_candidates:
-        for wheel_path in wheel_candidates:
+        for _, wheel_path in wheel_candidates:
             try:
                 print(f"[ASR] Installing whispercpp wheel: {wheel_path}", flush=True)
                 install = subprocess.run(

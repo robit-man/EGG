@@ -41,8 +41,9 @@ VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
 NEEDED_PACKAGES = ["requests", "num2words", "pyalsaaudio", "psutil"]
 
 def in_venv():
-    return (hasattr(sys, 'real_prefix') or
-            (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
+    expected = os.path.normcase(os.path.abspath(VENV_DIR))
+    current = os.path.normcase(os.path.abspath(sys.prefix))
+    return current == expected
 
 def setup_venv(online=True):
     # Create venv if it doesn't exist
@@ -77,7 +78,10 @@ def setup_venv(online=True):
 def ensure_runtime_packages():
     pip_path = os.path.join(VENV_DIR, 'bin', 'pip') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'pip.exe')
     if not os.path.exists(pip_path):
-        return False
+        try:
+            setup_venv(online=is_connected())
+        except Exception:
+            return False
     try:
         subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
         return True

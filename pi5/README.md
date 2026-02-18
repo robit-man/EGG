@@ -28,6 +28,9 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 ## Runtime services and local endpoints
 
 - `watchdog.py`: toggles services and keeps them alive
+  - live per-service CPU and RAM usage in the service table
+  - top-line heaviest/peak resource summary
+  - `S` opens CPU throttle settings (governor/min/max/auto-apply + apply-now)
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
 - `camera_router.py`: camera list/snapshot/video (+ `/mjpeg` and `/jpeg`) routes + terminal dashboard
 - `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt + terminal dashboard

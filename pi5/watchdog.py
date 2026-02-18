@@ -71,6 +71,7 @@ WATCHDOG_RUNTIME_DIR_NAME = ".watchdog_runtime"
 WATCHDOG_STATE_FILE_NAME = "service_state.json"
 WATCHDOG_LOCK_FILE_NAME = "watchdog.lock"
 WATCHDOG_SERVICE_LOG_DIR_NAME = "service_logs"
+CPUFREQ_GLOB = "/sys/devices/system/cpu/cpu*/cpufreq"
 MONITOR_INTERVAL_SECONDS = 0.25
 STOP_SIGINT_GRACE_SECONDS = 5.0
 STOP_SIGTERM_GRACE_SECONDS = 10.0
@@ -84,6 +85,7 @@ DEFAULT_ACTIVATION_PROBE_INTERVAL_SECONDS = 1.0
 DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 2.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
 HTTP_PROBE_TIMEOUT_SECONDS = 1.5
+RESOURCE_SAMPLE_INTERVAL_SECONDS = 1.0
 PORT_DISCOVERY_SCAN_LIMIT = 64
 PORT_DISCOVERY_MAX_DELTA = 128
 PORT_RECLAIM_TERM_WAIT_SECONDS = 1.4
@@ -223,6 +225,12 @@ class ServiceRuntime:
     last_health_error: str = ""
     resolved_health_port: int = 0
     last_port_discovery_at: float = 0.0
+    cpu_percent: float = 0.0
+    rss_mb: float = 0.0
+    peak_cpu_percent: float = 0.0
+    peak_cpu_at: float = 0.0
+    peak_rss_mb: float = 0.0
+    peak_rss_at: float = 0.0
 
 
 class WatchdogManager:
@@ -361,11 +369,29 @@ class WatchdogManager:
         self._port_reclaim_force = self._env_flag("WATCHDOG_RECLAIM_FORCE", False)
         self._tcp_passive_probe = self._env_flag("WATCHDOG_TCP_PASSIVE_PROBE", True)
         self._force_direct = self._env_flag("WATCHDOG_FORCE_DIRECT", False)
+        self._last_resource_sample_at = 0.0
+        self._resource_sample_interval = max(0.4, float(RESOURCE_SAMPLE_INTERVAL_SECONDS))
 
         self._os_name = platform.system().lower()
         self._has_passive_tcp_tools = bool(
             self._os_name == "windows" or shutil.which("lsof") or shutil.which("ss")
         )
+        self._cpu_cpufreq_paths: List[pathlib.Path] = []
+        self._cpu_available_governors: List[str] = []
+        self._cpu_hw_min_khz = 0
+        self._cpu_hw_max_khz = 0
+        self._cpu_current_governor = ""
+        self._cpu_current_min_khz = 0
+        self._cpu_current_max_khz = 0
+        self._cpu_throttle_supported = False
+        self._cpu_throttle_last_apply = ""
+        self._cpu_throttle = {
+            "governor": "ondemand",
+            "min_khz": 800000,
+            "max_khz": 1800000,
+            "auto_apply": False,
+        }
+        self._refresh_cpu_throttle_support()
         self._terminal_emulator = self._detect_terminal_emulator()
         if (
             self._os_name not in ("windows", "darwin")
@@ -378,6 +404,13 @@ class WatchdogManager:
         self._configure_auto_update()
 
         desired_overrides = self._load_desired_state()
+        if self._cpu_throttle.get("auto_apply", False):
+            applied, detail = self._apply_cpu_throttle_settings()
+            self._cpu_throttle_last_apply = detail
+            if applied:
+                self._log(f"[CPU] Auto-applied throttle: {detail}")
+            else:
+                self._log(f"[WARN] CPU throttle auto-apply failed: {detail}")
         now = time.time()
         for svc in self.services:
             desired_enabled = desired_overrides.get(svc.service_id)
@@ -405,7 +438,7 @@ class WatchdogManager:
             self.runtime_by_id[svc.service_id] = runtime
 
         self._log("Watchdog initialized")
-        self._log("Keys: Up/Down select, Space toggle, R restart, A toggle all, Q quit")
+        self._log("Keys: Up/Down select, Space toggle, R restart, A toggle all, S CPU settings, Q quit")
         if self._port_reclaim_enabled:
             reclaim_mode = "aggressive (includes foreign pids)" if self._port_reclaim_force else "owned-only"
             self._log(f"[PORT] Auto reclaim enabled ({reclaim_mode})")
@@ -416,6 +449,160 @@ class WatchdogManager:
                 self._log("[PORT] Passive TCP health probes enabled")
             else:
                 self._log("[WARN] Passive TCP probes requested, but no lsof/ss; falling back to active connects")
+        if self._cpu_throttle_supported:
+            self._log(
+                f"[CPU] cpufreq detected governor={self._cpu_current_governor or 'unknown'} "
+                f"min={self._cpu_current_min_khz or '-'} max={self._cpu_current_max_khz or '-'}"
+            )
+        else:
+            self._log("[WARN] CPU throttle control unavailable (cpufreq sysfs not detected)")
+
+    @staticmethod
+    def _read_text_file(path: pathlib.Path) -> str:
+        try:
+            return str(path.read_text(encoding="utf-8")).strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _parse_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
+    def _refresh_cpu_throttle_support(self):
+        cpufreq_paths = []
+        for path in sorted(pathlib.Path("/").glob(CPUFREQ_GLOB.lstrip("/"))):
+            if not path.exists() or not path.is_dir():
+                continue
+            if (path / "scaling_governor").exists():
+                cpufreq_paths.append(path)
+        self._cpu_cpufreq_paths = cpufreq_paths
+        self._cpu_throttle_supported = bool(cpufreq_paths)
+        if not self._cpu_throttle_supported:
+            self._cpu_available_governors = []
+            self._cpu_current_governor = ""
+            self._cpu_current_min_khz = 0
+            self._cpu_current_max_khz = 0
+            self._cpu_hw_min_khz = 0
+            self._cpu_hw_max_khz = 0
+            return
+
+        ref = cpufreq_paths[0]
+        available = self._read_text_file(ref / "scaling_available_governors")
+        self._cpu_available_governors = [token for token in available.split() if token]
+        self._cpu_current_governor = self._read_text_file(ref / "scaling_governor")
+        self._cpu_current_min_khz = self._parse_int(self._read_text_file(ref / "scaling_min_freq"), 0)
+        self._cpu_current_max_khz = self._parse_int(self._read_text_file(ref / "scaling_max_freq"), 0)
+        self._cpu_hw_min_khz = self._parse_int(self._read_text_file(ref / "cpuinfo_min_freq"), 0)
+        self._cpu_hw_max_khz = self._parse_int(self._read_text_file(ref / "cpuinfo_max_freq"), 0)
+
+        if not str(self._cpu_throttle.get("governor", "")).strip():
+            self._cpu_throttle["governor"] = self._cpu_current_governor or "ondemand"
+        if not int(self._cpu_throttle.get("min_khz", 0) or 0):
+            self._cpu_throttle["min_khz"] = self._cpu_current_min_khz or self._cpu_hw_min_khz or 800000
+        if not int(self._cpu_throttle.get("max_khz", 0) or 0):
+            self._cpu_throttle["max_khz"] = self._cpu_current_max_khz or self._cpu_hw_max_khz or 1800000
+        self._normalize_cpu_throttle_settings()
+
+    def _normalize_cpu_throttle_settings(self):
+        governor = str(self._cpu_throttle.get("governor", "")).strip()
+        if self._cpu_available_governors:
+            if governor not in self._cpu_available_governors:
+                if self._cpu_current_governor in self._cpu_available_governors:
+                    governor = self._cpu_current_governor
+                else:
+                    governor = self._cpu_available_governors[0]
+        elif not governor:
+            governor = self._cpu_current_governor or "ondemand"
+        self._cpu_throttle["governor"] = governor
+
+        min_khz = self._parse_int(self._cpu_throttle.get("min_khz"), self._cpu_current_min_khz or 800000)
+        max_khz = self._parse_int(self._cpu_throttle.get("max_khz"), self._cpu_current_max_khz or 1800000)
+
+        if self._cpu_hw_min_khz > 0:
+            min_khz = max(self._cpu_hw_min_khz, min_khz)
+            max_khz = max(self._cpu_hw_min_khz, max_khz)
+        if self._cpu_hw_max_khz > 0:
+            min_khz = min(self._cpu_hw_max_khz, min_khz)
+            max_khz = min(self._cpu_hw_max_khz, max_khz)
+        if min_khz > max_khz:
+            min_khz, max_khz = max_khz, min_khz
+        self._cpu_throttle["min_khz"] = int(max(100000, min_khz))
+        self._cpu_throttle["max_khz"] = int(max(100000, max_khz))
+        self._cpu_throttle["auto_apply"] = bool(self._cpu_throttle.get("auto_apply", False))
+
+    def _apply_loaded_cpu_throttle(self, payload: dict):
+        if not isinstance(payload, dict):
+            return
+        for key in ("governor", "min_khz", "max_khz", "auto_apply"):
+            if key in payload:
+                self._cpu_throttle[key] = payload.get(key)
+        self._normalize_cpu_throttle_settings()
+
+    def _apply_cpu_throttle_settings(self) -> Tuple[bool, str]:
+        self._normalize_cpu_throttle_settings()
+        if not self._cpu_throttle_supported:
+            return False, "cpufreq unsupported on this host"
+        if not self._cpu_cpufreq_paths:
+            return False, "no cpufreq cpu paths found"
+
+        governor = str(self._cpu_throttle.get("governor", "")).strip()
+        min_khz = int(self._cpu_throttle.get("min_khz", 0) or 0)
+        max_khz = int(self._cpu_throttle.get("max_khz", 0) or 0)
+        if min_khz <= 0 or max_khz <= 0:
+            return False, "invalid min/max frequencies"
+        if min_khz > max_khz:
+            min_khz, max_khz = max_khz, min_khz
+            self._cpu_throttle["min_khz"] = min_khz
+            self._cpu_throttle["max_khz"] = max_khz
+
+        def _write_all():
+            for cpufreq_dir in self._cpu_cpufreq_paths:
+                if governor:
+                    (cpufreq_dir / "scaling_governor").write_text(governor, encoding="utf-8")
+                # set max first to avoid kernel rejecting new min > old max
+                (cpufreq_dir / "scaling_max_freq").write_text(str(max_khz), encoding="utf-8")
+                (cpufreq_dir / "scaling_min_freq").write_text(str(min_khz), encoding="utf-8")
+
+        try:
+            _write_all()
+            self._refresh_cpu_throttle_support()
+            return True, f"governor={governor} min={min_khz} max={max_khz}"
+        except PermissionError:
+            pass
+        except Exception as exc:
+            return False, str(exc)
+
+        # Fallback through passwordless sudo when available.
+        if shutil.which("sudo") and self._os_name != "windows":
+            script = (
+                "set -euo pipefail; "
+                "for d in /sys/devices/system/cpu/cpu*/cpufreq; do "
+                f"if [ -f \"$d/scaling_governor\" ] && [ -n \"{governor}\" ]; then echo \"{governor}\" > \"$d/scaling_governor\"; fi; "
+                f"if [ -f \"$d/scaling_max_freq\" ]; then echo \"{max_khz}\" > \"$d/scaling_max_freq\"; fi; "
+                f"if [ -f \"$d/scaling_min_freq\" ]; then echo \"{min_khz}\" > \"$d/scaling_min_freq\"; fi; "
+                "done"
+            )
+            try:
+                result = subprocess.run(
+                    ["sudo", "-n", "bash", "-lc", script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=8.0,
+                )
+                if result.returncode == 0:
+                    self._refresh_cpu_throttle_support()
+                    return True, f"governor={governor} min={min_khz} max={max_khz}"
+                detail = (result.stderr or result.stdout or "").strip() or "sudo rejected"
+                return False, detail
+            except Exception as exc:
+                return False, str(exc)
+
+        return False, "permission denied (run watchdog as root or configure passwordless sudo)"
 
     def _load_desired_state(self) -> Dict[str, bool]:
         if not self.state_file.exists():
@@ -428,6 +615,9 @@ class WatchdogManager:
 
         if isinstance(payload, dict):
             raw_services = payload.get("services", payload)
+            cpu_payload = payload.get("cpu_throttle", None)
+            if isinstance(cpu_payload, dict):
+                self._apply_loaded_cpu_throttle(cpu_payload)
         else:
             raw_services = {}
         if not isinstance(raw_services, dict):
@@ -442,9 +632,15 @@ class WatchdogManager:
 
     def _save_desired_state(self):
         payload = {
-            "version": 1,
+            "version": 2,
             "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
             "services": {},
+            "cpu_throttle": {
+                "governor": str(self._cpu_throttle.get("governor", "")).strip(),
+                "min_khz": int(self._cpu_throttle.get("min_khz", 0) or 0),
+                "max_khz": int(self._cpu_throttle.get("max_khz", 0) or 0),
+                "auto_apply": bool(self._cpu_throttle.get("auto_apply", False)),
+            },
         }
         for svc in self.services:
             runtime = self.runtime_by_id.get(svc.service_id)
@@ -784,6 +980,111 @@ class WatchdogManager:
     def _reset_runtime_health(self, runtime: ServiceRuntime):
         runtime.consecutive_health_failures = 0
         runtime.last_health_error = ""
+
+    @staticmethod
+    def _aggregate_usage_for_pid(
+        root_pid: int,
+        usage_by_pid: Dict[int, Tuple[float, float]],
+        children_by_pid: Dict[int, List[int]],
+    ) -> Tuple[float, float]:
+        if not root_pid or root_pid <= 0:
+            return 0.0, 0.0
+        cpu_total = 0.0
+        rss_total = 0.0
+        stack = [int(root_pid)]
+        seen = set()
+        while stack:
+            pid = int(stack.pop())
+            if pid in seen:
+                continue
+            seen.add(pid)
+            sample = usage_by_pid.get(pid)
+            if sample:
+                cpu_total += float(sample[0])
+                rss_total += float(sample[1])
+            for child in children_by_pid.get(pid, []):
+                if child not in seen:
+                    stack.append(int(child))
+        return cpu_total, rss_total
+
+    def _update_resource_usage(self, now: float):
+        if self._os_name == "windows":
+            return
+        if self._last_resource_sample_at and (
+            now - self._last_resource_sample_at
+        ) < self._resource_sample_interval:
+            return
+        self._last_resource_sample_at = now
+        if not shutil.which("ps"):
+            return
+
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,ppid=,pcpu=,rss="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=2.5,
+            )
+        except Exception:
+            return
+
+        usage_by_pid: Dict[int, Tuple[float, float]] = {}
+        children_by_pid: Dict[int, List[int]] = {}
+        for raw in (result.stdout or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+                cpu = float(str(parts[2]).replace(",", "."))
+                rss_kb = float(parts[3])
+            except Exception:
+                continue
+            usage_by_pid[pid] = (cpu, rss_kb)
+            if ppid > 0:
+                children_by_pid.setdefault(ppid, []).append(pid)
+
+        for svc in self.services:
+            runtime = self.runtime_by_id[svc.service_id]
+            cpu_total = 0.0
+            rss_total = 0.0
+
+            if runtime.pid and runtime.pid > 0:
+                cpu_total, rss_total = self._aggregate_usage_for_pid(
+                    int(runtime.pid), usage_by_pid, children_by_pid
+                )
+
+            # Wrapper services may host the real worker under a different pid.
+            if cpu_total <= 0.01 and svc.health_mode == "tcp":
+                candidate_port = int(
+                    (runtime.resolved_health_port or 0)
+                    or (svc.resolved_health_port(self.base_dir) or 0)
+                    or (svc.health_port or 0)
+                )
+                if candidate_port > 0:
+                    extra_pids = self._list_listening_pids_for_port(candidate_port)
+                    for pid in extra_pids:
+                        add_cpu, add_rss = self._aggregate_usage_for_pid(
+                            int(pid), usage_by_pid, children_by_pid
+                        )
+                        cpu_total += add_cpu
+                        rss_total += add_rss
+
+            runtime.cpu_percent = max(0.0, float(cpu_total))
+            runtime.rss_mb = max(0.0, float(rss_total) / 1024.0)
+
+            if runtime.cpu_percent > runtime.peak_cpu_percent:
+                runtime.peak_cpu_percent = runtime.cpu_percent
+                runtime.peak_cpu_at = now
+            if runtime.rss_mb > runtime.peak_rss_mb:
+                runtime.peak_rss_mb = runtime.rss_mb
+                runtime.peak_rss_at = now
 
     def _health_probe(self, svc: ServiceSpec) -> Tuple[bool, str]:
         return self._health_probe_with_runtime(svc, None)
@@ -2269,6 +2570,7 @@ class WatchdogManager:
                 for svc in self.services:
                     runtime = self.runtime_by_id[svc.service_id]
                     self._sync_single_service(svc, runtime, now)
+                self._update_resource_usage(now)
             self._poll_for_auto_update()
             time.sleep(MONITOR_INTERVAL_SECONDS)
 
@@ -2400,6 +2702,267 @@ class WatchdogManager:
         except curses.error:
             return
 
+    @staticmethod
+    def _format_khz(freq_khz: int) -> str:
+        try:
+            value = int(freq_khz)
+        except Exception:
+            return "-"
+        if value <= 0:
+            return "-"
+        return f"{value/1000.0:.0f}MHz"
+
+    def _resource_summary_line(self) -> str:
+        heaviest_cpu_label = "n/a"
+        heaviest_cpu_value = 0.0
+        heaviest_mem_label = "n/a"
+        heaviest_mem_value = 0.0
+        peak_cpu_label = "n/a"
+        peak_cpu_value = 0.0
+        peak_mem_label = "n/a"
+        peak_mem_value = 0.0
+
+        for svc in self.services:
+            runtime = self.runtime_by_id.get(svc.service_id)
+            if not runtime:
+                continue
+            if runtime.cpu_percent > heaviest_cpu_value:
+                heaviest_cpu_value = float(runtime.cpu_percent)
+                heaviest_cpu_label = svc.label
+            if runtime.rss_mb > heaviest_mem_value:
+                heaviest_mem_value = float(runtime.rss_mb)
+                heaviest_mem_label = svc.label
+            if runtime.peak_cpu_percent > peak_cpu_value:
+                peak_cpu_value = float(runtime.peak_cpu_percent)
+                peak_cpu_label = svc.label
+            if runtime.peak_rss_mb > peak_mem_value:
+                peak_mem_value = float(runtime.peak_rss_mb)
+                peak_mem_label = svc.label
+
+        return (
+            f"Heaviest CPU: {heaviest_cpu_label} {heaviest_cpu_value:.1f}% | "
+            f"Heaviest RAM: {heaviest_mem_label} {heaviest_mem_value:.1f}MB | "
+            f"Peak CPU: {peak_cpu_label} {peak_cpu_value:.1f}% | "
+            f"Peak RAM: {peak_mem_label} {peak_mem_value:.1f}MB"
+        )
+
+    def _prompt_text_input(self, stdscr, prompt: str, initial: str = "") -> Optional[str]:
+        try:
+            max_y, max_x = stdscr.getmaxyx()
+            row = max(0, max_y - 2)
+            col = min(max_x - 2, max(0, len(prompt) + 1))
+            self._safe_addnstr(stdscr, row, 0, " " * (max_x - 1), max_x - 1)
+            self._safe_addnstr(stdscr, row, 0, prompt, max_x - 1, curses.A_BOLD)
+            stdscr.nodelay(False)
+            stdscr.timeout(-1)
+            curses.echo()
+            curses.curs_set(1)
+            self._safe_addnstr(stdscr, row, col, initial, max(1, max_x - col - 1))
+            stdscr.move(row, col + len(str(initial)))
+            stdscr.refresh()
+            raw = stdscr.getstr(row, col, max(1, max_x - col - 2))
+            if raw is None:
+                return None
+            return raw.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return None
+        finally:
+            try:
+                curses.noecho()
+                curses.curs_set(0)
+            except Exception:
+                pass
+            try:
+                stdscr.nodelay(True)
+                stdscr.timeout(0)
+            except Exception:
+                pass
+
+    def _open_cpu_settings_modal(self, stdscr):
+        with self._lock:
+            local_cfg = dict(self._cpu_throttle)
+            available_governors = list(self._cpu_available_governors)
+            throttle_supported = bool(self._cpu_throttle_supported)
+            hw_min = int(self._cpu_hw_min_khz or 0)
+            hw_max = int(self._cpu_hw_max_khz or 0)
+            current_governor = str(self._cpu_current_governor or "")
+            current_min = int(self._cpu_current_min_khz or 0)
+            current_max = int(self._cpu_current_max_khz or 0)
+            last_apply = str(self._cpu_throttle_last_apply or "")
+
+        if not available_governors:
+            available_governors = ["ondemand", "performance", "schedutil", "powersave"]
+        selected = 0
+        options = [
+            "Governor",
+            "Min Frequency (kHz)",
+            "Max Frequency (kHz)",
+            "Auto Apply On Start",
+            "Apply Now",
+            "Save",
+            "Cancel",
+        ]
+
+        while True:
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            if max_y < 12 or max_x < 70:
+                self._safe_addnstr(
+                    stdscr,
+                    0,
+                    0,
+                    "Terminal too small for CPU settings modal",
+                    max_x - 1,
+                    curses.color_pair(5) | curses.A_BOLD,
+                )
+                stdscr.refresh()
+                ch = stdscr.getch()
+                if ch in (27, ord("q"), ord("Q"), 10, 13):
+                    return
+                continue
+
+            title = " CPU Throttle Settings "
+            subtitle = "Up/Down select | Enter edit/apply | S save | Esc cancel"
+            self._safe_addnstr(stdscr, 0, 0, title, max_x - 1, curses.A_BOLD | curses.color_pair(1))
+            self._safe_addnstr(stdscr, 1, 0, subtitle, max_x - 1, curses.A_DIM)
+
+            support_text = "available" if throttle_supported else "unavailable"
+            self._safe_addnstr(
+                stdscr,
+                3,
+                0,
+                f"cpufreq support: {support_text} | current governor={current_governor or '-'} "
+                f"min={current_min or '-'} max={current_max or '-'}",
+                max_x - 1,
+            )
+            self._safe_addnstr(
+                stdscr,
+                4,
+                0,
+                f"hardware limits: min={hw_min or '-'} max={hw_max or '-'}",
+                max_x - 1,
+            )
+
+            row = 6
+            values = [
+                str(local_cfg.get("governor", "")),
+                str(local_cfg.get("min_khz", "")),
+                str(local_cfg.get("max_khz", "")),
+                "ON" if bool(local_cfg.get("auto_apply", False)) else "OFF",
+                "Apply desired values now",
+                "Save desired values",
+                "Discard changes",
+            ]
+            for idx, option in enumerate(options):
+                prefix = ">" if idx == selected else " "
+                attr = curses.A_REVERSE if idx == selected else 0
+                line = f"{prefix} {option:23} : {values[idx]}"
+                self._safe_addnstr(stdscr, row + idx, 0, line, max_x - 1, attr)
+
+            if last_apply:
+                self._safe_addnstr(stdscr, max_y - 3, 0, f"Last apply: {last_apply}", max_x - 1, curses.A_DIM)
+            self._safe_addnstr(
+                stdscr,
+                max_y - 2,
+                0,
+                f"Desired summary: governor={local_cfg.get('governor')} "
+                f"min={local_cfg.get('min_khz')} max={local_cfg.get('max_khz')} "
+                f"auto={'on' if local_cfg.get('auto_apply') else 'off'}",
+                max_x - 1,
+            )
+            stdscr.refresh()
+
+            ch = stdscr.getch()
+            if ch in (27, ord("q"), ord("Q")):
+                return
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
+                selected = max(0, selected - 1)
+                continue
+            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
+                selected = min(len(options) - 1, selected + 1)
+                continue
+            if ch in (ord("s"), ord("S")):
+                with self._lock:
+                    self._cpu_throttle.update(local_cfg)
+                    self._normalize_cpu_throttle_settings()
+                    self._save_desired_state()
+                    self._log(
+                        "[CPU] Saved desired throttle "
+                        f"gov={self._cpu_throttle['governor']} "
+                        f"min={self._cpu_throttle['min_khz']} "
+                        f"max={self._cpu_throttle['max_khz']} "
+                        f"auto={'on' if self._cpu_throttle['auto_apply'] else 'off'}"
+                    )
+                return
+            if ch not in (10, 13, curses.KEY_ENTER):
+                continue
+
+            if selected == 0:
+                try:
+                    idx = available_governors.index(str(local_cfg.get("governor", "")))
+                except ValueError:
+                    idx = -1
+                local_cfg["governor"] = available_governors[(idx + 1) % len(available_governors)]
+            elif selected == 1:
+                typed = self._prompt_text_input(
+                    stdscr,
+                    "Min kHz: ",
+                    str(local_cfg.get("min_khz", "")),
+                )
+                if typed:
+                    parsed = self._parse_int(typed, int(local_cfg.get("min_khz", 0) or 0))
+                    local_cfg["min_khz"] = max(100000, parsed)
+            elif selected == 2:
+                typed = self._prompt_text_input(
+                    stdscr,
+                    "Max kHz: ",
+                    str(local_cfg.get("max_khz", "")),
+                )
+                if typed:
+                    parsed = self._parse_int(typed, int(local_cfg.get("max_khz", 0) or 0))
+                    local_cfg["max_khz"] = max(100000, parsed)
+            elif selected == 3:
+                local_cfg["auto_apply"] = not bool(local_cfg.get("auto_apply", False))
+            elif selected == 4:
+                with self._lock:
+                    self._cpu_throttle.update(local_cfg)
+                    self._normalize_cpu_throttle_settings()
+                    ok, detail = self._apply_cpu_throttle_settings()
+                    self._cpu_throttle_last_apply = detail
+                    last_apply = detail
+                    self._save_desired_state()
+                    if ok:
+                        self._log(f"[CPU] Applied throttle: {detail}")
+                    else:
+                        self._log(f"[WARN] CPU throttle apply failed: {detail}")
+                    current_governor = str(self._cpu_current_governor or "")
+                    current_min = int(self._cpu_current_min_khz or 0)
+                    current_max = int(self._cpu_current_max_khz or 0)
+                    throttle_supported = bool(self._cpu_throttle_supported)
+                    hw_min = int(self._cpu_hw_min_khz or 0)
+                    hw_max = int(self._cpu_hw_max_khz or 0)
+            elif selected == 5:
+                with self._lock:
+                    self._cpu_throttle.update(local_cfg)
+                    self._normalize_cpu_throttle_settings()
+                    self._save_desired_state()
+                    self._log(
+                        "[CPU] Saved desired throttle "
+                        f"gov={self._cpu_throttle['governor']} "
+                        f"min={self._cpu_throttle['min_khz']} "
+                        f"max={self._cpu_throttle['max_khz']} "
+                        f"auto={'on' if self._cpu_throttle['auto_apply'] else 'off'}"
+                    )
+                return
+            elif selected == 6:
+                return
+
+            if int(local_cfg.get("min_khz", 0) or 0) > int(local_cfg.get("max_khz", 0) or 0):
+                a = int(local_cfg.get("min_khz", 0) or 0)
+                b = int(local_cfg.get("max_khz", 0) or 0)
+                local_cfg["min_khz"] = min(a, b)
+                local_cfg["max_khz"] = max(a, b)
+
     def _build_exit_report(self, interrupted: bool = False) -> str:
         now = time.time()
         with self._lock:
@@ -2473,12 +3036,12 @@ class WatchdogManager:
         height, width = stdscr.getmaxyx()
         now = time.time()
 
-        if height < 14 or width < 80:
+        if height < 14 or width < 96:
             self._safe_addnstr(
                 stdscr,
                 0,
                 0,
-                "Terminal too small for watchdog dashboard (need >= 80x14)",
+                "Terminal too small for watchdog dashboard (need >= 96x14)",
                 width - 1,
                 curses.A_BOLD | curses.color_pair(5),
             )
@@ -2486,13 +3049,14 @@ class WatchdogManager:
             return
 
         title = " Teleoperation Watchdog "
-        info = "Up/Down select | Space toggle | R restart | A toggle all | Q quit"
+        info = "Up/Down select | Space toggle | R restart | A toggle all | S CPU settings | Q quit"
         self._safe_addnstr(stdscr, 0, 0, title, width - 1, curses.A_BOLD | curses.color_pair(1))
         self._safe_addnstr(stdscr, 1, 0, info, width - 1, curses.A_DIM)
+        self._safe_addnstr(stdscr, 2, 0, self._resource_summary_line(), width - 1, curses.A_DIM)
 
         footer_row = height - 1
-        table_header_row = 3
-        first_service_row = 4
+        table_header_row = 4
+        first_service_row = 5
         available_body_rows = max(6, footer_row - first_service_row - 3)
         table_rows = max(4, available_body_rows // 2)
         max_table_rows = max(3, footer_row - first_service_row - 5)
@@ -2502,7 +3066,7 @@ class WatchdogManager:
         log_first_row = log_header_row + 1
         log_rows = max(1, footer_row - log_first_row)
 
-        header = "Sel  Service         Desired  State      PID      Uptime    Last Event / Error"
+        header = "Sel  Service         Desired  State      PID      Uptime    CPU%   RAM(MB)  Last Event / Error"
         self._safe_addnstr(stdscr, table_header_row, 0, header, width - 1, curses.A_BOLD | curses.color_pair(1))
 
         visible_services = max(1, table_end_row - first_service_row)
@@ -2519,6 +3083,8 @@ class WatchdogManager:
             desired = "ON " if runtime.desired_enabled else "OFF"
             pid_text = str(runtime.pid) if runtime.pid else "-"
             uptime = self._format_duration(now - runtime.started_at) if runtime.started_at > 0 else "-"
+            cpu_text = f"{runtime.cpu_percent:5.1f}" if runtime.cpu_percent > 0 else "  0.0"
+            mem_text = f"{runtime.rss_mb:7.1f}" if runtime.rss_mb > 0 else "    0.0"
             state_text = runtime.state.upper()
             message = self._runtime_detail(runtime, now)
             line = (
@@ -2528,6 +3094,8 @@ class WatchdogManager:
                 f"{state_text[:9]:9}  "
                 f"{pid_text[:8]:8}  "
                 f"{uptime:8}  "
+                f"{cpu_text:>5}  "
+                f"{mem_text:>7}  "
                 f"{message}"
             )
             attrs = curses.color_pair(self._state_color(runtime.state))
@@ -2570,7 +3138,8 @@ class WatchdogManager:
         status = (
             f"Selected: {self.services[self._selected_index].label} | "
             f"State: {selected_runtime.state.upper()} | "
-            f"Desired: {'ON' if selected_runtime.desired_enabled else 'OFF'}"
+            f"Desired: {'ON' if selected_runtime.desired_enabled else 'OFF'} | "
+            f"CPU {selected_runtime.cpu_percent:.1f}% | RAM {selected_runtime.rss_mb:.1f}MB"
         )
         clock = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         footer = f"{status} | {clock}"
@@ -2605,6 +3174,7 @@ class WatchdogManager:
                     time.sleep(0.06)
                     continue
 
+                open_cpu_settings = False
                 with self._lock:
                     if key in (ord("q"), ord("Q")):
                         self._log("[USER] Quit requested")
@@ -2619,6 +3189,11 @@ class WatchdogManager:
                         self.restart_selected()
                     elif key in (ord("a"), ord("A")):
                         self.toggle_all()
+                    elif key in (ord("s"), ord("S")):
+                        open_cpu_settings = True
+
+                if open_cpu_settings:
+                    self._open_cpu_settings_modal(stdscr)
 
                 time.sleep(0.02)
 

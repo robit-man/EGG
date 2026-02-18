@@ -2366,6 +2366,19 @@ class WatchdogManager:
             return f"{base} [{' '.join(tags)}]".strip()
         return base
 
+    @staticmethod
+    def _safe_addnstr(stdscr, row: int, col: int, text: str, max_width: int, attr: int = 0):
+        try:
+            height, width = stdscr.getmaxyx()
+            if row < 0 or row >= height or col >= width:
+                return
+            limit = max(0, min(int(max_width), width - col - 1))
+            if limit <= 0:
+                return
+            stdscr.addnstr(row, col, str(text), limit, attr)
+        except curses.error:
+            return
+
     def _build_exit_report(self, interrupted: bool = False) -> str:
         now = time.time()
         with self._lock:
@@ -2439,16 +2452,47 @@ class WatchdogManager:
         height, width = stdscr.getmaxyx()
         now = time.time()
 
-        title = "Teleoperation Watchdog Manager"
-        info = "Up/Down: select | Space: toggle | R: restart | A: toggle all | Q: quit"
-        stdscr.addnstr(0, 0, title, width - 1, curses.A_BOLD)
-        stdscr.addnstr(1, 0, info, width - 1)
+        if height < 14 or width < 80:
+            self._safe_addnstr(
+                stdscr,
+                0,
+                0,
+                "Terminal too small for watchdog dashboard (need >= 80x14)",
+                width - 1,
+                curses.A_BOLD | curses.color_pair(5),
+            )
+            stdscr.refresh()
+            return
+
+        title = " Teleoperation Watchdog "
+        info = "Up/Down select | Space toggle | R restart | A toggle all | Q quit"
+        self._safe_addnstr(stdscr, 0, 0, title, width - 1, curses.A_BOLD | curses.color_pair(1))
+        self._safe_addnstr(stdscr, 1, 0, info, width - 1, curses.A_DIM)
+
+        footer_row = height - 1
+        table_header_row = 3
+        first_service_row = 4
+        available_body_rows = max(6, footer_row - first_service_row - 3)
+        table_rows = max(4, available_body_rows // 2)
+        max_table_rows = max(3, footer_row - first_service_row - 5)
+        table_rows = min(table_rows, max_table_rows)
+        table_end_row = first_service_row + table_rows
+        log_header_row = table_end_row + 1
+        log_first_row = log_header_row + 1
+        log_rows = max(1, footer_row - log_first_row)
 
         header = "Sel  Service         Desired  State      PID      Uptime    Last Event / Error"
-        stdscr.addnstr(3, 0, header, width - 1, curses.A_UNDERLINE)
+        self._safe_addnstr(stdscr, table_header_row, 0, header, width - 1, curses.A_BOLD | curses.color_pair(1))
 
-        row = 4
-        for idx, svc in enumerate(self.services):
+        visible_services = max(1, table_end_row - first_service_row)
+        start_idx = 0
+        if self._selected_index >= visible_services:
+            start_idx = self._selected_index - visible_services + 1
+        end_idx = min(len(self.services), start_idx + visible_services)
+
+        row = first_service_row
+        for idx in range(start_idx, end_idx):
+            svc = self.services[idx]
             runtime = self.runtime_by_id[svc.service_id]
             selected = ">" if idx == self._selected_index else " "
             desired = "ON " if runtime.desired_enabled else "OFF"
@@ -2465,25 +2509,52 @@ class WatchdogManager:
                 f"{uptime:8}  "
                 f"{message}"
             )
-            color = self._state_color(runtime.state)
-            attrs = curses.color_pair(color)
+            attrs = curses.color_pair(self._state_color(runtime.state))
             if idx == self._selected_index:
                 attrs |= curses.A_REVERSE
-            stdscr.addnstr(row, 0, line, width - 1, attrs)
+            self._safe_addnstr(stdscr, row, 0, line, width - 1, attrs)
             row += 1
-            if row >= height - 6:
+            if row >= table_end_row:
                 break
 
-        log_top = row + 1
-        if log_top < height - 2:
-            stdscr.addnstr(log_top, 0, "Logs", width - 1, curses.A_UNDERLINE)
-            visible_log_rows = max(0, height - (log_top + 2))
-            logs = list(self._logs)[-visible_log_rows:]
-            for i, line in enumerate(logs):
-                stdscr.addnstr(log_top + 1 + i, 0, line, width - 1)
+        if start_idx > 0:
+            self._safe_addnstr(
+                stdscr,
+                first_service_row,
+                max(0, width - 12),
+                f"^ +{start_idx}",
+                11,
+                curses.A_DIM,
+            )
+        hidden_below = max(0, len(self.services) - end_idx)
+        if hidden_below > 0:
+            self._safe_addnstr(
+                stdscr,
+                table_end_row - 1,
+                max(0, width - 12),
+                f"v +{hidden_below}",
+                11,
+                curses.A_DIM,
+            )
 
+        separator = "-" * max(1, width - 1)
+        self._safe_addnstr(stdscr, table_end_row, 0, separator, width - 1, curses.color_pair(1))
+        self._safe_addnstr(stdscr, log_header_row, 0, " Logs ", width - 1, curses.A_BOLD | curses.color_pair(1))
+
+        logs = list(self._logs)[-log_rows:]
+        for i, line in enumerate(logs):
+            self._safe_addnstr(stdscr, log_first_row + i, 0, line, width - 1)
+
+        selected_runtime = self.runtime_by_id[self.services[self._selected_index].service_id]
+        status = (
+            f"Selected: {self.services[self._selected_index].label} | "
+            f"State: {selected_runtime.state.upper()} | "
+            f"Desired: {'ON' if selected_runtime.desired_enabled else 'OFF'}"
+        )
         clock = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        stdscr.addnstr(height - 1, max(0, width - len(clock) - 1), clock, len(clock))
+        footer = f"{status} | {clock}"
+        self._safe_addnstr(stdscr, footer_row, 0, " " * (width - 1), width - 1, curses.A_REVERSE)
+        self._safe_addnstr(stdscr, footer_row, 0, footer, width - 1, curses.A_REVERSE)
         stdscr.refresh()
 
     def run_curses(self) -> bool:

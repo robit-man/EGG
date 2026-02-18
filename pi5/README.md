@@ -21,6 +21,12 @@ Comment=Run Voice Setup on startup
 EOF
 ```
 
+## Teardown and clean up of the speech stack with one copy and paste
+
+```bash
+curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -o /tmp/egg_teardown.sh && chmod +x /tmp/egg_teardown.sh && bash /tmp/egg_teardown.sh && rm -f /tmp/egg_teardown.sh
+```
+
 ## Installation and Runtime
 
 Purchase the following list of hardware components:

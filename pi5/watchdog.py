@@ -1336,6 +1336,27 @@ class WatchdogManager:
                         self._log(f"[DISCOVER] {svc.label} health probe realigned to port {selected}")
                 return True, f"tcp listen {selected}"
 
+            # Wrapper-based services (for example docker-run launchers) may keep the
+            # control process alive while the listening socket belongs to another pid.
+            # If the expected port is listening at all, treat it as healthy.
+            for candidate in (
+                active_port,
+                preferred_port,
+                int(svc.health_port or 0),
+            ):
+                if candidate <= 0:
+                    continue
+                pids_on_port = self._list_listening_pids_for_port(candidate)
+                if not pids_on_port:
+                    continue
+                if runtime.resolved_health_port != candidate:
+                    previous = int(runtime.resolved_health_port or 0)
+                    runtime.resolved_health_port = candidate
+                    runtime.last_port_discovery_at = time.time()
+                    if previous > 0 and previous != candidate:
+                        self._log(f"[DISCOVER] {svc.label} health probe realigned to port {candidate}")
+                return True, f"tcp listen {candidate}"
+
             if self._has_passive_tcp_tools:
                 return False, "tcp not listening"
 

@@ -12,6 +12,7 @@ import platform
 import random
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -26,9 +27,34 @@ CAMERA_VENV_DIR_NAME = "camera_router_venv"
 CONFIG_PATH = "camera_router_config.json"
 
 
+def _venv_includes_system_site_packages(venv_dir: str) -> bool:
+    cfg_path = os.path.join(venv_dir, "pyvenv.cfg")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as fp:
+            for raw_line in fp:
+                line = str(raw_line or "").strip().lower()
+                if line.startswith("include-system-site-packages"):
+                    value = line.split("=", 1)[-1].strip()
+                    return value in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+    return False
+
+
 def ensure_venv() -> None:
     script_dir = os.path.abspath(os.path.dirname(__file__))
     venv_dir = os.path.join(script_dir, CAMERA_VENV_DIR_NAME)
+
+    if os.path.exists(venv_dir) and not _venv_includes_system_site_packages(venv_dir):
+        print(
+            f"[CAMERA] Rebuilding '{CAMERA_VENV_DIR_NAME}' with system-site-packages for Picamera2 access...",
+            flush=True,
+        )
+        try:
+            shutil.rmtree(venv_dir)
+        except Exception as exc:
+            print(f"[CAMERA] Failed to remove old venv: {exc}", flush=True)
+
     if os.path.normcase(os.path.abspath(sys.prefix)) == os.path.normcase(os.path.abspath(venv_dir)):
         return
 
@@ -45,7 +71,7 @@ def ensure_venv() -> None:
         print(f"[CAMERA] Creating virtual environment in '{CAMERA_VENV_DIR_NAME}'...", flush=True)
         import venv
 
-        venv.create(venv_dir, with_pip=True)
+        venv.create(venv_dir, with_pip=True, system_site_packages=True)
         subprocess.check_call([pip_path, "install", *required])
     else:
         try:
@@ -427,7 +453,12 @@ class CameraFeed:
     def start(self) -> None:
         if not self.cfg.enabled:
             return
-        self._open()
+        try:
+            self._open()
+        except Exception as exc:
+            with self._lock:
+                self._last_error = str(exc)
+            raise
         self._running.set()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -445,6 +476,26 @@ class CameraFeed:
 
     def request_recover(self) -> None:
         self._recover_requested.set()
+
+    def is_running(self) -> bool:
+        thread_alive = self._thread is not None and self._thread.is_alive()
+        return bool(self._running.is_set() and thread_alive)
+
+    def recover(self) -> Tuple[bool, str]:
+        if self.is_running():
+            self.request_recover()
+            return True, "recover requested"
+        try:
+            self.stop()
+        except Exception:
+            pass
+        try:
+            self.start()
+            return True, "capture restarted"
+        except Exception as exc:
+            with self._lock:
+                self._last_error = f"Manual recover failed: {exc}"
+            return False, str(exc)
 
     def add_stream_client(self) -> None:
         with self._lock:
@@ -577,6 +628,11 @@ for camera_id, camera_cfg in build_camera_configs(config).items():
     try:
         feed.start()
     except Exception as exc:
+        try:
+            with feed._lock:
+                feed._last_error = str(exc)
+        except Exception:
+            pass
         print(f"[CAMERA] Failed to start {camera_id}: {exc}", flush=True)
     feeds[camera_id] = feed
 
@@ -1108,11 +1164,19 @@ def camera_recover():
     settle_ms = _as_int(data.get("settle_ms", 350), 350, minimum=0, maximum=5000)
     reason = str(data.get("reason", "")).strip()
     requested = []
+    restart_results = []
     with service_lock:
         values = list(feeds.values())
     for feed in values:
-        feed.request_recover()
+        ok, detail = feed.recover()
         requested.append(feed.cfg.camera_id)
+        restart_results.append(
+            {
+                "id": feed.cfg.camera_id,
+                "ok": bool(ok),
+                "detail": str(detail or "").strip(),
+            }
+        )
     if settle_ms > 0:
         time.sleep(float(settle_ms) / 1000.0)
     rows = _status_rows()
@@ -1124,6 +1188,7 @@ def camera_recover():
             "message": "Recovery requested",
             "reason": reason,
             "requested": requested,
+            "results": restart_results,
             "after_online": int(online),
             "after_total": int(len(rows)),
             "elapsed_ms": int(settle_ms),

@@ -11,8 +11,10 @@ from queue import Queue, Empty
 import shutil
 import time
 import logging
-import psutil  # For CPU usage monitoring
 import multiprocessing  # For handling inference processes
+
+PSUTIL_AVAILABLE = False
+ALSAAUDIO_AVAILABLE = False
 
 #############################################
 # Utility Functions
@@ -97,12 +99,24 @@ else:
     try:
         import requests
         from num2words import num2words
-        import alsaaudio  # For ALSA audio playback
-        import psutil     # For CPU usage monitoring
     except ImportError as e:
         logging.error(f"Failed to import required modules: {e}")
         logging.error("Ensure all required packages are installed in the virtual environment.")
         sys.exit(1)
+
+    try:
+        import alsaaudio  # Optional ALSA module
+        ALSAAUDIO_AVAILABLE = True
+    except ImportError:
+        alsaaudio = None
+        ALSAAUDIO_AVAILABLE = False
+
+    try:
+        import psutil  # Optional CPU usage monitoring
+        PSUTIL_AVAILABLE = True
+    except ImportError:
+        psutil = None
+        PSUTIL_AVAILABLE = False
 
     #############################################
     # Step 1: Setup Logging
@@ -118,6 +132,10 @@ else:
             # logging.FileHandler("server.log")
         ]
     )
+    if not ALSAAUDIO_AVAILABLE:
+        logging.warning("pyalsaaudio not available; continuing without direct ALSA hooks.")
+    if not PSUTIL_AVAILABLE:
+        logging.warning("psutil not available; CPU monitor will use a fallback value.")
     
     #############################################
     # Step 4: Config Defaults & File
@@ -447,6 +465,18 @@ else:
     inference_to_tts_thread = threading.Thread(target=inference_to_tts_handler, daemon=True, name="InferenceToTTSHandler")
     inference_to_tts_thread.start()
     logging.info("InferenceToTTSHandler: Started.")
+
+    def _cpu_percent(interval=1.0):
+        if PSUTIL_AVAILABLE and psutil is not None:
+            try:
+                return float(psutil.cpu_percent(interval=interval))
+            except Exception:
+                pass
+        try:
+            time.sleep(max(0.0, float(interval)))
+        except Exception:
+            time.sleep(0.1)
+        return 0.0
     
     def ollama_worker():
         """
@@ -470,7 +500,7 @@ else:
                 
                 # Check if an inference process is already running
                 if current_inference_process and current_inference_process.is_alive():
-                    cpu_usage = psutil.cpu_percent(interval=1)
+                    cpu_usage = _cpu_percent(interval=1)
                     logging.info(f"Ollama Worker: Current CPU usage is {cpu_usage}%.")
                     if cpu_usage > 50:
                         logging.info("Ollama Worker: CPU usage > 50%. Terminating current inference.")
@@ -669,9 +699,8 @@ else:
         Runs in a separate daemon thread.
         """
         while True:
-            cpu_percent = psutil.cpu_percent(interval=interval)
+            cpu_percent = _cpu_percent(interval=interval)
             logging.info(f"CPU Usage: {cpu_percent}%")
-            time.sleep(interval)
 
     #############################################
     # Step 11: Receiver Thread for Incoming Messages #

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
 import os
+import pathlib
+import subprocess
 import sys
 
 
@@ -34,6 +36,62 @@ def _as_int(value, default: int) -> int:
         return int(default)
 
 
+def _ensure_whispercpp_available(python_exe: str, base_dir: str) -> bool:
+    def can_import() -> bool:
+        try:
+            check = subprocess.run(
+                [python_exe, "-c", "import whispercpp"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return check.returncode == 0
+        except Exception:
+            return False
+
+    if can_import():
+        return True
+
+    whispercpp_dir = os.path.join(base_dir, "whispercpp")
+    wheel_dir = os.path.join(whispercpp_dir, "dist")
+    wheel_candidates = []
+    try:
+        for entry in pathlib.Path(wheel_dir).glob("*.whl"):
+            wheel_candidates.append(str(entry))
+        wheel_candidates.sort(reverse=True)
+    except Exception:
+        wheel_candidates = []
+
+    try:
+        subprocess.run([python_exe, "-m", "pip", "install", "--upgrade", "pip"], check=False)
+    except Exception:
+        pass
+
+    if wheel_candidates:
+        for wheel_path in wheel_candidates:
+            try:
+                print(f"[ASR] Installing whispercpp wheel: {wheel_path}", flush=True)
+                install = subprocess.run(
+                    [python_exe, "-m", "pip", "install", "--force-reinstall", "--no-deps", wheel_path],
+                    check=False,
+                )
+                if install.returncode == 0 and can_import():
+                    return True
+            except Exception:
+                continue
+
+    try:
+        if os.path.isdir(whispercpp_dir):
+            print("[ASR] Installing whispercpp from local source...", flush=True)
+            install = subprocess.run([python_exe, "-m", "pip", "install", "-e", whispercpp_dir], check=False)
+            if install.returncode == 0 and can_import():
+                return True
+    except Exception:
+        pass
+
+    return can_import()
+
+
 def main() -> int:
     base_dir = os.path.abspath(os.path.dirname(__file__))
     stream_script = os.path.join(base_dir, "whispercpp", "examples", "stream", "stream.py")
@@ -45,6 +103,9 @@ def main() -> int:
         return 1
 
     python_exe = venv_python if os.path.exists(venv_python) else sys.executable
+    if not _ensure_whispercpp_available(python_exe, base_dir):
+        print("[ASR] whispercpp import/install failed in runtime python environment", flush=True)
+        return 1
     target_host = (
         os.environ.get("ASR_TARGET_HOST", "").strip()
         or str(_get_nested(cfg, "audio_router.integrations.llm_host", "127.0.0.1")).strip()
@@ -60,6 +121,12 @@ def main() -> int:
         0,
     )
 
+    env = os.environ.copy()
+    extra_path = os.path.join(base_dir, "whispercpp", "src")
+    if os.path.isdir(extra_path):
+        existing = str(env.get("PYTHONPATH", "")).strip()
+        env["PYTHONPATH"] = f"{extra_path}{os.pathsep}{existing}" if existing else extra_path
+
     argv = [
         python_exe,
         stream_script,
@@ -72,7 +139,7 @@ def main() -> int:
         "--device_id",
         str(device_id),
     ]
-    os.execv(python_exe, argv)
+    os.execve(python_exe, argv, env)
     return 0
 
 

@@ -98,13 +98,23 @@ ensure_whisper_venv() {
     if [ ! -d "$VENV_DIR" ]; then
         echo "[SETUP] Creating whisper virtual environment..."
         python3 -m venv "$VENV_DIR" --system-site-packages
-        source "$VENV_DIR/bin/activate"
-        pip install --upgrade pip
-        pip install build
-        deactivate
     else
         echo "[SETUP] whisper virtual environment already exists."
     fi
+
+    source "$VENV_DIR/bin/activate"
+    pip install --upgrade pip || true
+    pip install build || true
+    if ls "$WHISPERCPP_DIR"/dist/*.whl > /dev/null 2>&1; then
+        local wheel_path
+        wheel_path="$(ls -1 "$WHISPERCPP_DIR"/dist/*.whl | head -n 1)"
+        echo "[SETUP] Installing whispercpp wheel: $wheel_path"
+        pip install --force-reinstall --no-deps "$wheel_path" || true
+    else
+        echo "[SETUP] Installing whispercpp from local source..."
+        pip install -e "$WHISPERCPP_DIR" || true
+    fi
+    deactivate
 }
 
 build_docker_image() {
@@ -157,6 +167,7 @@ upgrade_system_and_install_prereqs() {
         python3 \
         python3-venv \
         python3-pip \
+        python3-psutil \
         python3-dev \
         nodejs \
         npm \

@@ -1,48 +1,134 @@
+#!/usr/bin/env python3
+import json
 import os
+import socket
 import subprocess
 import sys
-import socket
 import time
-import numpy as np
 
-# Configuration
-VENV_DIR = "output_venv"  # Virtual environment directory
-LISTEN_HOST = "0.0.0.0"   # Listen on all interfaces
-LISTEN_PORT = 6353        # Port to receive raw audio data
 
-# ALSA Playback configuration
-PCM_DEVICE = "default"  # ALSA device for playback
-CHUNK = 4096            # Buffer size (in bytes). Adjusted for real-time streaming
-RATE = 22050            # Ensure this matches the output format of your audio source
-CHANNELS = 1
+VENV_DIR = "output_venv"
+CONFIG_PATH = "audio_router_config.json"
 
-# Audio Processing Configuration
-VOLUME = 0.2  # Volume control factor (1.0 = original volume). Adjust as needed
-
-# Maximum number of pip install attempts
+DEFAULT_LISTEN_HOST = "0.0.0.0"
+DEFAULT_LISTEN_PORT = 6353
+DEFAULT_PCM_DEVICE = "default"
+DEFAULT_CHUNK = 4096
+DEFAULT_RATE = 22050
+DEFAULT_CHANNELS = 1
+DEFAULT_VOLUME = 0.2
 MAX_PIP_ATTEMPTS = 3
 
+
+def _get_nested(data, path, default=None):
+    current = data
+    for key in str(path or "").split("."):
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return default
+    return current
+
+
+def _as_int(value, default, minimum=None, maximum=None):
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    if minimum is not None and parsed < minimum:
+        return int(default)
+    if maximum is not None and parsed > maximum:
+        return int(default)
+    return parsed
+
+
+def _as_float(value, default, minimum=None, maximum=None):
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(default)
+    if minimum is not None and parsed < minimum:
+        return float(default)
+    if maximum is not None and parsed > maximum:
+        return float(default)
+    return parsed
+
+
+def _load_runtime_settings():
+    config_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), CONFIG_PATH)
+    payload = {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            loaded = json.load(fp)
+        if isinstance(loaded, dict):
+            payload = loaded
+    except Exception:
+        payload = {}
+
+    raw_device = _get_nested(payload, "audio_router.audio.output_device", DEFAULT_PCM_DEVICE)
+    if isinstance(raw_device, (int, float)):
+        pcm_device = DEFAULT_PCM_DEVICE
+    else:
+        pcm_device = str(raw_device or DEFAULT_PCM_DEVICE).strip() or DEFAULT_PCM_DEVICE
+
+    return {
+        "listen_host": str(
+            _get_nested(payload, "audio_router.audio.output_listen_host", DEFAULT_LISTEN_HOST)
+        ).strip()
+        or DEFAULT_LISTEN_HOST,
+        "listen_port": _as_int(
+            _get_nested(payload, "audio_router.integrations.audio_out_port", DEFAULT_LISTEN_PORT),
+            DEFAULT_LISTEN_PORT,
+            minimum=1,
+            maximum=65535,
+        ),
+        "pcm_device": pcm_device,
+        "chunk": _as_int(
+            _get_nested(payload, "audio_router.audio.output_chunk", DEFAULT_CHUNK),
+            DEFAULT_CHUNK,
+            minimum=256,
+            maximum=65536,
+        ),
+        "rate": _as_int(
+            _get_nested(payload, "audio_router.audio.output_sample_rate", DEFAULT_RATE),
+            DEFAULT_RATE,
+            minimum=8000,
+            maximum=192000,
+        ),
+        "channels": _as_int(
+            _get_nested(payload, "audio_router.audio.output_channels", DEFAULT_CHANNELS),
+            DEFAULT_CHANNELS,
+            minimum=1,
+            maximum=2,
+        ),
+        "volume": _as_float(
+            _get_nested(payload, "audio_router.audio.output_volume", DEFAULT_VOLUME),
+            DEFAULT_VOLUME,
+            minimum=0.0,
+            maximum=4.0,
+        ),
+    }
+
+
 def is_venv():
-    """Check if the script is running inside a virtual environment."""
     return (
-        (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix) or
-        (hasattr(sys, 'real_prefix') and sys.real_prefix != sys.prefix)
+        (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
+        or (hasattr(sys, "real_prefix") and sys.real_prefix != sys.prefix)
     )
 
+
 def create_venv():
-    """Create a virtual environment in VENV_DIR if it doesn't exist."""
     if not os.path.exists(VENV_DIR):
         print(f"Creating virtual environment in {VENV_DIR}...")
         subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
 
+
 def install_dependencies():
-    """Install required Python packages in the virtual environment with retry logic."""
     if sys.platform == "win32":
         pip_executable = os.path.join(VENV_DIR, "Scripts", "pip.exe")
     else:
         pip_executable = os.path.join(VENV_DIR, "bin", "pip")
-    
-    # Ensure pip executable exists
+
     if not os.path.exists(pip_executable):
         print("pip executable not found in the virtual environment.")
         return False
@@ -51,36 +137,33 @@ def install_dependencies():
     attempts = 0
     while attempts < MAX_PIP_ATTEMPTS:
         try:
-            # Upgrade pip first
             subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
-            # Install required packages
             subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy"], check=True)
             print("Dependencies installed successfully.")
             return True
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError as exc:
             attempts += 1
-            print(f"Pip install attempt {attempts} failed: {e}")
+            print(f"Pip install attempt {attempts} failed: {exc}")
             if attempts < MAX_PIP_ATTEMPTS:
-                print("Retrying pip install...")
-                time.sleep(2)  # Wait before retrying
-            else:
-                print("Maximum pip install attempts reached. Skipping installation.")
-                return False
+                time.sleep(2)
+    print("Maximum pip install attempts reached. Skipping installation.")
+    return False
+
 
 def activate_venv():
-    """Activate the virtual environment by modifying sys.path."""
     if sys.platform == "win32":
-        venv_site_packages = os.path.join(
-            VENV_DIR, "Lib", "site-packages"
-        )
+        venv_site_packages = os.path.join(VENV_DIR, "Lib", "site-packages")
     else:
         venv_site_packages = os.path.join(
-            VENV_DIR, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+            VENV_DIR,
+            "lib",
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+            "site-packages",
         )
     sys.path.insert(0, venv_site_packages)
 
+
 def relaunch_in_venv():
-    """Relaunch the current script within the virtual environment."""
     if sys.platform == "win32":
         python_executable = os.path.join(VENV_DIR, "Scripts", "python.exe")
     else:
@@ -90,8 +173,8 @@ def relaunch_in_venv():
     subprocess.check_call([python_executable] + sys.argv)
     sys.exit()
 
+
 def setup_virtual_environment():
-    """Ensure that the virtual environment is set up and dependencies are installed."""
     if not is_venv():
         create_venv()
         install_successful = install_dependencies()
@@ -100,85 +183,77 @@ def setup_virtual_environment():
         relaunch_in_venv()
     else:
         activate_venv()
-        # Optionally, verify if dependencies are installed
         try:
-            import alsaaudio
-            import numpy
-        except ImportError as e:
-            print(f"Missing dependencies: {e}")
-            print("Attempting to install dependencies...")
+            import alsaaudio  # noqa: F401
+            import numpy  # noqa: F401
+        except ImportError as exc:
+            print(f"Missing dependencies: {exc}")
             install_successful = install_dependencies()
             if not install_successful:
                 print("Proceeding without installing dependencies. Ensure they are already installed.")
-            else:
-                print("Dependencies installed successfully.")
 
-def handle_client_connection(client_socket):
-    """Handle the incoming client connection and play audio with volume control."""
+
+def handle_client_connection(client_socket, settings):
     try:
         import alsaaudio
+        import numpy as np
 
-        # Setup ALSA for playback
-        audio_out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, device=PCM_DEVICE)
-        audio_out.setchannels(CHANNELS)
-        audio_out.setrate(RATE)
+        audio_out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, device=settings["pcm_device"])
+        audio_out.setchannels(int(settings["channels"]))
+        audio_out.setrate(int(settings["rate"]))
         audio_out.setformat(alsaaudio.PCM_FORMAT_S16_LE)
-        audio_out.setperiodsize(CHUNK)
+        audio_out.setperiodsize(int(settings["chunk"]))
+
+        chunk = int(settings["chunk"])
+        volume = float(settings["volume"])
 
         while True:
-            # Receive raw audio data
-            data = client_socket.recv(CHUNK)
+            data = client_socket.recv(chunk)
             if not data:
                 print("Client disconnected.")
                 break
 
-            # Convert byte data to numpy array
             audio_samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-
-            # Apply volume control
-            audio_samples *= VOLUME
-
-            # Ensure samples are within valid range
+            audio_samples *= volume
             audio_samples = np.clip(audio_samples, -32768, 32767)
-
-            # Convert back to int16
-            processed_data = audio_samples.astype(np.int16).tobytes()
-
-            # Play the processed audio data using ALSA
-            audio_out.write(processed_data)
-
-    except Exception as e:
-        print(f"Error in client connection: {e}")
+            audio_out.write(audio_samples.astype(np.int16).tobytes())
+    except Exception as exc:
+        print(f"Error in client connection: {exc}")
     finally:
-        client_socket.close()
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+
 
 def main():
+    setup_virtual_environment()
     while True:
         server_socket = None
         try:
-            # Set up the virtual environment
-            setup_virtual_environment()
-
-            # Create a socket to listen for raw audio
+            settings = _load_runtime_settings()
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((LISTEN_HOST, LISTEN_PORT))
+            server_socket.bind((settings["listen_host"], int(settings["listen_port"])))
             server_socket.listen(1)
-            print(f"Listening for raw audio on port {LISTEN_PORT}...")
+            print(
+                f"Listening for raw audio on {settings['listen_host']}:{settings['listen_port']} "
+                f"(pcm={settings['pcm_device']} rate={settings['rate']} ch={settings['channels']})..."
+            )
 
             client_socket, addr = server_socket.accept()
             print(f"Connection established with {addr}")
-
-            handle_client_connection(client_socket)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            time.sleep(5)  # Retry after a short delay
-
+            handle_client_connection(client_socket, settings)
+        except Exception as exc:
+            print(f"An error occurred: {exc}")
+            time.sleep(5)
         finally:
             if server_socket:
-                server_socket.close()
-            print("Server socket closed. Retrying...")
+                try:
+                    server_socket.close()
+                except Exception:
+                    pass
+
 
 if __name__ == "__main__":
     main()

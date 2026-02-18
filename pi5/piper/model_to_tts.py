@@ -150,22 +150,25 @@ else:
         "options": {},
         "host": "0.0.0.0",
         "port": 6545,
+        "tts_host": "127.0.0.1",
+        "tts_port": 6434,
         "tts_url": "http://localhost:6434",
         "ollama_url": "http://localhost:11434/api/chat",
         "max_history_messages": 3,  # New Configuration Parameter
         "offline_mode": False  # Default offline mode
     }
-    CONFIG_PATH = "config.json"
+    CONFIG_PATH = "llm_bridge_config.json"
+    AUDIO_ROUTER_CONFIG_PATH = "audio_router_config.json"
     
     def load_config():
         if not os.path.exists(CONFIG_PATH):
-            logging.info("No config.json found. Creating default config.json...")
+            logging.info(f"No {CONFIG_PATH} found. Creating default config file...")
             try:
                 with open(CONFIG_PATH, 'w') as f:
                     json.dump(DEFAULT_CONFIG, f, indent=2)
                 return dict(DEFAULT_CONFIG)
             except Exception as e:
-                logging.error(f"Failed to create config.json: {e}")
+                    logging.error(f"Failed to create {CONFIG_PATH}: {e}")
                 return dict(DEFAULT_CONFIG)
         else:
             try:
@@ -249,8 +252,40 @@ else:
         # Handle the new --offline argument
         config["offline_mode"] = args.offline
         return config
+
+    def _get_nested(data, path, default=None):
+        current = data
+        for key in str(path or "").split("."):
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            else:
+                return default
+        return current
+
+    def apply_audio_router_overrides(config):
+        try:
+            with open(AUDIO_ROUTER_CONFIG_PATH, "r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+            if not isinstance(payload, dict):
+                return config
+        except Exception:
+            return config
+
+        tts_host = str(_get_nested(payload, "audio_router.integrations.tts_host", config.get("tts_host", "127.0.0.1"))).strip()
+        tts_port = _get_nested(payload, "audio_router.integrations.tts_port", config.get("tts_port", 6434))
+        try:
+            tts_port = int(tts_port)
+        except Exception:
+            tts_port = int(config.get("tts_port", 6434))
+
+        if tts_host:
+            config["tts_host"] = tts_host
+        config["tts_port"] = tts_port
+        config["tts_url"] = f"http://{config['tts_host']}:{config['tts_port']}"
+        return config
     
     CONFIG = merge_config_and_args(CONFIG, args)
+    CONFIG = apply_audio_router_overrides(CONFIG)
     
     #############################################
     # Step 6: Load Optional Configurations       #
@@ -584,35 +619,26 @@ else:
     def synthesize_and_play(sentence):
         """
         Send the sentence to the TTS engine.
-        Playback is handled elsewhere.
+        Playback is handled by output.py through voice_server.py.
         """
         sentence = sentence.strip()
         if not sentence:
             return
         try:
             payload = {"prompt": sentence}
-            logging.info(f"Sending TTS request with prompt: {sentence}")
-            with requests.post(CONFIG["tts_url"], json=payload, stream=True, timeout=10) as response:
-                if response.status_code != 200:
-                    logging.warning(f"TTS received status code {response.status_code}")
-                    try:
-                        error_msg = response.json().get('error', 'No error message provided.')
-                        logging.warning(f"TTS error: {error_msg}")
-                    except:
-                        logging.warning("No JSON error message provided for TTS.")
-                    return
-
-                # Forward the audio data to the TTS engine
-                # Assuming the TTS engine handles playback internally
-                for chunk in response.iter_content(chunk_size=4096):
-                    if chunk:
-                        # If needed, process or log the audio data here
-                        pass  # No action since playback is handled elsewhere
-            logging.info("TTS request completed successfully.")
-        except requests.exceptions.Timeout:
-            logging.error("TTS request timed out.")
-        except requests.exceptions.ConnectionError as ce:
-            logging.error(f"Connection error during TTS request: {ce}")
+            tts_host = str(CONFIG.get("tts_host", "127.0.0.1")).strip() or "127.0.0.1"
+            try:
+                tts_port = int(CONFIG.get("tts_port", 6434))
+            except Exception:
+                tts_port = 6434
+            logging.info(f"Forwarding TTS prompt to {tts_host}:{tts_port}")
+            with socket.create_connection((tts_host, tts_port), timeout=10) as sock:
+                sock.sendall(json.dumps(payload).encode("utf-8"))
+            logging.info("TTS prompt forwarded successfully.")
+        except socket.timeout:
+            logging.error("TTS socket request timed out.")
+        except OSError as ce:
+            logging.error(f"Connection error during TTS socket forward: {ce}")
         except Exception as e:
             logging.error(f"Unexpected error during TTS: {e}")
 

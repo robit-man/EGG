@@ -93,6 +93,13 @@ AUTO_UPDATE_POLL_SECONDS = 20.0
 AUTO_UPDATE_FETCH_TIMEOUT_SECONDS = 45.0
 AUTO_UPDATE_PULL_TIMEOUT_SECONDS = 120.0
 AUTO_UPDATE_RUNTIME_SYNC_TIMEOUT_SECONDS = 180.0
+DIRECT_LAUNCH_SERVICE_IDS = (
+    "tts_output",
+    "llm_bridge",
+    "tts_voice",
+    "asr_stream",
+    "ollama",
+)
 
 
 def _get_nested(data: dict, path: str, default=None):
@@ -248,13 +255,26 @@ class WatchdogManager:
                 activation_timeout_seconds=40.0,
             ),
             ServiceSpec(
+                "audio_router",
+                "Audio Router",
+                "audio_router.py",
+                health_mode="http",
+                health_port=8090,
+                health_path="/health",
+                config_relpath="audio_router_config.json",
+                config_port_paths=("audio_router.network.listen_port",),
+                activation_timeout_seconds=50.0,
+            ),
+            ServiceSpec(
                 "tts_output",
                 "TTS Output",
                 "output.py",
                 launch_in_terminal=False,
                 health_mode="tcp",
                 health_port=6353,
-                activation_timeout_seconds=180.0,
+                config_relpath="audio_router_config.json",
+                config_port_paths=("audio_router.integrations.audio_out_port",),
+                activation_timeout_seconds=300.0,
             ),
             ServiceSpec(
                 "llm_bridge",
@@ -263,7 +283,9 @@ class WatchdogManager:
                 launch_in_terminal=False,
                 health_mode="tcp",
                 health_port=6545,
-                activation_timeout_seconds=180.0,
+                config_relpath="audio_router_config.json",
+                config_port_paths=("audio_router.integrations.llm_port",),
+                activation_timeout_seconds=300.0,
             ),
             ServiceSpec(
                 "tts_voice",
@@ -272,7 +294,9 @@ class WatchdogManager:
                 launch_in_terminal=False,
                 health_mode="tcp",
                 health_port=6434,
-                activation_timeout_seconds=120.0,
+                config_relpath="audio_router_config.json",
+                config_port_paths=("audio_router.integrations.tts_port",),
+                activation_timeout_seconds=240.0,
             ),
             ServiceSpec(
                 "asr_stream",
@@ -280,7 +304,7 @@ class WatchdogManager:
                 "run_asr_stream.py",
                 launch_in_terminal=False,
                 health_mode="process",
-                activation_timeout_seconds=60.0,
+                activation_timeout_seconds=180.0,
             ),
             ServiceSpec(
                 "ollama",
@@ -290,7 +314,7 @@ class WatchdogManager:
                 health_mode="http",
                 health_port=11434,
                 health_path="/api/tags",
-                activation_timeout_seconds=90.0,
+                activation_timeout_seconds=180.0,
             ),
             ServiceSpec(
                 "router",
@@ -328,10 +352,15 @@ class WatchdogManager:
         self._auto_update_enabled = False
         self._port_reclaim_enabled = self._env_flag("WATCHDOG_RECLAIM_PORTS", True)
         self._port_reclaim_force = self._env_flag("WATCHDOG_RECLAIM_FORCE", False)
+        self._force_direct = self._env_flag("WATCHDOG_FORCE_DIRECT", False)
 
         self._os_name = platform.system().lower()
         self._terminal_emulator = self._detect_terminal_emulator()
-        if self._os_name not in ("windows", "darwin") and not self._terminal_emulator:
+        if (
+            self._os_name not in ("windows", "darwin")
+            and not self._terminal_emulator
+            and not self._force_direct
+        ):
             self._log("[WARN] No terminal emulator detected; Linux service launch will fail")
 
         self._acquire_instance_lock()
@@ -1599,6 +1628,11 @@ class WatchdogManager:
         if svc.service_id == "asr_stream":
             child_env.setdefault("ASR_TARGET_HOST", "127.0.0.1")
             child_env.setdefault("ASR_TARGET_PORT", "6545")
+        prefer_terminal_launch = bool(
+            svc.launch_in_terminal
+            and not self._force_direct
+            and svc.service_id not in DIRECT_LAUNCH_SERVICE_IDS
+        )
 
         if self._os_name == "windows":
             creationflags = (
@@ -1634,7 +1668,7 @@ class WatchdogManager:
                 self._log(f"[ERROR] {svc.label} launch failed on attempt={runtime.launch_attempts}: {exc}")
                 return
 
-        if self._os_name == "darwin":
+        if self._os_name == "darwin" and prefer_terminal_launch:
             wrapped = self._build_wrapped_shell_command(svc)
             escaped = wrapped.replace("\\", "\\\\").replace('"', '\\"')
             apple_script = f'tell application "Terminal" to do script "bash -lc \\"{escaped}\\""'
@@ -1658,7 +1692,7 @@ class WatchdogManager:
                 self._log(f"[ERROR] {svc.label} launch failed on attempt={runtime.launch_attempts}: {exc}")
                 return
 
-        if not svc.launch_in_terminal:
+        if not prefer_terminal_launch:
             try:
                 popen_kwargs = {
                     "cwd": str(svc.working_dir(self.base_dir)),

@@ -160,6 +160,7 @@ upgrade_system_and_install_prereqs() {
         python3-dev \
         nodejs \
         npm \
+        libportaudio2 \
         v4l-utils || echo "[WARN] apt package install failed; continuing."
 
     $apt_prefix apt-get install -y python3-picamera2 || \
@@ -171,6 +172,9 @@ create_watchdog_launcher() {
 #!/bin/bash
 set -e
 cd "$TARGET_DIR"
+if [ -x "$TARGET_DIR/sync_runtime.sh" ] && [ -d "$REPO_DIR" ]; then
+  "$TARGET_DIR/sync_runtime.sh" "$REPO_DIR" "$TARGET_DIR" >/dev/null 2>&1 || true
+fi
 export WATCHDOG_REPO_DIR="$REPO_DIR"
 export WATCHDOG_AUTO_UPDATE_URL="$REPO_URL"
 export WATCHDOG_AUTO_UPDATE_BRANCH="$REPO_BRANCH"
@@ -191,6 +195,7 @@ configs = [
     ("router_config.json", ("router", "network", "listen_host")),
     ("camera_router_config.json", ("camera_router", "network", "listen_host")),
     ("pipeline_api_config.json", ("pipeline_api", "network", "listen_host")),
+    ("audio_router_config.json", ("audio_router", "network", "listen_host")),
 ]
 security_defaults = [
     ("camera_router_config.json", ("camera_router", "security"), {
@@ -203,6 +208,19 @@ security_defaults = [
         "require_auth": True,
         "session_timeout": 300,
     }),
+    ("audio_router_config.json", ("audio_router", "security"), {
+        "password": "egg",
+        "require_auth": True,
+        "session_timeout": 300,
+    }),
+]
+service_url_defaults = [
+    (
+        "router_config.json",
+        ("router", "services", "audio_router_info_url"),
+        "http://127.0.0.1:8090/router_info",
+        {"http://127.0.0.1:6590/router_info", "http://127.0.0.1:6590/health"},
+    ),
 ]
 
 def update_bind_host(payload, key_path):
@@ -254,6 +272,23 @@ def load_payload(path):
     except Exception:
         return {}
 
+def update_service_url(payload, key_path, default_url, legacy_values):
+    changed = False
+    current = payload
+    for key in key_path[:-1]:
+        if not isinstance(current, dict):
+            return changed
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+            changed = True
+        current = current[key]
+    leaf = key_path[-1]
+    current_value = str(current.get(leaf, "")).strip()
+    if not current_value or current_value in legacy_values:
+        current[leaf] = default_url
+        changed = True
+    return changed
+
 for filename, key_path in configs:
     path = os.path.join(target_dir, filename)
     payload = load_payload(path)
@@ -275,6 +310,17 @@ for filename, key_path, defaults in security_defaults:
         with open(path, "w", encoding="utf-8") as fp:
             json.dump(payload, fp, indent=2)
         print(f"[SETUP] Applied security defaults in {path}")
+
+for filename, key_path, default_url, legacy_values in service_url_defaults:
+    path = os.path.join(target_dir, filename)
+    payload = load_payload(path)
+    if payload is None:
+        continue
+    changed = update_service_url(payload, key_path, default_url, legacy_values)
+    if changed:
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2)
+        print(f"[SETUP] Updated service URL defaults in {path}")
 PY
 }
 

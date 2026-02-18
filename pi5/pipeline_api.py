@@ -8,6 +8,9 @@ HTTP bridge for Pi5 speech stack:
 
 import json
 import os
+import platform
+import random
+import re
 import secrets
 import socket
 import subprocess
@@ -84,6 +87,12 @@ except Exception:
 DEFAULT_PASSWORD = "egg"
 DEFAULT_SESSION_TIMEOUT = 300
 DEFAULT_REQUIRE_AUTH = True
+DEFAULT_ENABLE_TUNNEL = True
+DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
+DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
+DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS = 45.0
+MAX_TUNNEL_RESTART_DELAY_SECONDS = 300.0
+PIPELINE_CLOUDFLARED_BASENAME = "pipeline_api_cloudflared"
 
 DEFAULT_CONFIG = {
     "pipeline_api": {
@@ -108,6 +117,10 @@ DEFAULT_CONFIG = {
             "password": DEFAULT_PASSWORD,
             "session_timeout": DEFAULT_SESSION_TIMEOUT,
             "require_auth": DEFAULT_REQUIRE_AUTH,
+        },
+        "tunnel": {
+            "enable": DEFAULT_ENABLE_TUNNEL,
+            "auto_install_cloudflared": DEFAULT_AUTO_INSTALL_CLOUDFLARED,
         },
     }
 }
@@ -235,6 +248,22 @@ runtime_security = {
 }
 sessions = {}
 sessions_lock = threading.Lock()
+tunnel_enabled = _as_bool(
+    _get_nested(cfg, "pipeline_api.tunnel.enable", DEFAULT_ENABLE_TUNNEL),
+    default=DEFAULT_ENABLE_TUNNEL,
+)
+auto_install_cloudflared = _as_bool(
+    _get_nested(cfg, "pipeline_api.tunnel.auto_install_cloudflared", DEFAULT_AUTO_INSTALL_CLOUDFLARED),
+    default=DEFAULT_AUTO_INSTALL_CLOUDFLARED,
+)
+tunnel_process = None
+tunnel_url = None
+tunnel_last_error = ""
+tunnel_desired = False
+tunnel_url_lock = threading.Lock()
+tunnel_restart_lock = threading.Lock()
+tunnel_restart_failures = 0
+service_running = threading.Event()
 startup_time = time.time()
 
 
@@ -415,6 +444,217 @@ def _security_payload(base_url: str) -> dict:
     }
 
 
+def _next_tunnel_restart_delay(rate_limited: bool = False) -> float:
+    global tunnel_restart_failures
+    tunnel_restart_failures = min(int(tunnel_restart_failures) + 1, 8)
+    base_delay = (
+        DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS
+        if rate_limited
+        else DEFAULT_TUNNEL_RESTART_DELAY_SECONDS
+    )
+    delay = float(base_delay) * (2 ** max(0, int(tunnel_restart_failures) - 1))
+    jitter = random.uniform(0.0, min(6.0, max(1.0, delay * 0.15)))
+    return min(delay + jitter, MAX_TUNNEL_RESTART_DELAY_SECONDS)
+
+
+def _get_cloudflared_path() -> str:
+    if os.name == "nt":
+        return os.path.join(SCRIPT_DIR, f"{PIPELINE_CLOUDFLARED_BASENAME}.exe")
+    return os.path.join(SCRIPT_DIR, PIPELINE_CLOUDFLARED_BASENAME)
+
+
+def _is_cloudflared_installed() -> bool:
+    if os.path.exists(_get_cloudflared_path()):
+        return True
+    try:
+        subprocess.run(["cloudflared", "--version"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _install_cloudflared() -> bool:
+    cloudflared_path = _get_cloudflared_path()
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "windows":
+        if "amd64" in machine or "x86_64" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+        else:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-386.exe"
+    elif system == "linux":
+        if "aarch64" in machine or "arm64" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+        elif "arm" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+        else:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+    elif system == "darwin":
+        if "arm" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz"
+        else:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz"
+    else:
+        if ui:
+            ui.log(f"[ERROR] Unsupported platform for cloudflared: {system} {machine}")
+        return False
+    try:
+        import urllib.request
+
+        if ui:
+            ui.log(f"Downloading cloudflared from {url}")
+        urllib.request.urlretrieve(url, cloudflared_path)
+        if os.name != "nt":
+            os.chmod(cloudflared_path, 0o755)
+        if ui:
+            ui.log("Installed cloudflared successfully")
+        return True
+    except Exception as exc:
+        if ui:
+            ui.log(f"[ERROR] Failed to install cloudflared: {exc}")
+        return False
+
+
+def _stop_cloudflared_tunnel() -> None:
+    global tunnel_process, tunnel_last_error, tunnel_url, tunnel_desired, tunnel_restart_failures
+    tunnel_desired = False
+    tunnel_restart_failures = 0
+    process = tunnel_process
+    if process is None:
+        with tunnel_url_lock:
+            tunnel_url = None
+        return
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        pass
+    finally:
+        tunnel_process = None
+        with tunnel_url_lock:
+            tunnel_url = None
+        tunnel_last_error = "Tunnel stopped"
+
+
+def _start_cloudflared_tunnel(local_port: int) -> bool:
+    global tunnel_url, tunnel_process, tunnel_last_error, tunnel_desired
+    with tunnel_restart_lock:
+        if tunnel_process is not None and tunnel_process.poll() is None:
+            return True
+        tunnel_desired = True
+    cloudflared_path = _get_cloudflared_path()
+    if not os.path.exists(cloudflared_path):
+        cloudflared_path = "cloudflared"
+    with tunnel_url_lock:
+        tunnel_url = None
+    tunnel_last_error = ""
+    cmd = [
+        cloudflared_path,
+        "tunnel",
+        "--protocol",
+        "http2",
+        "--url",
+        f"http://localhost:{int(local_port)}",
+    ]
+    if ui:
+        ui.log(f"[START] Launching cloudflared: {' '.join(cmd)}")
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        tunnel_process = process
+    except Exception as exc:
+        tunnel_last_error = str(exc)
+        if ui:
+            ui.log(f"[ERROR] Failed to start cloudflared tunnel: {exc}")
+        return False
+
+    def monitor_output() -> None:
+        global tunnel_process, tunnel_url, tunnel_last_error, tunnel_restart_failures
+        found_url = False
+        captured_url = ""
+        rate_limited = False
+        for raw_line in iter(process.stdout.readline, ""):
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if "429 too many requests" in lowered or "error code: 1015" in lowered:
+                rate_limited = True
+            if "trycloudflare.com" in line:
+                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                if not match:
+                    match = re.search(r"https://[^\s]+trycloudflare\.com[^\s]*", line)
+                if match:
+                    with tunnel_url_lock:
+                        if tunnel_url is None:
+                            captured_url = match.group(0)
+                            tunnel_url = captured_url
+                            found_url = True
+                            tunnel_last_error = ""
+                            tunnel_restart_failures = 0
+                            if ui:
+                                ui.log(f"[TUNNEL] Pipeline API URL: {tunnel_url}")
+        return_code = process.poll()
+        with tunnel_restart_lock:
+            if tunnel_process is process:
+                tunnel_process = None
+        if captured_url:
+            with tunnel_url_lock:
+                if tunnel_url == captured_url:
+                    tunnel_url = None
+        if return_code is not None:
+            if found_url:
+                tunnel_restart_failures = 0
+                tunnel_last_error = f"cloudflared exited (code {return_code}); tunnel URL expired"
+            else:
+                if rate_limited:
+                    tunnel_last_error = f"cloudflared rate-limited (429/1015) before URL (code {return_code})"
+                else:
+                    tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
+            if ui:
+                ui.log(f"[WARN] {tunnel_last_error}")
+            if tunnel_desired and service_running.is_set():
+                delay = _next_tunnel_restart_delay(rate_limited=rate_limited and not found_url)
+                if ui:
+                    ui.log(f"[WARN] Restarting cloudflared in {delay:.1f}s...")
+                time.sleep(delay)
+                if tunnel_desired and service_running.is_set():
+                    _start_cloudflared_tunnel(local_port)
+
+    threading.Thread(target=monitor_output, daemon=True).start()
+    return True
+
+
+def _tunnel_payload() -> dict:
+    process_running = tunnel_process is not None and tunnel_process.poll() is None
+    with tunnel_url_lock:
+        current_tunnel = str(tunnel_url or "").strip() if process_running else ""
+        stale_tunnel = str(tunnel_url or "").strip() if (tunnel_url and not process_running) else ""
+        current_error = str(tunnel_last_error or "").strip()
+    state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
+    if stale_tunnel and not process_running:
+        state = "stale"
+    if current_error and not process_running and not current_tunnel and not stale_tunnel:
+        state = "error"
+    return {
+        "state": state,
+        "tunnel_url": current_tunnel,
+        "stale_tunnel_url": stale_tunnel,
+        "error": current_error,
+        "running": bool(process_running),
+        "enabled": bool(tunnel_enabled),
+    }
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(
@@ -439,6 +679,7 @@ def index():
 def health():
     stack = _stack_status()
     local_base, lan_base, publish_base = _endpoint_bases()
+    tunnel = _tunnel_payload()
     return jsonify(
         {
             "status": "ok",
@@ -448,6 +689,7 @@ def health():
             "security": _security_payload(publish_base),
             "local_security": _security_payload(local_base),
             "lan_security": _security_payload(lan_base) if lan_base else {},
+            "tunnel": tunnel,
             "stack": stack,
         }
     )
@@ -457,6 +699,8 @@ def health():
 @_auth_required
 def list_routes():
     local_base, lan_base, publish_base = _endpoint_bases()
+    tunnel = _tunnel_payload()
+    tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
     return jsonify(
         {
             "status": "success",
@@ -490,7 +734,13 @@ def list_routes():
                 "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                 "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
+                "tunnel_health_url": f"{tunnel_base}/health" if tunnel_base else "",
+                "tunnel_auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
+                "tunnel_session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+                "tunnel_llm_prompt_url": f"{tunnel_base}/llm/prompt" if tunnel_base else "",
+                "tunnel_tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             },
+            "tunnel": tunnel,
         }
     )
 
@@ -561,14 +811,32 @@ def rotate_session():
 
 @app.route("/tunnel_info", methods=["GET"])
 def tunnel_info():
+    tunnel = _tunnel_payload()
+    tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
+    if tunnel_base:
+        status = "success"
+        message = "Tunnel URL available"
+    elif str(tunnel.get("state") or "") in ("error", "stale"):
+        status = "error"
+        message = "Tunnel unavailable"
+    else:
+        status = "pending"
+        message = "Tunnel URL not yet available"
     return jsonify(
         {
-            "status": "pending",
+            "status": status,
             "service": "pipeline_api",
-            "message": "Tunnel URL is managed by router service",
-            "tunnel_url": "",
-            "auth_url": "",
-            "session_rotate_url": "",
+            "message": message,
+            "tunnel_url": tunnel_base,
+            "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
+            "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+            "list_url": f"{tunnel_base}/list" if tunnel_base else "",
+            "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+            "llm_prompt_url": f"{tunnel_base}/llm/prompt" if tunnel_base else "",
+            "tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
+            "stale_tunnel_url": str(tunnel.get("stale_tunnel_url") or ""),
+            "error": str(tunnel.get("error") or ""),
+            "running": bool(tunnel.get("running")),
         }
     )
 
@@ -577,6 +845,8 @@ def tunnel_info():
 def router_info():
     local_base, lan_base, publish_base = _endpoint_bases()
     stack = _stack_status()
+    tunnel = _tunnel_payload()
+    tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
     return jsonify(
         {
             "status": "success",
@@ -607,14 +877,13 @@ def router_info():
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
             },
             "tunnel": {
-                "state": "inactive",
-                "tunnel_url": "",
-                "auth_url": "",
-                "session_rotate_url": "",
-                "list_url": "",
-                "health_url": "",
-                "llm_prompt_url": "",
-                "tts_speak_url": "",
+                **tunnel,
+                "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
+                "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+                "list_url": f"{tunnel_base}/list" if tunnel_base else "",
+                "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+                "llm_prompt_url": f"{tunnel_base}/llm/prompt" if tunnel_base else "",
+                "tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             },
             "security": _security_payload(publish_base),
             "local_security": _security_payload(local_base),
@@ -762,6 +1031,30 @@ def _build_pipeline_config_spec():
                     ),
                 ),
             ),
+            CategorySpec(
+                id="tunnel",
+                label="Tunnel",
+                settings=(
+                    SettingSpec(
+                        id="enable_tunnel",
+                        label="Enable Tunnel",
+                        path="pipeline_api.tunnel.enable",
+                        value_type="bool",
+                        default=DEFAULT_ENABLE_TUNNEL,
+                        description="Enable cloudflared trycloudflare tunnel.",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="auto_install_cloudflared",
+                        label="Auto-install Cloudflared",
+                        path="pipeline_api.tunnel.auto_install_cloudflared",
+                        value_type="bool",
+                        default=DEFAULT_AUTO_INSTALL_CLOUDFLARED,
+                        description="Install cloudflared binary when missing.",
+                        restart_required=True,
+                    ),
+                ),
+            ),
         ),
     )
 
@@ -771,6 +1064,7 @@ def _ui_metrics_loop() -> None:
         stack = _stack_status()
         ready_count = sum(1 for item in stack.values() if isinstance(item, dict) and item.get("ready"))
         local_base, lan_base, publish_base = _endpoint_bases()
+        tunnel = _tunnel_payload()
         ui.update_metric("Service", "pipeline_api")
         ui.update_metric("Bind", f"{listen_host}:{listen_port}")
         ui.update_metric("Local URL", local_base)
@@ -785,41 +1079,66 @@ def _ui_metrics_loop() -> None:
         ui.update_metric("Session Timeout", str(SESSION_TIMEOUT))
         ui.update_metric("Prompt Max", str(prompt_max_chars))
         ui.update_metric("Sock Timeout", f"{socket_timeout:.1f}s")
+        ui.update_metric("Tunnel", str(tunnel.get("state") or "inactive"))
+        ui.update_metric("Tunnel URL", str(tunnel.get("tunnel_url") or str(tunnel.get("stale_tunnel_url") or "N/A")))
         time.sleep(1.0)
+
+
+def _shutdown_runtime() -> None:
+    service_running.clear()
+    _stop_cloudflared_tunnel()
 
 
 def main() -> int:
     global ui
-    if UI_AVAILABLE:
-        ui = TerminalUI(
-            "Pipeline API",
-            config_spec=_build_pipeline_config_spec(),
-            config_path=CONFIG_PATH,
-            refresh_interval_ms=700,
-        )
-        ui.on_save(_apply_runtime_security)
-        ui.log(f"Starting pipeline API on {listen_host}:{listen_port}")
-        local_base, lan_base, _ = _endpoint_bases()
-        ui.log(f"Local URL: {local_base}")
-        if lan_base:
-            ui.log(f"LAN URL: {lan_base}")
-        flask_thread = threading.Thread(
-            target=lambda: app.run(
-                host=listen_host,
-                port=listen_port,
-                debug=False,
-                use_reloader=False,
-                threaded=True,
-            ),
-            daemon=True,
-        )
-        flask_thread.start()
-        ui.running = True
-        threading.Thread(target=_ui_metrics_loop, daemon=True).start()
-        ui.start()
-    else:
-        app.run(host=listen_host, port=listen_port, debug=False, use_reloader=False, threaded=True)
-    return 0
+    try:
+        service_running.set()
+        if tunnel_enabled:
+            if not _is_cloudflared_installed():
+                if auto_install_cloudflared:
+                    if ui:
+                        ui.log("Cloudflared not found, attempting install...")
+                    if not _install_cloudflared() and ui:
+                        ui.log("Cloudflared install failed; tunnel disabled.")
+                elif ui:
+                    ui.log("Cloudflared missing and auto-install disabled; tunnel disabled.")
+            if _is_cloudflared_installed():
+                threading.Thread(
+                    target=lambda: (time.sleep(2.0), _start_cloudflared_tunnel(listen_port)),
+                    daemon=True,
+                ).start()
+        if UI_AVAILABLE:
+            ui = TerminalUI(
+                "Pipeline API",
+                config_spec=_build_pipeline_config_spec(),
+                config_path=CONFIG_PATH,
+                refresh_interval_ms=700,
+            )
+            ui.on_save(_apply_runtime_security)
+            ui.log(f"Starting pipeline API on {listen_host}:{listen_port}")
+            local_base, lan_base, _ = _endpoint_bases()
+            ui.log(f"Local URL: {local_base}")
+            if lan_base:
+                ui.log(f"LAN URL: {lan_base}")
+            flask_thread = threading.Thread(
+                target=lambda: app.run(
+                    host=listen_host,
+                    port=listen_port,
+                    debug=False,
+                    use_reloader=False,
+                    threaded=True,
+                ),
+                daemon=True,
+            )
+            flask_thread.start()
+            ui.running = True
+            threading.Thread(target=_ui_metrics_loop, daemon=True).start()
+            ui.start()
+        else:
+            app.run(host=listen_host, port=listen_port, debug=False, use_reloader=False, threaded=True)
+        return 0
+    finally:
+        _shutdown_runtime()
 
 
 if __name__ == "__main__":

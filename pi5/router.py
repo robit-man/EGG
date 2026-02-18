@@ -117,7 +117,11 @@ LEGACY_ADAPTER_ROUTER_INFO_URLS = (
     "http://127.0.0.1:6590/router_info",
 )
 DEFAULT_CAMERA_ROUTER_INFO_URL = "http://127.0.0.1:8080/router_info"
-DEFAULT_AUDIO_ROUTER_INFO_URL = "http://127.0.0.1:6590/router_info"
+DEFAULT_AUDIO_ROUTER_INFO_URL = "http://127.0.0.1:8090/router_info"
+LEGACY_AUDIO_ROUTER_INFO_URLS = (
+    "http://127.0.0.1:6590/router_info",
+    "http://127.0.0.1:6590/health",
+)
 
 DEFAULT_NKN_ENABLE = True
 DEFAULT_NKN_IDENTIFIER = "mini-egg-router"
@@ -695,6 +699,8 @@ def _load_router_settings(config):
         ),
         DEFAULT_AUDIO_ROUTER_INFO_URL,
     )
+    if audio_router_info_url in LEGACY_AUDIO_ROUTER_INFO_URLS:
+        audio_router_info_url = DEFAULT_AUDIO_ROUTER_INFO_URL
     promote("router.services.audio_router_info_url", audio_router_info_url)
 
     nkn_enable = _as_bool(

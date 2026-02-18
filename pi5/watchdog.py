@@ -252,7 +252,7 @@ class WatchdogManager:
                 "output.py",
                 health_mode="tcp",
                 health_port=6353,
-                activation_timeout_seconds=45.0,
+                activation_timeout_seconds=180.0,
             ),
             ServiceSpec(
                 "llm_bridge",
@@ -260,7 +260,7 @@ class WatchdogManager:
                 "model_to_tts.py",
                 health_mode="tcp",
                 health_port=6545,
-                activation_timeout_seconds=45.0,
+                activation_timeout_seconds=180.0,
             ),
             ServiceSpec(
                 "tts_voice",
@@ -268,14 +268,14 @@ class WatchdogManager:
                 "run_voice_server.py",
                 health_mode="tcp",
                 health_port=6434,
-                activation_timeout_seconds=60.0,
+                activation_timeout_seconds=120.0,
             ),
             ServiceSpec(
                 "asr_stream",
                 "ASR Stream",
                 "run_asr_stream.py",
                 health_mode="process",
-                activation_timeout_seconds=35.0,
+                activation_timeout_seconds=60.0,
             ),
             ServiceSpec(
                 "ollama",
@@ -284,7 +284,7 @@ class WatchdogManager:
                 health_mode="http",
                 health_port=11434,
                 health_path="/api/tags",
-                activation_timeout_seconds=50.0,
+                activation_timeout_seconds=90.0,
             ),
             ServiceSpec(
                 "router",
@@ -1482,6 +1482,13 @@ class WatchdogManager:
         if self._os_name == "darwin":
             return "osascript"
 
+        forced_terminal = str(os.environ.get("WATCHDOG_TERMINAL", "")).strip()
+        if forced_terminal:
+            if forced_terminal.lower() in ("none", "direct", "headless", "off"):
+                return ""
+            if shutil.which(forced_terminal):
+                return forced_terminal
+
         env_terminal = os.environ.get("TERMINAL", "").strip()
         if env_terminal and shutil.which(env_terminal):
             return env_terminal
@@ -1490,8 +1497,8 @@ class WatchdogManager:
             "gnome-terminal",
             "konsole",
             "xfce4-terminal",
-            "x-terminal-emulator",
             "lxterminal",
+            "x-terminal-emulator",
             "xterm",
         ):
             if shutil.which(candidate):
@@ -1702,6 +1709,26 @@ class WatchdogManager:
                 runtime.pid = pid_from_file
             elif pid_from_file:
                 self._remove_pid_file(svc)
+
+        # Some terminal hosts do not expose the wrapped shell child PID reliably.
+        # Fall back to tracking the terminal host PID so health probes can proceed.
+        if (
+            runtime.pid is None
+            and self._os_name not in ("windows", "darwin")
+            and self._is_process_handle_running(runtime.terminal_process)
+            and runtime.terminal_process is not None
+        ):
+            if runtime.state != "launching" or now >= runtime.launch_grace_until:
+                runtime.pid = int(runtime.terminal_process.pid)
+                if runtime.state == "launching":
+                    self._set_state(
+                        svc,
+                        runtime,
+                        "activating",
+                        now,
+                        event=f"Using terminal host pid={runtime.pid}; probing readiness",
+                        error="",
+                    )
 
         if runtime.pid:
             if runtime.process_stable_since <= 0:

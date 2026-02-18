@@ -8,6 +8,7 @@ Pi5 camera router:
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -63,6 +64,20 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify
 from flask_cors import CORS
+
+UI_AVAILABLE = False
+TerminalUI = None
+ui = None
+
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+try:
+    from terminal_ui import TerminalUI
+
+    UI_AVAILABLE = True
+except Exception:
+    UI_AVAILABLE = False
 
 PICAMERA2_AVAILABLE = False
 Picamera2 = None
@@ -147,6 +162,9 @@ def load_config() -> dict:
     except Exception:
         loaded = {}
     merged = _merge_defaults(loaded, DEFAULT_CONFIG)
+    host_value = str(_get_nested(merged, "camera_router.network.listen_host", "0.0.0.0")).strip().lower()
+    if host_value in ("127.0.0.1", "localhost", "::1", ""):
+        _set_nested(merged, "camera_router.network.listen_host", "0.0.0.0")
     save_config(merged)
     return merged
 
@@ -366,6 +384,32 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 
+def _resolve_lan_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            candidate = str(probe.getsockname()[0] or "").strip()
+            if candidate and not candidate.startswith("127."):
+                return candidate
+    except Exception:
+        pass
+    try:
+        candidate = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
+def _endpoint_bases():
+    local_base = f"http://127.0.0.1:{listen_port}"
+    lan_ip = _resolve_lan_ip()
+    lan_base = f"http://{lan_ip}:{listen_port}" if lan_ip else ""
+    publish_base = lan_base or local_base
+    return local_base, lan_base, publish_base
+
+
 def _status_rows():
     with service_lock:
         return [feed.status() for feed in feeds.values()]
@@ -417,21 +461,28 @@ def health():
 @app.route("/list", methods=["GET"])
 def list_cameras():
     rows = _status_rows()
-    local_base = f"http://127.0.0.1:{listen_port}"
+    local_base, lan_base, publish_base = _endpoint_bases()
     cameras = []
     for row in rows:
         camera_id = row.get("id", "")
         cameras.append(
             {
                 **row,
-                "snapshot_url": f"{local_base}/snapshot/{camera_id}",
-                "video_url": f"{local_base}/video/{camera_id}",
+                "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
+                "video_url": f"{publish_base}/video/{camera_id}",
+                "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
+                "local_video_url": f"{local_base}/video/{camera_id}",
+                "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
+                "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
             }
         )
     return jsonify(
         {
             "status": "success",
             "service": "camera_router",
+            "base_url": publish_base,
+            "local_base_url": local_base,
+            "lan_base_url": lan_base,
             "cameras": cameras,
         }
     )
@@ -485,7 +536,7 @@ def tunnel_info():
 
 @app.route("/router_info", methods=["GET"])
 def router_info():
-    local_base = f"http://127.0.0.1:{listen_port}"
+    local_base, lan_base, publish_base = _endpoint_bases()
     rows = _status_rows()
     camera_routes = []
     for row in rows:
@@ -493,8 +544,12 @@ def router_info():
         camera_routes.append(
             {
                 "id": camera_id,
-                "snapshot_url": f"{local_base}/snapshot/{camera_id}",
-                "video_url": f"{local_base}/video/{camera_id}",
+                "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
+                "video_url": f"{publish_base}/video/{camera_id}",
+                "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
+                "local_video_url": f"{local_base}/video/{camera_id}",
+                "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
+                "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
                 "online": bool(row.get("online")),
             }
         )
@@ -503,11 +558,17 @@ def router_info():
             "status": "success",
             "service": "camera_router",
             "local": {
-                "base_url": local_base,
+                "base_url": publish_base,
+                "loopback_base_url": local_base,
+                "lan_base_url": lan_base,
                 "listen_host": listen_host,
                 "listen_port": listen_port,
-                "list_url": f"{local_base}/list",
-                "health_url": f"{local_base}/health",
+                "list_url": f"{publish_base}/list",
+                "health_url": f"{publish_base}/health",
+                "local_list_url": f"{local_base}/list",
+                "local_health_url": f"{local_base}/health",
+                "lan_list_url": f"{lan_base}/list" if lan_base else "",
+                "lan_health_url": f"{lan_base}/health" if lan_base else "",
             },
             "tunnel": {
                 "state": "inactive",
@@ -530,9 +591,47 @@ def shutdown() -> None:
             pass
 
 
+def _ui_metrics_loop() -> None:
+    while ui and ui.running:
+        rows = _status_rows()
+        online = sum(1 for row in rows if row.get("online"))
+        local_base, lan_base, publish_base = _endpoint_bases()
+        ui.update_metric("Service", "camera_router")
+        ui.update_metric("Bind", f"{listen_host}:{listen_port}")
+        ui.update_metric("Local URL", local_base)
+        ui.update_metric("LAN URL", lan_base or "N/A")
+        ui.update_metric("Public URL", publish_base)
+        ui.update_metric("Cameras", f"{online}/{len(rows)}")
+        ui.update_metric("Backend", "picamera2" if (PICAMERA2_AVAILABLE and use_picamera2) else "opencv")
+        time.sleep(1.0)
+
+
 def main() -> int:
+    global ui
     try:
-        app.run(host=listen_host, port=listen_port, debug=False, use_reloader=False, threaded=True)
+        if UI_AVAILABLE:
+            ui = TerminalUI("Camera Router", config_path=CONFIG_PATH, refresh_interval_ms=700)
+            ui.log(f"Starting camera router on {listen_host}:{listen_port}")
+            local_base, lan_base, _ = _endpoint_bases()
+            ui.log(f"Local URL: {local_base}")
+            if lan_base:
+                ui.log(f"LAN URL: {lan_base}")
+            flask_thread = threading.Thread(
+                target=lambda: app.run(
+                    host=listen_host,
+                    port=listen_port,
+                    debug=False,
+                    use_reloader=False,
+                    threaded=True,
+                ),
+                daemon=True,
+            )
+            flask_thread.start()
+            ui.running = True
+            threading.Thread(target=_ui_metrics_loop, daemon=True).start()
+            ui.start()
+        else:
+            app.run(host=listen_host, port=listen_port, debug=False, use_reloader=False, threaded=True)
         return 0
     finally:
         shutdown()

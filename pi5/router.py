@@ -108,7 +108,7 @@ CONFIG_PATH = "router_config.json"
 NODE_SIDECAR_DIR = "nkn_sidecar"
 NODE_BRIDGE_FILE = "nkn_router_bridge.js"
 
-DEFAULT_LISTEN_HOST = "127.0.0.1"
+DEFAULT_LISTEN_HOST = "0.0.0.0"
 DEFAULT_LISTEN_PORT = 5070
 
 DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:6590/router_info"
@@ -583,6 +583,24 @@ def _prefer_non_loopback_url(*values):
     return first_any
 
 
+def _resolve_lan_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            candidate = str(probe.getsockname()[0] or "").strip()
+            if candidate and not candidate.startswith("127."):
+                return candidate
+    except Exception:
+        pass
+    try:
+        candidate = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
 def _normalize_seed_hex(value):
     text = str(value or "").strip().lower()
     if text.startswith("0x"):
@@ -626,6 +644,9 @@ def _load_router_settings(config):
         ),
         DEFAULT_LISTEN_HOST,
     )
+    if str(listen_host).strip().lower() in ("127.0.0.1", "localhost", "::1"):
+        listen_host = DEFAULT_LISTEN_HOST
+        changed = True
     promote("router.network.listen_host", listen_host)
 
     listen_port = _as_int(
@@ -2807,16 +2828,15 @@ def main():
     else:
         log("NKN sidecar disabled by config")
 
-    try:
-        lan_ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        lan_ip = "N/A"
-    local_url = f"http://{listen_host}:{listen_port}"
-    lan_url = f"http://{lan_ip}:{listen_port}" if lan_ip != "N/A" else "N/A"
+    lan_ip = _resolve_lan_ip()
+    local_url = f"http://127.0.0.1:{listen_port}"
+    lan_url = f"http://{lan_ip}:{listen_port}" if lan_ip else "N/A"
+    bind_url = f"http://{listen_host}:{listen_port}"
 
     if ui:
         ui.update_metric("Local URL", local_url)
         ui.update_metric("LAN URL", lan_url)
+        ui.update_metric("Bind URL", bind_url)
         ui.update_metric("Adapter URL", service_endpoints["adapter_router_info_url"])
         ui.update_metric("Camera URL", service_endpoints["camera_router_info_url"])
         ui.update_metric("Audio URL", service_endpoints["audio_router_info_url"])
@@ -2825,7 +2845,8 @@ def main():
         ui.running = True
         threading.Thread(target=metrics_update_loop, daemon=True).start()
 
-    log(f"Starting NKN router API on {local_url}")
+    log(f"Starting NKN router API on {bind_url}")
+    log(f"Local URL: {local_url}")
     if lan_url != "N/A":
         log(f"LAN URL: {lan_url}")
 

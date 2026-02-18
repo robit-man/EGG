@@ -28,9 +28,9 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 ## Runtime services and local endpoints
 
 - `watchdog.py`: toggles services and keeps them alive
-- `router.py`: NKN sidecar + persistent router address + remote tunnel discovery
-- `camera_router.py`: camera list/snapshot/video routes
-- `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt
+- `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
+- `camera_router.py`: camera list/snapshot/video routes + terminal dashboard
+- `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt + terminal dashboard
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
 - `run_ollama_service.py`: Ollama service wrapper
@@ -43,6 +43,8 @@ Local ports:
 - `6434` voice server (`voice_server.py` via Docker)
 - `6353` audio output (`output.py`)
 - `11434` ollama (`ollama serve`)
+
+All Flask services bind to `0.0.0.0` so you can use the Pi LAN IP from other devices.
 
 ## Installation and Runtime
 

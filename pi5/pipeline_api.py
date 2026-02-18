@@ -11,6 +11,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -59,6 +60,20 @@ ensure_venv()
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
+UI_AVAILABLE = False
+TerminalUI = None
+ui = None
+
+SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+try:
+    from terminal_ui import TerminalUI
+
+    UI_AVAILABLE = True
+except Exception:
+    UI_AVAILABLE = False
 
 
 DEFAULT_CONFIG = {
@@ -132,6 +147,9 @@ def load_config() -> dict:
     except Exception:
         loaded = {}
     merged = _merge_defaults(loaded, DEFAULT_CONFIG)
+    host_value = str(_get_nested(merged, "pipeline_api.network.listen_host", "0.0.0.0")).strip().lower()
+    if host_value in ("127.0.0.1", "localhost", "::1", ""):
+        _set_nested(merged, "pipeline_api.network.listen_host", "0.0.0.0")
     save_config(merged)
     return merged
 
@@ -219,6 +237,32 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 
+def _resolve_lan_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            candidate = str(probe.getsockname()[0] or "").strip()
+            if candidate and not candidate.startswith("127."):
+                return candidate
+    except Exception:
+        pass
+    try:
+        candidate = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
+def _endpoint_bases():
+    local_base = f"http://127.0.0.1:{listen_port}"
+    lan_ip = _resolve_lan_ip()
+    lan_base = f"http://{lan_ip}:{listen_port}" if lan_ip else ""
+    publish_base = lan_base or local_base
+    return local_base, lan_base, publish_base
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(
@@ -253,16 +297,25 @@ def health():
 
 @app.route("/list", methods=["GET"])
 def list_routes():
-    local_base = f"http://127.0.0.1:{listen_port}"
+    local_base, lan_base, publish_base = _endpoint_bases()
     return jsonify(
         {
             "status": "success",
             "service": "pipeline_api",
+            "base_url": publish_base,
+            "local_base_url": local_base,
+            "lan_base_url": lan_base,
             "endpoints": {
-                "health_url": f"{local_base}/health",
-                "llm_prompt_url": f"{local_base}/llm/prompt",
-                "tts_speak_url": f"{local_base}/tts/speak",
-                "router_info_url": f"{local_base}/router_info",
+                "health_url": f"{publish_base}/health",
+                "llm_prompt_url": f"{publish_base}/llm/prompt",
+                "tts_speak_url": f"{publish_base}/tts/speak",
+                "router_info_url": f"{publish_base}/router_info",
+                "local_health_url": f"{local_base}/health",
+                "local_llm_prompt_url": f"{local_base}/llm/prompt",
+                "local_tts_speak_url": f"{local_base}/tts/speak",
+                "lan_health_url": f"{lan_base}/health" if lan_base else "",
+                "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
+                "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
             },
         }
     )
@@ -312,20 +365,30 @@ def tunnel_info():
 
 @app.route("/router_info", methods=["GET"])
 def router_info():
-    local_base = f"http://127.0.0.1:{listen_port}"
+    local_base, lan_base, publish_base = _endpoint_bases()
     stack = _stack_status()
     return jsonify(
         {
             "status": "success",
             "service": "pipeline_api",
             "local": {
-                "base_url": local_base,
+                "base_url": publish_base,
+                "loopback_base_url": local_base,
+                "lan_base_url": lan_base,
                 "listen_host": listen_host,
                 "listen_port": listen_port,
-                "list_url": f"{local_base}/list",
-                "health_url": f"{local_base}/health",
-                "llm_prompt_url": f"{local_base}/llm/prompt",
-                "tts_speak_url": f"{local_base}/tts/speak",
+                "list_url": f"{publish_base}/list",
+                "health_url": f"{publish_base}/health",
+                "llm_prompt_url": f"{publish_base}/llm/prompt",
+                "tts_speak_url": f"{publish_base}/tts/speak",
+                "local_list_url": f"{local_base}/list",
+                "local_health_url": f"{local_base}/health",
+                "local_llm_prompt_url": f"{local_base}/llm/prompt",
+                "local_tts_speak_url": f"{local_base}/tts/speak",
+                "lan_list_url": f"{lan_base}/list" if lan_base else "",
+                "lan_health_url": f"{lan_base}/health" if lan_base else "",
+                "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
+                "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
             },
             "tunnel": {
                 "state": "inactive",
@@ -340,8 +403,49 @@ def router_info():
     )
 
 
+def _ui_metrics_loop() -> None:
+    while ui and ui.running:
+        stack = _stack_status()
+        ready_count = sum(1 for item in stack.values() if isinstance(item, dict) and item.get("ready"))
+        local_base, lan_base, publish_base = _endpoint_bases()
+        ui.update_metric("Service", "pipeline_api")
+        ui.update_metric("Bind", f"{listen_host}:{listen_port}")
+        ui.update_metric("Local URL", local_base)
+        ui.update_metric("LAN URL", lan_base or "N/A")
+        ui.update_metric("Public URL", publish_base)
+        ui.update_metric("Stack Ready", f"{ready_count}/{len(stack)}")
+        ui.update_metric("LLM", "ready" if stack["llm_bridge"]["ready"] else "waiting")
+        ui.update_metric("TTS", "ready" if stack["tts_server"]["ready"] else "waiting")
+        ui.update_metric("Audio", "ready" if stack["audio_output"]["ready"] else "waiting")
+        ui.update_metric("Ollama", "ready" if stack["ollama"]["ready"] else "waiting")
+        time.sleep(1.0)
+
+
 def main() -> int:
-    app.run(host=listen_host, port=listen_port, debug=False, use_reloader=False, threaded=True)
+    global ui
+    if UI_AVAILABLE:
+        ui = TerminalUI("Pipeline API", config_path=CONFIG_PATH, refresh_interval_ms=700)
+        ui.log(f"Starting pipeline API on {listen_host}:{listen_port}")
+        local_base, lan_base, _ = _endpoint_bases()
+        ui.log(f"Local URL: {local_base}")
+        if lan_base:
+            ui.log(f"LAN URL: {lan_base}")
+        flask_thread = threading.Thread(
+            target=lambda: app.run(
+                host=listen_host,
+                port=listen_port,
+                debug=False,
+                use_reloader=False,
+                threaded=True,
+            ),
+            daemon=True,
+        )
+        flask_thread.start()
+        ui.running = True
+        threading.Thread(target=_ui_metrics_loop, daemon=True).start()
+        ui.start()
+    else:
+        app.run(host=listen_host, port=listen_port, debug=False, use_reloader=False, threaded=True)
     return 0
 
 

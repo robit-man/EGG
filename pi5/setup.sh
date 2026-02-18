@@ -174,9 +174,53 @@ cd "$TARGET_DIR"
 export WATCHDOG_REPO_DIR="$REPO_DIR"
 export WATCHDOG_AUTO_UPDATE_URL="$REPO_URL"
 export WATCHDOG_AUTO_UPDATE_BRANCH="$REPO_BRANCH"
+export WATCHDOG_TERMINAL="$TERMINAL_CMD"
 python3 "$TARGET_DIR/watchdog.py"
 EOF
     chmod +x "$TARGET_DIR/start_watchdog.sh"
+}
+
+ensure_bind_hosts() {
+    python3 - "$TARGET_DIR" <<'PY'
+import json
+import os
+import sys
+
+target_dir = sys.argv[1]
+configs = [
+    ("router_config.json", ("router", "network", "listen_host")),
+    ("camera_router_config.json", ("camera_router", "network", "listen_host")),
+    ("pipeline_api_config.json", ("pipeline_api", "network", "listen_host")),
+]
+
+def update_config(path, key_path):
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+    except Exception:
+        return
+    current = payload
+    for key in key_path[:-1]:
+        if not isinstance(current, dict):
+            return
+        current = current.get(key)
+        if current is None:
+            return
+    if not isinstance(current, dict):
+        return
+    leaf = key_path[-1]
+    host = str(current.get(leaf, "")).strip().lower()
+    if host in ("", "127.0.0.1", "localhost", "::1"):
+        current[leaf] = "0.0.0.0"
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2)
+        print(f"[SETUP] Updated bind host to 0.0.0.0 in {path}")
+
+for filename, key_path in configs:
+    update_config(os.path.join(target_dir, filename), key_path)
+PY
 }
 
 add_to_autostart() {
@@ -237,6 +281,7 @@ echo "[SETUP] Starting Mini EGG Pi5 setup..."
 upgrade_system_and_install_prereqs
 ensure_repo
 sync_runtime_files
+ensure_bind_hosts
 ensure_models
 ensure_whisper_venv
 build_docker_image

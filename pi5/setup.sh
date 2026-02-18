@@ -182,7 +182,8 @@ upgrade_system_and_install_prereqs() {
         nodejs \
         npm \
         libportaudio2 \
-        v4l-utils || echo "[WARN] apt package install failed; continuing."
+        v4l-utils \
+        lsof || echo "[WARN] apt package install failed; continuing."
 
     $apt_prefix apt-get install -y python3-picamera2 || \
         echo "[WARN] python3-picamera2 not available; camera service will use OpenCV fallback."

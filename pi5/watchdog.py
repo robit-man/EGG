@@ -359,9 +359,13 @@ class WatchdogManager:
         self._auto_update_enabled = False
         self._port_reclaim_enabled = self._env_flag("WATCHDOG_RECLAIM_PORTS", True)
         self._port_reclaim_force = self._env_flag("WATCHDOG_RECLAIM_FORCE", False)
+        self._tcp_passive_probe = self._env_flag("WATCHDOG_TCP_PASSIVE_PROBE", True)
         self._force_direct = self._env_flag("WATCHDOG_FORCE_DIRECT", False)
 
         self._os_name = platform.system().lower()
+        self._has_passive_tcp_tools = bool(
+            self._os_name == "windows" or shutil.which("lsof") or shutil.which("ss")
+        )
         self._terminal_emulator = self._detect_terminal_emulator()
         if (
             self._os_name not in ("windows", "darwin")
@@ -407,6 +411,11 @@ class WatchdogManager:
             self._log(f"[PORT] Auto reclaim enabled ({reclaim_mode})")
         else:
             self._log("[PORT] Auto reclaim disabled by WATCHDOG_RECLAIM_PORTS")
+        if self._tcp_passive_probe:
+            if self._has_passive_tcp_tools:
+                self._log("[PORT] Passive TCP health probes enabled")
+            else:
+                self._log("[WARN] Passive TCP probes requested, but no lsof/ss; falling back to active connects")
 
     def _load_desired_state(self) -> Dict[str, bool]:
         if not self.state_file.exists():
@@ -902,6 +911,40 @@ class WatchdogManager:
                         ports.add(port)
             except Exception:
                 pass
+        if not ports and shutil.which("ss"):
+            try:
+                result = subprocess.run(
+                    ["ss", "-ltnp"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                pid_pattern = re.compile(r"pid=(\d+)")
+                for raw in (result.stdout or "").splitlines():
+                    line = raw.strip()
+                    if not line or "LISTEN" not in line.upper():
+                        continue
+                    pids = [int(m.group(1)) for m in pid_pattern.finditer(line) if m.group(1)]
+                    if not pids or int(pid) not in pids:
+                        continue
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    local = str(parts[3]).strip()
+                    if local.startswith("[") and "]:" in local:
+                        port_text = local.rsplit("]:", 1)[-1]
+                    else:
+                        port_text = local.rsplit(":", 1)[-1]
+                    try:
+                        port = int(port_text)
+                    except Exception:
+                        continue
+                    if 1 <= port <= 65535:
+                        ports.add(port)
+            except Exception:
+                pass
         return sorted(ports)
 
     def _list_listening_pids_for_port(self, port: int) -> List[int]:
@@ -1258,6 +1301,44 @@ class WatchdogManager:
 
         preferred_port = int(svc.resolved_health_port(self.base_dir) or 0)
         active_port = int((runtime.resolved_health_port if runtime else 0) or preferred_port or 0)
+
+        # Prefer passive TCP health probing by inspecting PID listen sockets.
+        # This avoids creating loopback connections that spam service logs.
+        if (
+            mode == "tcp"
+            and self._tcp_passive_probe
+            and runtime is not None
+            and runtime.pid
+            and runtime.pid > 0
+        ):
+            listening_ports = self._list_listening_ports_for_pid(int(runtime.pid))
+            if listening_ports:
+                selected = 0
+                for candidate in (
+                    active_port,
+                    preferred_port,
+                    int(svc.health_port or 0),
+                ):
+                    if candidate > 0 and candidate in listening_ports:
+                        selected = candidate
+                        break
+                if selected <= 0:
+                    if preferred_port > 0:
+                        selected = min(listening_ports, key=lambda p: (abs(p - preferred_port), p))
+                    else:
+                        selected = int(listening_ports[0])
+
+                if runtime.resolved_health_port != selected:
+                    previous = int(runtime.resolved_health_port or 0)
+                    runtime.resolved_health_port = selected
+                    runtime.last_port_discovery_at = time.time()
+                    if previous > 0 and previous != selected:
+                        self._log(f"[DISCOVER] {svc.label} health probe realigned to port {selected}")
+                return True, f"tcp listen {selected}"
+
+            if self._has_passive_tcp_tools:
+                return False, "tcp not listening"
+
         target = self._build_health_target(svc, port_override=active_port)
         ok, detail = self._probe_target(mode, target)
         if ok:

@@ -168,7 +168,7 @@ else:
                     json.dump(DEFAULT_CONFIG, f, indent=2)
                 return dict(DEFAULT_CONFIG)
             except Exception as e:
-                    logging.error(f"Failed to create {CONFIG_PATH}: {e}")
+                logging.error(f"Failed to create {CONFIG_PATH}: {e}")
                 return dict(DEFAULT_CONFIG)
         else:
             try:
@@ -180,7 +180,7 @@ else:
                         cfg[key] = value
                 return cfg
             except Exception as e:
-                logging.error(f"Error loading config.json: {e}. Using default settings.")
+                logging.error(f"Error loading {CONFIG_PATH}: {e}. Using default settings.")
                 return dict(DEFAULT_CONFIG)
     
     CONFIG = load_config()

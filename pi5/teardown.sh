@@ -61,6 +61,7 @@ FILES_TO_REMOVE=(
     "$TARGET_DIR/glados_piper_medium.onnx.json"
     "$TARGET_DIR/chat.json"
     "$TARGET_DIR/config.json"
+    "$TARGET_DIR/llm_bridge_config.json"
 )
 
 DIRS_TO_REMOVE=(

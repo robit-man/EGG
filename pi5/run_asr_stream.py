@@ -63,6 +63,10 @@ def _ensure_whispercpp_available(python_exe: str, base_dir: str) -> bool:
         wheel_candidates = []
 
     try:
+        subprocess.run([python_exe, "-m", "ensurepip", "--upgrade"], check=False)
+    except Exception:
+        pass
+    try:
         subprocess.run([python_exe, "-m", "pip", "install", "--upgrade", "pip"], check=False)
     except Exception:
         pass

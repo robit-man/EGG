@@ -23,8 +23,13 @@ copy_file() {
 }
 
 # Whisper runtime
-if [ -d "$REPO_DIR/pi5/whisper/whispercpp" ] && [ ! -d "$TARGET_DIR/whispercpp" ]; then
-    cp -r "$REPO_DIR/pi5/whisper/whispercpp" "$TARGET_DIR/"
+if [ -d "$REPO_DIR/pi5/whisper/whispercpp" ]; then
+    if command -v rsync > /dev/null 2>&1; then
+        rsync -a --delete "$REPO_DIR/pi5/whisper/whispercpp/" "$TARGET_DIR/whispercpp/"
+    else
+        rm -rf "$TARGET_DIR/whispercpp"
+        cp -r "$REPO_DIR/pi5/whisper/whispercpp" "$TARGET_DIR/"
+    fi
 fi
 
 # Piper scripts and dockerfile

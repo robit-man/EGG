@@ -49,7 +49,7 @@ def setup_venv(online=True):
     if not os.path.isdir(VENV_DIR):
         logging.info("Creating virtual environment...")
         try:
-            subprocess.check_call([sys.executable, '-m', 'venv', VENV_DIR])
+            subprocess.check_call([sys.executable, '-m', 'venv', '--system-site-packages', VENV_DIR])
             logging.info("Virtual environment created successfully.")
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to create virtual environment: {e}")

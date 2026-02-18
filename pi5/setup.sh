@@ -106,8 +106,15 @@ ensure_whisper_venv() {
     pip install --upgrade pip || true
     pip install build || true
     if ls "$WHISPERCPP_DIR"/dist/*.whl > /dev/null 2>&1; then
-        local wheel_path
-        wheel_path="$(ls -1 "$WHISPERCPP_DIR"/dist/*.whl | head -n 1)"
+        local wheel_path=""
+        local arch
+        arch="$(uname -m 2>/dev/null || true)"
+        if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
+            wheel_path="$(ls -1 "$WHISPERCPP_DIR"/dist/*aarch64*.whl 2>/dev/null | head -n 1 || true)"
+        fi
+        if [ -z "$wheel_path" ]; then
+            wheel_path="$(ls -1 "$WHISPERCPP_DIR"/dist/*.whl | head -n 1)"
+        fi
         echo "[SETUP] Installing whispercpp wheel: $wheel_path"
         pip install --force-reinstall --no-deps "$wheel_path" || true
     else
@@ -167,6 +174,9 @@ upgrade_system_and_install_prereqs() {
         python3 \
         python3-venv \
         python3-pip \
+        python3-requests \
+        python3-num2words \
+        python3-alsaaudio \
         python3-psutil \
         python3-dev \
         nodejs \

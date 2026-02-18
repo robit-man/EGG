@@ -209,23 +209,67 @@ class CameraFeed:
         self._last_error: str = ""
         self._picam = None
         self._cap = None
+        self._backend_name = "unknown"
+        self._reopen_attempts = 0
+        self._consecutive_failures = 0
 
     def _open(self) -> None:
-        if self.use_picamera2:
-            self._picam = Picamera2(self.cfg.index)
-            conf = self._picam.create_video_configuration(
-                main={"size": (self.cfg.width, self.cfg.height)}
-            )
-            self._picam.configure(conf)
-            self._picam.start()
-            return
+        self._close()
 
-        self._cap = cv2.VideoCapture(self.cfg.index)
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
-        self._cap.set(cv2.CAP_PROP_FPS, self.target_fps)
-        if not self._cap.isOpened():
-            raise RuntimeError(f"OpenCV camera open failed (index={self.cfg.index})")
+        if self.use_picamera2:
+            try:
+                self._picam = Picamera2(self.cfg.index)
+                conf = self._picam.create_video_configuration(
+                    main={"size": (self.cfg.width, self.cfg.height)}
+                )
+                self._picam.configure(conf)
+                self._picam.start()
+                self._backend_name = "picamera2"
+                return
+            except Exception as exc:
+                self._last_error = f"Picamera2 open failed; falling back to OpenCV: {exc}"
+                self._picam = None
+
+        open_errors = []
+        attempts = []
+        if hasattr(cv2, "CAP_V4L2"):
+            attempts.append(("opencv-v4l2", lambda: cv2.VideoCapture(self.cfg.index, cv2.CAP_V4L2)))
+        attempts.append(("opencv-default", lambda: cv2.VideoCapture(self.cfg.index)))
+
+        for backend_name, opener in attempts:
+            cap = None
+            try:
+                cap = opener()
+                if cap is None or not cap.isOpened():
+                    raise RuntimeError("capture not opened")
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
+                cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+
+                warm_ok = False
+                for _ in range(8):
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        warm_ok = True
+                        break
+                    time.sleep(0.03)
+                if not warm_ok:
+                    raise RuntimeError("open succeeded but warmup read failed")
+
+                self._cap = cap
+                self._backend_name = backend_name
+                return
+            except Exception as exc:
+                open_errors.append(f"{backend_name}: {exc}")
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+
+        raise RuntimeError(
+            f"OpenCV camera open failed (index={self.cfg.index}) [{'; '.join(open_errors)}]"
+        )
 
     def _close(self) -> None:
         try:
@@ -261,10 +305,18 @@ class CameraFeed:
 
         if self._cap is None:
             raise RuntimeError("OpenCV capture is not initialized")
-        ok, frame = self._cap.read()
-        if not ok or frame is None:
-            raise RuntimeError("OpenCV read failed")
-        return frame
+        for _ in range(3):
+            ok, frame = self._cap.read()
+            if ok and frame is not None:
+                return frame
+            time.sleep(0.02)
+        raise RuntimeError(f"OpenCV read failed ({self._backend_name})")
+
+    def _reopen_capture(self) -> None:
+        self._reopen_attempts += 1
+        self._close()
+        time.sleep(0.2)
+        self._open()
 
     def _run(self) -> None:
         interval = 1.0 / float(self.target_fps)
@@ -286,9 +338,23 @@ class CameraFeed:
                     self._last_frame_at = time.time()
                     self._frames += 1
                     self._last_error = ""
+                    self._consecutive_failures = 0
             except Exception as exc:
+                should_reopen = False
                 with self._lock:
                     self._last_error = str(exc)
+                    self._consecutive_failures += 1
+                    if self._consecutive_failures >= 5:
+                        should_reopen = True
+                if should_reopen:
+                    try:
+                        self._reopen_capture()
+                        with self._lock:
+                            self._consecutive_failures = 0
+                            self._last_error = "Capture reopened after repeated read failures"
+                    except Exception as reopen_exc:
+                        with self._lock:
+                            self._last_error = f"{exc}; reopen failed: {reopen_exc}"
                 time.sleep(0.25)
             elapsed = time.time() - start
             if elapsed < interval:
@@ -327,7 +393,8 @@ class CameraFeed:
                 "frames": int(self._frames),
                 "last_frame_age_seconds": round(age, 3) if age >= 0 else None,
                 "last_error": self._last_error,
-                "backend": "picamera2" if self._picam is not None else "opencv",
+                "backend": self._backend_name,
+                "reopen_attempts": int(self._reopen_attempts),
             }
 
 

@@ -192,34 +192,89 @@ configs = [
     ("camera_router_config.json", ("camera_router", "network", "listen_host")),
     ("pipeline_api_config.json", ("pipeline_api", "network", "listen_host")),
 ]
+security_defaults = [
+    ("camera_router_config.json", ("camera_router", "security"), {
+        "password": "egg",
+        "require_auth": True,
+        "session_timeout": 300,
+    }),
+    ("pipeline_api_config.json", ("pipeline_api", "security"), {
+        "password": "egg",
+        "require_auth": True,
+        "session_timeout": 300,
+    }),
+]
 
-def update_config(path, key_path):
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path, "r", encoding="utf-8") as fp:
-            payload = json.load(fp)
-    except Exception:
-        return
+def update_bind_host(payload, key_path):
+    changed = False
     current = payload
     for key in key_path[:-1]:
         if not isinstance(current, dict):
-            return
+            return changed
         current = current.get(key)
         if current is None:
-            return
+            return changed
     if not isinstance(current, dict):
-        return
+        return changed
     leaf = key_path[-1]
     host = str(current.get(leaf, "")).strip().lower()
     if host in ("", "127.0.0.1", "localhost", "::1"):
         current[leaf] = "0.0.0.0"
+        changed = True
+    return changed
+
+def update_security_defaults(payload, key_path, defaults):
+    changed = False
+    current = payload
+    for key in key_path:
+        if not isinstance(current, dict):
+            return changed
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+            changed = True
+        current = current[key]
+    if not isinstance(current, dict):
+        return changed
+    for key, default_value in defaults.items():
+        value = current.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            current[key] = default_value
+            changed = True
+    return changed
+
+def load_payload(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+    except Exception:
+        return {}
+
+for filename, key_path in configs:
+    path = os.path.join(target_dir, filename)
+    payload = load_payload(path)
+    if payload is None:
+        continue
+    changed = update_bind_host(payload, key_path)
+    if changed:
         with open(path, "w", encoding="utf-8") as fp:
             json.dump(payload, fp, indent=2)
         print(f"[SETUP] Updated bind host to 0.0.0.0 in {path}")
 
-for filename, key_path in configs:
-    update_config(os.path.join(target_dir, filename), key_path)
+for filename, key_path, defaults in security_defaults:
+    path = os.path.join(target_dir, filename)
+    payload = load_payload(path)
+    if payload is None:
+        continue
+    changed = update_security_defaults(payload, key_path, defaults)
+    if changed:
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2)
+        print(f"[SETUP] Applied security defaults in {path}")
 PY
 }
 

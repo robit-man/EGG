@@ -8,13 +8,15 @@ Pi5 camera router:
 
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
 import threading
 import time
+from functools import wraps
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 
 CAMERA_VENV_DIR_NAME = "camera_router_venv"
@@ -62,18 +64,21 @@ ensure_venv()
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 UI_AVAILABLE = False
 TerminalUI = None
+ConfigSpec = None
+CategorySpec = None
+SettingSpec = None
 ui = None
 
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 try:
-    from terminal_ui import TerminalUI
+    from terminal_ui import CategorySpec, ConfigSpec, SettingSpec, TerminalUI
 
     UI_AVAILABLE = True
 except Exception:
@@ -88,6 +93,9 @@ try:
 except Exception:
     PICAMERA2_AVAILABLE = False
 
+DEFAULT_PASSWORD = "egg"
+DEFAULT_SESSION_TIMEOUT = 300
+DEFAULT_REQUIRE_AUTH = True
 
 DEFAULT_CONFIG = {
     "camera_router": {
@@ -99,6 +107,11 @@ DEFAULT_CONFIG = {
             "jpeg_quality": 75,
             "target_fps": 15,
             "use_picamera2": True,
+        },
+        "security": {
+            "password": DEFAULT_PASSWORD,
+            "session_timeout": DEFAULT_SESSION_TIMEOUT,
+            "require_auth": DEFAULT_REQUIRE_AUTH,
         },
         "cameras": [
             {
@@ -148,6 +161,26 @@ def _merge_defaults(config: dict, defaults: dict) -> dict:
 
     walk("", defaults)
     return merged
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _as_int(value, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    if minimum is not None:
+        parsed = max(int(minimum), parsed)
+    if maximum is not None:
+        parsed = min(int(maximum), parsed)
+    return parsed
 
 
 def load_config() -> dict:
@@ -212,6 +245,9 @@ class CameraFeed:
         self._backend_name = "unknown"
         self._reopen_attempts = 0
         self._consecutive_failures = 0
+        self._avg_jpeg_bytes = 0.0
+        self._stream_clients = 0
+        self._recover_requested = threading.Event()
 
     def _open(self) -> None:
         self._close()
@@ -337,6 +373,11 @@ class CameraFeed:
                     self._frame_jpeg = jpeg
                     self._last_frame_at = time.time()
                     self._frames += 1
+                    jpeg_len = float(len(jpeg))
+                    if self._avg_jpeg_bytes <= 0:
+                        self._avg_jpeg_bytes = jpeg_len
+                    else:
+                        self._avg_jpeg_bytes = (0.85 * self._avg_jpeg_bytes) + (0.15 * jpeg_len)
                     self._last_error = ""
                     self._consecutive_failures = 0
             except Exception as exc:
@@ -356,6 +397,16 @@ class CameraFeed:
                         with self._lock:
                             self._last_error = f"{exc}; reopen failed: {reopen_exc}"
                 time.sleep(0.25)
+            if self._recover_requested.is_set():
+                self._recover_requested.clear()
+                try:
+                    self._reopen_capture()
+                    with self._lock:
+                        self._consecutive_failures = 0
+                        self._last_error = "Capture reopened on manual recovery request"
+                except Exception as recover_exc:
+                    with self._lock:
+                        self._last_error = f"Manual recover failed: {recover_exc}"
             elapsed = time.time() - start
             if elapsed < interval:
                 time.sleep(interval - elapsed)
@@ -379,11 +430,26 @@ class CameraFeed:
         with self._lock:
             return self._frame_jpeg
 
+    def request_recover(self) -> None:
+        self._recover_requested.set()
+
+    def add_stream_client(self) -> None:
+        with self._lock:
+            self._stream_clients += 1
+
+    def remove_stream_client(self) -> None:
+        with self._lock:
+            if self._stream_clients > 0:
+                self._stream_clients -= 1
+
     def status(self) -> dict:
         with self._lock:
             age = time.time() - self._last_frame_at if self._last_frame_at > 0 else -1.0
+            fps = float(self.target_fps) if self._frame_jpeg else 0.0
+            kbps = float(self._avg_jpeg_bytes * max(1.0, fps) * 8.0 / 1000.0) if self._frame_jpeg else 0.0
             return {
                 "id": self.cfg.camera_id,
+                "label": self.cfg.camera_id,
                 "index": self.cfg.index,
                 "enabled": bool(self.cfg.enabled),
                 "online": bool(self._frame_jpeg),
@@ -391,10 +457,34 @@ class CameraFeed:
                 "height": int(self.cfg.height),
                 "rotation": int(self.cfg.rotation),
                 "frames": int(self._frames),
+                "fps": round(fps, 2),
+                "kbps": round(kbps, 2),
+                "clients": int(self._stream_clients),
                 "last_frame_age_seconds": round(age, 3) if age >= 0 else None,
                 "last_error": self._last_error,
                 "backend": self._backend_name,
                 "reopen_attempts": int(self._reopen_attempts),
+                "source_type": "default",
+                "capture_profile": {
+                    "pixel_format": "MJPEG",
+                    "width": int(self.cfg.width),
+                    "height": int(self.cfg.height),
+                    "fps": float(self.target_fps),
+                },
+                "active_capture": {
+                    "backend": self._backend_name,
+                    "width": int(self.cfg.width),
+                    "height": int(self.cfg.height),
+                    "fps": round(fps, 2),
+                },
+                "available_profiles": [
+                    {
+                        "pixel_format": "MJPEG",
+                        "width": int(self.cfg.width),
+                        "height": int(self.cfg.height),
+                        "fps": float(self.target_fps),
+                    }
+                ],
             }
 
 
@@ -433,10 +523,25 @@ listen_port = int(_get_nested(config, "camera_router.network.listen_port", 8080)
 jpeg_quality = int(_get_nested(config, "camera_router.stream.jpeg_quality", 75) or 75)
 target_fps = int(_get_nested(config, "camera_router.stream.target_fps", 15) or 15)
 use_picamera2 = bool(_get_nested(config, "camera_router.stream.use_picamera2", True))
+SESSION_TIMEOUT = _as_int(
+    _get_nested(config, "camera_router.security.session_timeout", DEFAULT_SESSION_TIMEOUT),
+    DEFAULT_SESSION_TIMEOUT,
+    minimum=30,
+    maximum=86400,
+)
+runtime_security = {
+    "password": str(_get_nested(config, "camera_router.security.password", DEFAULT_PASSWORD)).strip() or DEFAULT_PASSWORD,
+    "require_auth": _as_bool(
+        _get_nested(config, "camera_router.security.require_auth", DEFAULT_REQUIRE_AUTH),
+        default=DEFAULT_REQUIRE_AUTH,
+    ),
+}
 
 feeds: Dict[str, CameraFeed] = {}
 startup_time = time.time()
 service_lock = threading.Lock()
+sessions = {}
+sessions_lock = threading.Lock()
 
 for camera_id, camera_cfg in build_camera_configs(config).items():
     feed = CameraFeed(camera_cfg, jpeg_quality=jpeg_quality, target_fps=target_fps, use_picamera2=use_picamera2)
@@ -487,6 +592,97 @@ def _find_feed(camera_id: str) -> Optional[CameraFeed]:
         return feeds.get(camera_id)
 
 
+def _prune_expired_sessions(now: Optional[float] = None) -> int:
+    current = float(now if now is not None else time.time())
+    removed = 0
+    with sessions_lock:
+        expired = [key for key, entry in sessions.items() if current - float(entry.get("last_used", 0.0)) > SESSION_TIMEOUT]
+        for key in expired:
+            sessions.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _create_session() -> str:
+    now = time.time()
+    _prune_expired_sessions(now)
+    key = secrets.token_urlsafe(32)
+    with sessions_lock:
+        sessions[key] = {"created_at": now, "last_used": now}
+    return key
+
+
+def _rotate_sessions() -> Tuple[str, int]:
+    now = time.time()
+    next_key = secrets.token_urlsafe(32)
+    with sessions_lock:
+        invalidated = len(sessions)
+        sessions.clear()
+        sessions[next_key] = {"created_at": now, "last_used": now}
+    return next_key, invalidated
+
+
+def _validate_session(session_key: str) -> bool:
+    key = str(session_key or "").strip()
+    if not key:
+        return False
+    now = time.time()
+    with sessions_lock:
+        entry = sessions.get(key)
+        if not entry:
+            return False
+        last_used = float(entry.get("last_used", 0.0))
+        if now - last_used > SESSION_TIMEOUT:
+            sessions.pop(key, None)
+            return False
+        entry["last_used"] = now
+    return True
+
+
+def _get_session_key_from_request() -> str:
+    key = str(request.args.get("session_key", "")).strip()
+    if key:
+        return key
+    header_key = str(request.headers.get("X-Session-Key", "")).strip()
+    if header_key:
+        return header_key
+    auth_header = str(request.headers.get("Authorization", "")).strip()
+    if auth_header.lower().startswith("bearer "):
+        candidate = auth_header[7:].strip()
+        if candidate:
+            return candidate
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        body_key = str(data.get("session_key", "")).strip()
+        if body_key:
+            return body_key
+    return ""
+
+
+def _auth_required(handler):
+    @wraps(handler)
+    def wrapper(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return Response(status=204)
+        if not runtime_security["require_auth"]:
+            return handler(*args, **kwargs)
+        session_key = _get_session_key_from_request()
+        if not _validate_session(session_key):
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        return handler(*args, **kwargs)
+
+    return wrapper
+
+
+def _security_payload(base_url: str) -> dict:
+    return {
+        "require_auth": bool(runtime_security["require_auth"]),
+        "session_timeout": int(SESSION_TIMEOUT),
+        "auth_url": f"{base_url}/auth",
+        "session_rotate_url": f"{base_url}/session/rotate",
+    }
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(
@@ -496,8 +692,13 @@ def index():
             "routes": {
                 "health": "/health",
                 "list": "/list",
+                "auth": "/auth",
+                "session_rotate": "/session/rotate",
                 "snapshot": "/snapshot/<camera_id>",
+                "jpeg": "/jpeg/<camera_id>",
                 "video": "/video/<camera_id>",
+                "mjpeg": "/mjpeg/<camera_id>",
+                "camera_recover": "/camera/recover",
                 "router_info": "/router_info",
                 "tunnel_info": "/tunnel_info",
             },
@@ -509,6 +710,7 @@ def index():
 def health():
     rows = _status_rows()
     online = sum(1 for row in rows if row.get("online"))
+    local_base, lan_base, publish_base = _endpoint_bases()
     return jsonify(
         {
             "status": "ok",
@@ -520,12 +722,16 @@ def health():
             },
             "camera_count": len(rows),
             "camera_online_count": online,
+            "security": _security_payload(publish_base),
+            "local_security": _security_payload(local_base),
+            "lan_security": _security_payload(lan_base) if lan_base else {},
             "cameras": rows,
         }
     )
 
 
 @app.route("/list", methods=["GET"])
+@_auth_required
 def list_cameras():
     rows = _status_rows()
     local_base, lan_base, publish_base = _endpoint_bases()
@@ -536,11 +742,17 @@ def list_cameras():
             {
                 **row,
                 "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
+                "jpeg_url": f"{publish_base}/jpeg/{camera_id}",
                 "video_url": f"{publish_base}/video/{camera_id}",
+                "mjpeg_url": f"{publish_base}/mjpeg/{camera_id}",
                 "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
+                "local_jpeg_url": f"{local_base}/jpeg/{camera_id}",
                 "local_video_url": f"{local_base}/video/{camera_id}",
+                "local_mjpeg_url": f"{local_base}/mjpeg/{camera_id}",
                 "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
+                "lan_jpeg_url": f"{lan_base}/jpeg/{camera_id}" if lan_base else "",
                 "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
+                "lan_mjpeg_url": f"{lan_base}/mjpeg/{camera_id}" if lan_base else "",
             }
         )
     return jsonify(
@@ -550,12 +762,31 @@ def list_cameras():
             "base_url": publish_base,
             "local_base_url": local_base,
             "lan_base_url": lan_base,
+            "security": _security_payload(publish_base),
+            "local_security": _security_payload(local_base),
+            "lan_security": _security_payload(lan_base) if lan_base else {},
+            "protocols": {
+                "webrtc": False,
+                "mjpeg": True,
+                "jpeg_snapshot": True,
+                "mpegts": False,
+            },
+            "routes": {
+                "auth": "/auth",
+                "session_rotate": "/session/rotate",
+                "camera_recover": "/camera/recover",
+                "snapshot": "/snapshot/<camera_id>",
+                "jpeg": "/jpeg/<camera_id>",
+                "video": "/video/<camera_id>",
+                "mjpeg": "/mjpeg/<camera_id>",
+            },
             "cameras": cameras,
         }
     )
 
 
 @app.route("/snapshot/<camera_id>", methods=["GET"])
+@_auth_required
 def snapshot(camera_id: str):
     feed = _find_feed(camera_id)
     if feed is None:
@@ -567,17 +798,27 @@ def snapshot(camera_id: str):
 
 
 def _video_stream_generator(feed: CameraFeed):
-    while True:
-        frame = feed.snapshot()
-        if frame:
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            )
-        time.sleep(1.0 / float(max(1, target_fps)))
+    feed.add_stream_client()
+    try:
+        while True:
+            try:
+                frame = feed.snapshot()
+                if frame:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                    )
+                time.sleep(1.0 / float(max(1, target_fps)))
+            except GeneratorExit:
+                break
+            except Exception:
+                time.sleep(0.1)
+    finally:
+        feed.remove_stream_client()
 
 
 @app.route("/video/<camera_id>", methods=["GET"])
+@_auth_required
 def video(camera_id: str):
     feed = _find_feed(camera_id)
     if feed is None:
@@ -585,6 +826,80 @@ def video(camera_id: str):
     return Response(
         _video_stream_generator(feed),
         mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.route("/jpeg/<camera_id>", methods=["GET"])
+@_auth_required
+def jpeg(camera_id: str):
+    return snapshot(camera_id)
+
+
+@app.route("/mjpeg/<camera_id>", methods=["GET"])
+@_auth_required
+def mjpeg(camera_id: str):
+    return video(camera_id)
+
+
+@app.route("/camera/recover", methods=["POST"])
+@_auth_required
+def camera_recover():
+    data = request.get_json(silent=True) or {}
+    settle_ms = _as_int(data.get("settle_ms", 350), 350, minimum=0, maximum=5000)
+    reason = str(data.get("reason", "")).strip()
+    requested = []
+    with service_lock:
+        values = list(feeds.values())
+    for feed in values:
+        feed.request_recover()
+        requested.append(feed.cfg.camera_id)
+    if settle_ms > 0:
+        time.sleep(float(settle_ms) / 1000.0)
+    rows = _status_rows()
+    online = sum(1 for row in rows if row.get("online"))
+    return jsonify(
+        {
+            "status": "success",
+            "service": "camera_router",
+            "message": "Recovery requested",
+            "reason": reason,
+            "requested": requested,
+            "after_online": int(online),
+            "after_total": int(len(rows)),
+            "elapsed_ms": int(settle_ms),
+        }
+    )
+
+
+@app.route("/auth", methods=["POST"])
+def auth():
+    data = request.get_json(silent=True) or {}
+    provided = str(data.get("password", "")).strip()
+    if provided == str(runtime_security["password"]):
+        session_key = _create_session()
+        return jsonify(
+            {
+                "status": "success",
+                "session_key": session_key,
+                "timeout": int(SESSION_TIMEOUT),
+                "require_auth": bool(runtime_security["require_auth"]),
+            }
+        )
+    return jsonify({"status": "error", "message": "Invalid password"}), 401
+
+
+@app.route("/session/rotate", methods=["POST"])
+@_auth_required
+def rotate_session():
+    session_key, invalidated = _rotate_sessions()
+    return jsonify(
+        {
+            "status": "success",
+            "message": "Session keys rotated",
+            "session_key": session_key,
+            "invalidated_sessions": int(invalidated),
+            "timeout": int(SESSION_TIMEOUT),
+        }
     )
 
 
@@ -597,6 +912,8 @@ def tunnel_info():
             "service": "camera_router",
             "message": "Tunnel URL is managed by router service",
             "tunnel_url": "",
+            "auth_url": "",
+            "session_rotate_url": "",
         }
     )
 
@@ -612,11 +929,17 @@ def router_info():
             {
                 "id": camera_id,
                 "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
+                "jpeg_url": f"{publish_base}/jpeg/{camera_id}",
                 "video_url": f"{publish_base}/video/{camera_id}",
+                "mjpeg_url": f"{publish_base}/mjpeg/{camera_id}",
                 "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
+                "local_jpeg_url": f"{local_base}/jpeg/{camera_id}",
                 "local_video_url": f"{local_base}/video/{camera_id}",
+                "local_mjpeg_url": f"{local_base}/mjpeg/{camera_id}",
                 "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
+                "lan_jpeg_url": f"{lan_base}/jpeg/{camera_id}" if lan_base else "",
                 "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
+                "lan_mjpeg_url": f"{lan_base}/mjpeg/{camera_id}" if lan_base else "",
                 "online": bool(row.get("online")),
             }
         )
@@ -630,18 +953,47 @@ def router_info():
                 "lan_base_url": lan_base,
                 "listen_host": listen_host,
                 "listen_port": listen_port,
+                "auth_url": f"{publish_base}/auth",
+                "session_rotate_url": f"{publish_base}/session/rotate",
                 "list_url": f"{publish_base}/list",
                 "health_url": f"{publish_base}/health",
+                "camera_recover_url": f"{publish_base}/camera/recover",
                 "local_list_url": f"{local_base}/list",
                 "local_health_url": f"{local_base}/health",
+                "local_auth_url": f"{local_base}/auth",
+                "local_session_rotate_url": f"{local_base}/session/rotate",
+                "local_camera_recover_url": f"{local_base}/camera/recover",
                 "lan_list_url": f"{lan_base}/list" if lan_base else "",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
+                "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
+                "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
+                "lan_camera_recover_url": f"{lan_base}/camera/recover" if lan_base else "",
             },
             "tunnel": {
                 "state": "inactive",
                 "tunnel_url": "",
                 "list_url": "",
                 "health_url": "",
+                "auth_url": "",
+                "session_rotate_url": "",
+            },
+            "security": _security_payload(publish_base),
+            "local_security": _security_payload(local_base),
+            "lan_security": _security_payload(lan_base) if lan_base else {},
+            "protocols": {
+                "webrtc": False,
+                "mjpeg": True,
+                "jpeg_snapshot": True,
+                "mpegts": False,
+            },
+            "routes": {
+                "auth": "/auth",
+                "session_rotate": "/session/rotate",
+                "camera_recover": "/camera/recover",
+                "snapshot": "/snapshot/<camera_id>",
+                "jpeg": "/jpeg/<camera_id>",
+                "video": "/video/<camera_id>",
+                "mjpeg": "/mjpeg/<camera_id>",
             },
             "cameras": camera_routes,
         }
@@ -658,6 +1010,137 @@ def shutdown() -> None:
             pass
 
 
+def _apply_runtime_security(saved_config: dict) -> None:
+    global SESSION_TIMEOUT
+    runtime_security["password"] = (
+        str(_get_nested(saved_config, "camera_router.security.password", runtime_security["password"])).strip()
+        or DEFAULT_PASSWORD
+    )
+    runtime_security["require_auth"] = _as_bool(
+        _get_nested(saved_config, "camera_router.security.require_auth", runtime_security["require_auth"]),
+        default=runtime_security["require_auth"],
+    )
+    SESSION_TIMEOUT = _as_int(
+        _get_nested(saved_config, "camera_router.security.session_timeout", SESSION_TIMEOUT),
+        SESSION_TIMEOUT,
+        minimum=30,
+        maximum=86400,
+    )
+    _prune_expired_sessions()
+    if ui:
+        ui.update_metric("Auth", "Required" if runtime_security["require_auth"] else "Disabled")
+        ui.update_metric("Session Timeout", str(SESSION_TIMEOUT))
+        ui.log("Applied live security updates from config save")
+
+
+def _build_camera_config_spec():
+    if not UI_AVAILABLE:
+        return None
+    return ConfigSpec(
+        label="Camera Router",
+        categories=(
+            CategorySpec(
+                id="network",
+                label="Network",
+                settings=(
+                    SettingSpec(
+                        id="listen_host",
+                        label="Listen Host",
+                        path="camera_router.network.listen_host",
+                        value_type="str",
+                        default="0.0.0.0",
+                        description="Bind host for camera router API.",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="listen_port",
+                        label="Listen Port",
+                        path="camera_router.network.listen_port",
+                        value_type="int",
+                        default=8080,
+                        min_value=1,
+                        max_value=65535,
+                        description="Bind port for camera router API.",
+                        restart_required=True,
+                    ),
+                ),
+            ),
+            CategorySpec(
+                id="stream",
+                label="Stream",
+                settings=(
+                    SettingSpec(
+                        id="jpeg_quality",
+                        label="JPEG Quality",
+                        path="camera_router.stream.jpeg_quality",
+                        value_type="int",
+                        default=75,
+                        min_value=30,
+                        max_value=95,
+                        description="JPEG quality for MJPEG/jpg responses.",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="target_fps",
+                        label="Target FPS",
+                        path="camera_router.stream.target_fps",
+                        value_type="int",
+                        default=15,
+                        min_value=1,
+                        max_value=60,
+                        description="Target frame rate for capture and stream pacing.",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="use_picamera2",
+                        label="Use Picamera2",
+                        path="camera_router.stream.use_picamera2",
+                        value_type="bool",
+                        default=True,
+                        description="Prefer Picamera2 backend before OpenCV fallback.",
+                        restart_required=True,
+                    ),
+                ),
+            ),
+            CategorySpec(
+                id="security",
+                label="Security",
+                settings=(
+                    SettingSpec(
+                        id="password",
+                        label="Password",
+                        path="camera_router.security.password",
+                        value_type="secret",
+                        default=DEFAULT_PASSWORD,
+                        description="Password used by /auth.",
+                        restart_required=False,
+                    ),
+                    SettingSpec(
+                        id="session_timeout",
+                        label="Session Timeout",
+                        path="camera_router.security.session_timeout",
+                        value_type="int",
+                        default=DEFAULT_SESSION_TIMEOUT,
+                        min_value=30,
+                        max_value=86400,
+                        description="Seconds before idle session keys expire.",
+                        restart_required=False,
+                    ),
+                    SettingSpec(
+                        id="require_auth",
+                        label="Require Auth",
+                        path="camera_router.security.require_auth",
+                        value_type="bool",
+                        default=DEFAULT_REQUIRE_AUTH,
+                        description="Require session_key on camera routes.",
+                        restart_required=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 def _ui_metrics_loop() -> None:
     while ui and ui.running:
         rows = _status_rows()
@@ -670,6 +1153,8 @@ def _ui_metrics_loop() -> None:
         ui.update_metric("Public URL", publish_base)
         ui.update_metric("Cameras", f"{online}/{len(rows)}")
         ui.update_metric("Backend", "picamera2" if (PICAMERA2_AVAILABLE and use_picamera2) else "opencv")
+        ui.update_metric("Auth", "Required" if runtime_security["require_auth"] else "Disabled")
+        ui.update_metric("Session Timeout", str(SESSION_TIMEOUT))
         time.sleep(1.0)
 
 
@@ -677,7 +1162,13 @@ def main() -> int:
     global ui
     try:
         if UI_AVAILABLE:
-            ui = TerminalUI("Camera Router", config_path=CONFIG_PATH, refresh_interval_ms=700)
+            ui = TerminalUI(
+                "Camera Router",
+                config_spec=_build_camera_config_spec(),
+                config_path=CONFIG_PATH,
+                refresh_interval_ms=700,
+            )
+            ui.on_save(_apply_runtime_security)
             ui.log(f"Starting camera router on {listen_host}:{listen_port}")
             local_base, lan_base, _ = _endpoint_bases()
             ui.log(f"Local URL: {local_base}")

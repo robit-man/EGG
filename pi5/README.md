@@ -29,7 +29,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 
 - `watchdog.py`: toggles services and keeps them alive
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
-- `camera_router.py`: camera list/snapshot/video routes + terminal dashboard
+- `camera_router.py`: camera list/snapshot/video (+ `/mjpeg` and `/jpeg`) routes + terminal dashboard
 - `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
@@ -38,14 +38,19 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
-- `8080` camera router (`/list`, `/snapshot/cam0`, `/video/cam0`)
-- `6590` pipeline API (`/health`, `/llm/prompt`, `/tts/speak`)
+- `8080` camera router (`/auth`, `/list`, `/snapshot/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`)
+- `6590` pipeline API (`/auth`, `/list`, `/health`, `/llm/prompt`, `/tts/speak`)
 - `6545` model bridge (`model_to_tts.py`)
 - `6434` voice server (`voice_server.py` via Docker)
 - `6353` audio output (`output.py`)
 - `11434` ollama (`ollama serve`)
 
 All Flask services bind to `0.0.0.0` so you can use the Pi LAN IP from other devices.
+
+Default service auth:
+- `camera_router.py` password defaults to `egg`
+- `pipeline_api.py` password defaults to `egg`
+- change either in `camera_router_config.json` / `pipeline_api_config.json`, or from each service terminal UI under `Security`
 
 ## Installation and Runtime
 

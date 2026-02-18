@@ -8,11 +8,14 @@ HTTP bridge for Pi5 speech stack:
 
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
 import threading
 import time
+from functools import wraps
+from typing import Optional, Tuple
 
 
 PIPELINE_VENV_DIR_NAME = "pipeline_api_venv"
@@ -63,18 +66,24 @@ from flask_cors import CORS
 
 UI_AVAILABLE = False
 TerminalUI = None
+ConfigSpec = None
+CategorySpec = None
+SettingSpec = None
 ui = None
 
 SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 try:
-    from terminal_ui import TerminalUI
+    from terminal_ui import CategorySpec, ConfigSpec, SettingSpec, TerminalUI
 
     UI_AVAILABLE = True
 except Exception:
     UI_AVAILABLE = False
 
+DEFAULT_PASSWORD = "egg"
+DEFAULT_SESSION_TIMEOUT = 300
+DEFAULT_REQUIRE_AUTH = True
 
 DEFAULT_CONFIG = {
     "pipeline_api": {
@@ -94,6 +103,11 @@ DEFAULT_CONFIG = {
         "limits": {
             "prompt_max_chars": 2000,
             "socket_timeout_seconds": 8.0,
+        },
+        "security": {
+            "password": DEFAULT_PASSWORD,
+            "session_timeout": DEFAULT_SESSION_TIMEOUT,
+            "require_auth": DEFAULT_REQUIRE_AUTH,
         },
     }
 }
@@ -135,6 +149,38 @@ def _merge_defaults(config: dict, defaults: dict) -> dict:
     return merged
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _as_int(value, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    if minimum is not None:
+        parsed = max(int(minimum), parsed)
+    if maximum is not None:
+        parsed = min(int(maximum), parsed)
+    return parsed
+
+
+def _as_float(value, default: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(default)
+    if minimum is not None:
+        parsed = max(float(minimum), parsed)
+    if maximum is not None:
+        parsed = min(float(maximum), parsed)
+    return parsed
+
+
 def load_config() -> dict:
     if not os.path.exists(CONFIG_PATH):
         save_config(DEFAULT_CONFIG)
@@ -174,6 +220,21 @@ ollama_health_url = (
 )
 prompt_max_chars = int(_get_nested(cfg, "pipeline_api.limits.prompt_max_chars", 2000) or 2000)
 socket_timeout = float(_get_nested(cfg, "pipeline_api.limits.socket_timeout_seconds", 8.0) or 8.0)
+SESSION_TIMEOUT = _as_int(
+    _get_nested(cfg, "pipeline_api.security.session_timeout", DEFAULT_SESSION_TIMEOUT),
+    DEFAULT_SESSION_TIMEOUT,
+    minimum=30,
+    maximum=86400,
+)
+runtime_security = {
+    "password": str(_get_nested(cfg, "pipeline_api.security.password", DEFAULT_PASSWORD)).strip() or DEFAULT_PASSWORD,
+    "require_auth": _as_bool(
+        _get_nested(cfg, "pipeline_api.security.require_auth", DEFAULT_REQUIRE_AUTH),
+        default=DEFAULT_REQUIRE_AUTH,
+    ),
+}
+sessions = {}
+sessions_lock = threading.Lock()
 startup_time = time.time()
 
 
@@ -263,6 +324,97 @@ def _endpoint_bases():
     return local_base, lan_base, publish_base
 
 
+def _prune_expired_sessions(now: Optional[float] = None) -> int:
+    current = float(now if now is not None else time.time())
+    removed = 0
+    with sessions_lock:
+        expired = [key for key, entry in sessions.items() if current - float(entry.get("last_used", 0.0)) > SESSION_TIMEOUT]
+        for key in expired:
+            sessions.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _create_session() -> str:
+    now = time.time()
+    _prune_expired_sessions(now)
+    key = secrets.token_urlsafe(32)
+    with sessions_lock:
+        sessions[key] = {"created_at": now, "last_used": now}
+    return key
+
+
+def _rotate_sessions() -> Tuple[str, int]:
+    now = time.time()
+    key = secrets.token_urlsafe(32)
+    with sessions_lock:
+        invalidated = len(sessions)
+        sessions.clear()
+        sessions[key] = {"created_at": now, "last_used": now}
+    return key, invalidated
+
+
+def _validate_session(session_key: str) -> bool:
+    key = str(session_key or "").strip()
+    if not key:
+        return False
+    now = time.time()
+    with sessions_lock:
+        entry = sessions.get(key)
+        if not entry:
+            return False
+        last_used = float(entry.get("last_used", 0.0))
+        if now - last_used > SESSION_TIMEOUT:
+            sessions.pop(key, None)
+            return False
+        entry["last_used"] = now
+    return True
+
+
+def _get_session_key_from_request() -> str:
+    key = str(request.args.get("session_key", "")).strip()
+    if key:
+        return key
+    header_key = str(request.headers.get("X-Session-Key", "")).strip()
+    if header_key:
+        return header_key
+    auth_header = str(request.headers.get("Authorization", "")).strip()
+    if auth_header.lower().startswith("bearer "):
+        candidate = auth_header[7:].strip()
+        if candidate:
+            return candidate
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        body_key = str(data.get("session_key", "")).strip()
+        if body_key:
+            return body_key
+    return ""
+
+
+def _auth_required(handler):
+    @wraps(handler)
+    def wrapper(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return ("", 204)
+        if not runtime_security["require_auth"]:
+            return handler(*args, **kwargs)
+        session_key = _get_session_key_from_request()
+        if not _validate_session(session_key):
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        return handler(*args, **kwargs)
+
+    return wrapper
+
+
+def _security_payload(base_url: str) -> dict:
+    return {
+        "require_auth": bool(runtime_security["require_auth"]),
+        "session_timeout": int(SESSION_TIMEOUT),
+        "auth_url": f"{base_url}/auth",
+        "session_rotate_url": f"{base_url}/session/rotate",
+    }
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(
@@ -272,6 +424,8 @@ def index():
             "routes": {
                 "health": "/health",
                 "list": "/list",
+                "auth": "/auth",
+                "session_rotate": "/session/rotate",
                 "router_info": "/router_info",
                 "tunnel_info": "/tunnel_info",
                 "llm_prompt": "/llm/prompt",
@@ -284,18 +438,23 @@ def index():
 @app.route("/health", methods=["GET"])
 def health():
     stack = _stack_status()
+    local_base, lan_base, publish_base = _endpoint_bases()
     return jsonify(
         {
             "status": "ok",
             "service": "pipeline_api",
             "uptime_seconds": round(time.time() - startup_time, 2),
             "ready": bool(stack["llm_bridge"]["ready"] and stack["tts_server"]["ready"] and stack["audio_output"]["ready"]),
+            "security": _security_payload(publish_base),
+            "local_security": _security_payload(local_base),
+            "lan_security": _security_payload(lan_base) if lan_base else {},
             "stack": stack,
         }
     )
 
 
 @app.route("/list", methods=["GET"])
+@_auth_required
 def list_routes():
     local_base, lan_base, publish_base = _endpoint_bases()
     return jsonify(
@@ -305,15 +464,30 @@ def list_routes():
             "base_url": publish_base,
             "local_base_url": local_base,
             "lan_base_url": lan_base,
+            "security": _security_payload(publish_base),
+            "local_security": _security_payload(local_base),
+            "lan_security": _security_payload(lan_base) if lan_base else {},
+            "routes": {
+                "auth": "/auth",
+                "session_rotate": "/session/rotate",
+                "llm_prompt": "/llm/prompt",
+                "tts_speak": "/tts/speak",
+            },
             "endpoints": {
                 "health_url": f"{publish_base}/health",
+                "auth_url": f"{publish_base}/auth",
+                "session_rotate_url": f"{publish_base}/session/rotate",
                 "llm_prompt_url": f"{publish_base}/llm/prompt",
                 "tts_speak_url": f"{publish_base}/tts/speak",
                 "router_info_url": f"{publish_base}/router_info",
                 "local_health_url": f"{local_base}/health",
+                "local_auth_url": f"{local_base}/auth",
+                "local_session_rotate_url": f"{local_base}/session/rotate",
                 "local_llm_prompt_url": f"{local_base}/llm/prompt",
                 "local_tts_speak_url": f"{local_base}/tts/speak",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
+                "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
+                "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                 "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
             },
@@ -322,6 +496,7 @@ def list_routes():
 
 
 @app.route("/llm/prompt", methods=["POST"])
+@_auth_required
 def llm_prompt():
     data = request.get_json(silent=True) or {}
     prompt = str(data.get("prompt", "")).strip()
@@ -337,6 +512,7 @@ def llm_prompt():
 
 
 @app.route("/tts/speak", methods=["POST"])
+@_auth_required
 def tts_speak():
     data = request.get_json(silent=True) or {}
     prompt = str(data.get("prompt", "")).strip()
@@ -351,6 +527,38 @@ def tts_speak():
     return jsonify({"status": "success", "message": "TTS prompt forwarded"})
 
 
+@app.route("/auth", methods=["POST"])
+def auth():
+    data = request.get_json(silent=True) or {}
+    provided = str(data.get("password", "")).strip()
+    if provided == str(runtime_security["password"]):
+        session_key = _create_session()
+        return jsonify(
+            {
+                "status": "success",
+                "session_key": session_key,
+                "timeout": int(SESSION_TIMEOUT),
+                "require_auth": bool(runtime_security["require_auth"]),
+            }
+        )
+    return jsonify({"status": "error", "message": "Invalid password"}), 401
+
+
+@app.route("/session/rotate", methods=["POST"])
+@_auth_required
+def rotate_session():
+    next_key, invalidated = _rotate_sessions()
+    return jsonify(
+        {
+            "status": "success",
+            "message": "Session keys rotated",
+            "session_key": next_key,
+            "invalidated_sessions": int(invalidated),
+            "timeout": int(SESSION_TIMEOUT),
+        }
+    )
+
+
 @app.route("/tunnel_info", methods=["GET"])
 def tunnel_info():
     return jsonify(
@@ -359,6 +567,8 @@ def tunnel_info():
             "service": "pipeline_api",
             "message": "Tunnel URL is managed by router service",
             "tunnel_url": "",
+            "auth_url": "",
+            "session_rotate_url": "",
         }
     )
 
@@ -377,14 +587,20 @@ def router_info():
                 "lan_base_url": lan_base,
                 "listen_host": listen_host,
                 "listen_port": listen_port,
+                "auth_url": f"{publish_base}/auth",
+                "session_rotate_url": f"{publish_base}/session/rotate",
                 "list_url": f"{publish_base}/list",
                 "health_url": f"{publish_base}/health",
                 "llm_prompt_url": f"{publish_base}/llm/prompt",
                 "tts_speak_url": f"{publish_base}/tts/speak",
+                "local_auth_url": f"{local_base}/auth",
+                "local_session_rotate_url": f"{local_base}/session/rotate",
                 "local_list_url": f"{local_base}/list",
                 "local_health_url": f"{local_base}/health",
                 "local_llm_prompt_url": f"{local_base}/llm/prompt",
                 "local_tts_speak_url": f"{local_base}/tts/speak",
+                "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
+                "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                 "lan_list_url": f"{lan_base}/list" if lan_base else "",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
                 "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
@@ -393,13 +609,160 @@ def router_info():
             "tunnel": {
                 "state": "inactive",
                 "tunnel_url": "",
+                "auth_url": "",
+                "session_rotate_url": "",
                 "list_url": "",
                 "health_url": "",
                 "llm_prompt_url": "",
                 "tts_speak_url": "",
             },
+            "security": _security_payload(publish_base),
+            "local_security": _security_payload(local_base),
+            "lan_security": _security_payload(lan_base) if lan_base else {},
+            "routes": {
+                "auth": "/auth",
+                "session_rotate": "/session/rotate",
+                "llm_prompt": "/llm/prompt",
+                "tts_speak": "/tts/speak",
+            },
             "stack": stack,
         }
+    )
+
+
+def _apply_runtime_security(saved_config: dict) -> None:
+    global SESSION_TIMEOUT, prompt_max_chars, socket_timeout
+    runtime_security["password"] = (
+        str(_get_nested(saved_config, "pipeline_api.security.password", runtime_security["password"])).strip()
+        or DEFAULT_PASSWORD
+    )
+    runtime_security["require_auth"] = _as_bool(
+        _get_nested(saved_config, "pipeline_api.security.require_auth", runtime_security["require_auth"]),
+        default=runtime_security["require_auth"],
+    )
+    SESSION_TIMEOUT = _as_int(
+        _get_nested(saved_config, "pipeline_api.security.session_timeout", SESSION_TIMEOUT),
+        SESSION_TIMEOUT,
+        minimum=30,
+        maximum=86400,
+    )
+    prompt_max_chars = _as_int(
+        _get_nested(saved_config, "pipeline_api.limits.prompt_max_chars", prompt_max_chars),
+        prompt_max_chars,
+        minimum=64,
+        maximum=64000,
+    )
+    socket_timeout = _as_float(
+        _get_nested(saved_config, "pipeline_api.limits.socket_timeout_seconds", socket_timeout),
+        socket_timeout,
+        minimum=0.1,
+        maximum=120.0,
+    )
+    _prune_expired_sessions()
+    if ui:
+        ui.update_metric("Auth", "Required" if runtime_security["require_auth"] else "Disabled")
+        ui.update_metric("Session Timeout", str(SESSION_TIMEOUT))
+        ui.update_metric("Prompt Max", str(prompt_max_chars))
+        ui.update_metric("Sock Timeout", f"{socket_timeout:.1f}s")
+        ui.log("Applied live security updates from config save")
+
+
+def _build_pipeline_config_spec():
+    if not UI_AVAILABLE:
+        return None
+    return ConfigSpec(
+        label="Pipeline API",
+        categories=(
+            CategorySpec(
+                id="network",
+                label="Network",
+                settings=(
+                    SettingSpec(
+                        id="listen_host",
+                        label="Listen Host",
+                        path="pipeline_api.network.listen_host",
+                        value_type="str",
+                        default="0.0.0.0",
+                        description="Bind host for pipeline API.",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="listen_port",
+                        label="Listen Port",
+                        path="pipeline_api.network.listen_port",
+                        value_type="int",
+                        default=6590,
+                        min_value=1,
+                        max_value=65535,
+                        description="Bind port for pipeline API.",
+                        restart_required=True,
+                    ),
+                ),
+            ),
+            CategorySpec(
+                id="limits",
+                label="Limits",
+                settings=(
+                    SettingSpec(
+                        id="prompt_max_chars",
+                        label="Prompt Max Chars",
+                        path="pipeline_api.limits.prompt_max_chars",
+                        value_type="int",
+                        default=2000,
+                        min_value=64,
+                        max_value=64000,
+                        description="Maximum accepted prompt length.",
+                        restart_required=False,
+                    ),
+                    SettingSpec(
+                        id="socket_timeout_seconds",
+                        label="Socket Timeout",
+                        path="pipeline_api.limits.socket_timeout_seconds",
+                        value_type="float",
+                        default=8.0,
+                        min_value=0.1,
+                        max_value=120.0,
+                        description="Forwarding timeout for llm/tts sockets.",
+                        restart_required=False,
+                    ),
+                ),
+            ),
+            CategorySpec(
+                id="security",
+                label="Security",
+                settings=(
+                    SettingSpec(
+                        id="password",
+                        label="Password",
+                        path="pipeline_api.security.password",
+                        value_type="secret",
+                        default=DEFAULT_PASSWORD,
+                        description="Password used by /auth.",
+                        restart_required=False,
+                    ),
+                    SettingSpec(
+                        id="session_timeout",
+                        label="Session Timeout",
+                        path="pipeline_api.security.session_timeout",
+                        value_type="int",
+                        default=DEFAULT_SESSION_TIMEOUT,
+                        min_value=30,
+                        max_value=86400,
+                        description="Seconds before idle session keys expire.",
+                        restart_required=False,
+                    ),
+                    SettingSpec(
+                        id="require_auth",
+                        label="Require Auth",
+                        path="pipeline_api.security.require_auth",
+                        value_type="bool",
+                        default=DEFAULT_REQUIRE_AUTH,
+                        description="Require session_key on protected routes.",
+                        restart_required=False,
+                    ),
+                ),
+            ),
+        ),
     )
 
 
@@ -418,13 +781,23 @@ def _ui_metrics_loop() -> None:
         ui.update_metric("TTS", "ready" if stack["tts_server"]["ready"] else "waiting")
         ui.update_metric("Audio", "ready" if stack["audio_output"]["ready"] else "waiting")
         ui.update_metric("Ollama", "ready" if stack["ollama"]["ready"] else "waiting")
+        ui.update_metric("Auth", "Required" if runtime_security["require_auth"] else "Disabled")
+        ui.update_metric("Session Timeout", str(SESSION_TIMEOUT))
+        ui.update_metric("Prompt Max", str(prompt_max_chars))
+        ui.update_metric("Sock Timeout", f"{socket_timeout:.1f}s")
         time.sleep(1.0)
 
 
 def main() -> int:
     global ui
     if UI_AVAILABLE:
-        ui = TerminalUI("Pipeline API", config_path=CONFIG_PATH, refresh_interval_ms=700)
+        ui = TerminalUI(
+            "Pipeline API",
+            config_spec=_build_pipeline_config_spec(),
+            config_path=CONFIG_PATH,
+            refresh_interval_ms=700,
+        )
+        ui.on_save(_apply_runtime_security)
         ui.log(f"Starting pipeline API on {listen_host}:{listen_port}")
         local_base, lan_base, _ = _endpoint_bases()
         ui.log(f"Local URL: {local_base}")

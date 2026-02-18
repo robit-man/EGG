@@ -18,6 +18,21 @@ DEFAULT_RATE = 22050
 DEFAULT_CHANNELS = 1
 DEFAULT_VOLUME = 0.2
 MAX_PIP_ATTEMPTS = 3
+VERBOSE_CONNECTION_LOGS = str(os.environ.get("OUTPUT_VERBOSE_CONNECTION_LOGS", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def _log(message):
+    print(str(message), flush=True)
+
+
+def _debug(message):
+    if VERBOSE_CONNECTION_LOGS:
+        _log(message)
 
 
 def _get_nested(data, path, default=None):
@@ -119,7 +134,7 @@ def is_venv():
 
 def create_venv():
     if not os.path.exists(VENV_DIR):
-        print(f"Creating virtual environment in {VENV_DIR}...")
+        _log(f"Creating virtual environment in {VENV_DIR}...")
         subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
 
 
@@ -130,23 +145,23 @@ def install_dependencies():
         pip_executable = os.path.join(VENV_DIR, "bin", "pip")
 
     if not os.path.exists(pip_executable):
-        print("pip executable not found in the virtual environment.")
+        _log("pip executable not found in the virtual environment.")
         return False
 
-    print("Installing dependencies in the virtual environment...")
+    _log("Installing dependencies in the virtual environment...")
     attempts = 0
     while attempts < MAX_PIP_ATTEMPTS:
         try:
             subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
             subprocess.run([pip_executable, "install", "pyalsaaudio", "numpy"], check=True)
-            print("Dependencies installed successfully.")
+            _log("Dependencies installed successfully.")
             return True
         except subprocess.CalledProcessError as exc:
             attempts += 1
-            print(f"Pip install attempt {attempts} failed: {exc}")
+            _log(f"Pip install attempt {attempts} failed: {exc}")
             if attempts < MAX_PIP_ATTEMPTS:
                 time.sleep(2)
-    print("Maximum pip install attempts reached. Skipping installation.")
+    _log("Maximum pip install attempts reached. Skipping installation.")
     return False
 
 
@@ -179,7 +194,7 @@ def setup_virtual_environment():
         create_venv()
         install_successful = install_dependencies()
         if not install_successful:
-            print("Proceeding without installing dependencies. Ensure they are already installed.")
+            _log("Proceeding without installing dependencies. Ensure they are already installed.")
         relaunch_in_venv()
     else:
         activate_venv()
@@ -187,13 +202,13 @@ def setup_virtual_environment():
             import alsaaudio  # noqa: F401
             import numpy  # noqa: F401
         except ImportError as exc:
-            print(f"Missing dependencies: {exc}")
+            _log(f"Missing dependencies: {exc}")
             install_successful = install_dependencies()
             if not install_successful:
-                print("Proceeding without installing dependencies. Ensure they are already installed.")
+                _log("Proceeding without installing dependencies. Ensure they are already installed.")
 
 
-def handle_client_connection(client_socket, settings):
+def handle_client_connection(client_socket, settings, addr):
     try:
         import alsaaudio
         import numpy as np
@@ -206,19 +221,22 @@ def handle_client_connection(client_socket, settings):
 
         chunk = int(settings["chunk"])
         volume = float(settings["volume"])
+        received_any = False
 
         while True:
             data = client_socket.recv(chunk)
             if not data:
-                print("Client disconnected.")
+                if received_any:
+                    _debug(f"Audio client disconnected: {addr}")
                 break
+            received_any = True
 
             audio_samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
             audio_samples *= volume
             audio_samples = np.clip(audio_samples, -32768, 32767)
             audio_out.write(audio_samples.astype(np.int16).tobytes())
     except Exception as exc:
-        print(f"Error in client connection: {exc}")
+        _log(f"Error in client connection: {exc}")
     finally:
         try:
             client_socket.close()
@@ -236,16 +254,16 @@ def main():
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_socket.bind((settings["listen_host"], int(settings["listen_port"])))
             server_socket.listen(1)
-            print(
+            _log(
                 f"Listening for raw audio on {settings['listen_host']}:{settings['listen_port']} "
                 f"(pcm={settings['pcm_device']} rate={settings['rate']} ch={settings['channels']})..."
             )
 
             client_socket, addr = server_socket.accept()
-            print(f"Connection established with {addr}")
-            handle_client_connection(client_socket, settings)
+            _debug(f"Audio client connected: {addr}")
+            handle_client_connection(client_socket, settings, addr)
         except Exception as exc:
-            print(f"An error occurred: {exc}")
+            _log(f"An error occurred: {exc}")
             time.sleep(5)
         finally:
             if server_socket:

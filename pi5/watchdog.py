@@ -70,6 +70,7 @@ from typing import Deque, Dict, List, Optional, Sequence, Tuple
 WATCHDOG_RUNTIME_DIR_NAME = ".watchdog_runtime"
 WATCHDOG_STATE_FILE_NAME = "service_state.json"
 WATCHDOG_LOCK_FILE_NAME = "watchdog.lock"
+WATCHDOG_SERVICE_LOG_DIR_NAME = "service_logs"
 MONITOR_INTERVAL_SECONDS = 0.25
 STOP_SIGINT_GRACE_SECONDS = 5.0
 STOP_SIGTERM_GRACE_SECONDS = 10.0
@@ -79,6 +80,7 @@ RESTART_BACKOFF_MAX_SECONDS = 20.0
 LAUNCH_GRACE_SECONDS = 3.0
 DEFAULT_ACTIVATION_TIMEOUT_SECONDS = 35.0
 DEFAULT_ACTIVATION_STABILITY_SECONDS = 4.0
+DEFAULT_ACTIVATION_PROBE_INTERVAL_SECONDS = 1.0
 DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 2.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
 HTTP_PROBE_TIMEOUT_SECONDS = 1.5
@@ -228,6 +230,8 @@ class WatchdogManager:
         self.base_dir = base_dir
         self.runtime_dir = self.base_dir / WATCHDOG_RUNTIME_DIR_NAME
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self.service_log_dir = self.runtime_dir / WATCHDOG_SERVICE_LOG_DIR_NAME
+        self.service_log_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.runtime_dir / WATCHDOG_STATE_FILE_NAME
         self.lock_file = self.runtime_dir / WATCHDOG_LOCK_FILE_NAME
 
@@ -275,6 +279,7 @@ class WatchdogManager:
                 config_relpath="audio_router_config.json",
                 config_port_paths=("audio_router.integrations.audio_out_port",),
                 activation_timeout_seconds=300.0,
+                health_check_interval_seconds=6.0,
             ),
             ServiceSpec(
                 "llm_bridge",
@@ -286,6 +291,7 @@ class WatchdogManager:
                 config_relpath="audio_router_config.json",
                 config_port_paths=("audio_router.integrations.llm_port",),
                 activation_timeout_seconds=300.0,
+                health_check_interval_seconds=6.0,
             ),
             ServiceSpec(
                 "tts_voice",
@@ -297,6 +303,7 @@ class WatchdogManager:
                 config_relpath="audio_router_config.json",
                 config_port_paths=("audio_router.integrations.tts_port",),
                 activation_timeout_seconds=240.0,
+                health_check_interval_seconds=6.0,
             ),
             ServiceSpec(
                 "asr_stream",
@@ -711,9 +718,20 @@ class WatchdogManager:
     # ------------------------------------------------------------------
     # Logging helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _sanitize_log_line(message: str) -> str:
+        text = str(message or "")
+        text = text.replace("\r", " ").replace("\n", " ")
+        text = re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
     def _log(self, message: str):
+        clean = self._sanitize_log_line(message)
+        if not clean:
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self._logs.append(f"[{ts}] {message}")
+        self._logs.append(f"[{ts}] {clean}")
 
     def _state_color(self, state: str) -> int:
         if state == "running":
@@ -1291,6 +1309,25 @@ class WatchdogManager:
     # ------------------------------------------------------------------
     # PID and signaling helpers
     # ------------------------------------------------------------------
+    def _service_log_file(self, svc: ServiceSpec) -> pathlib.Path:
+        return self.service_log_dir / f"{svc.service_id}.log"
+
+    def _open_service_log_handle(self, svc: ServiceSpec):
+        self.service_log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._service_log_file(svc)
+        try:
+            handle = open(log_path, "ab", buffering=0)
+            stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            header = (
+                f"\n[{stamp}] [WATCHDOG] Launching {svc.label} "
+                f"(service_id={svc.service_id})\n"
+            ).encode("utf-8", errors="replace")
+            handle.write(header)
+            return handle
+        except Exception as exc:
+            self._log(f"[WARN] {svc.label} log capture unavailable: {exc}")
+            return None
+
     def _pid_file(self, svc: ServiceSpec) -> pathlib.Path:
         return self.runtime_dir / f"{svc.service_id}.pid"
 
@@ -1693,6 +1730,8 @@ class WatchdogManager:
                 return
 
         if not prefer_terminal_launch:
+            log_path = self._service_log_file(svc)
+            log_handle = self._open_service_log_handle(svc)
             try:
                 popen_kwargs = {
                     "cwd": str(svc.working_dir(self.base_dir)),
@@ -1700,6 +1739,12 @@ class WatchdogManager:
                 }
                 if self._os_name != "windows":
                     popen_kwargs["start_new_session"] = True
+                if log_handle is not None:
+                    popen_kwargs["stdout"] = log_handle
+                    popen_kwargs["stderr"] = subprocess.STDOUT
+                else:
+                    popen_kwargs["stdout"] = subprocess.DEVNULL
+                    popen_kwargs["stderr"] = subprocess.DEVNULL
                 proc = subprocess.Popen(
                     [sys.executable, str(script_path)] + list(svc.args),
                     **popen_kwargs,
@@ -1719,12 +1764,21 @@ class WatchdogManager:
                 )
                 runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
                 self._write_pid_file(svc, proc.pid)
-                self._log(f"[LAUNCH] {svc.label} attempt={runtime.launch_attempts} direct pid={proc.pid}")
+                self._log(
+                    f"[LAUNCH] {svc.label} attempt={runtime.launch_attempts} direct "
+                    f"pid={proc.pid} log={log_path}"
+                )
                 return
             except Exception as exc:
                 self._mark_launch_failure(svc, runtime, now, f"Launch failed: {exc}")
                 self._log(f"[ERROR] {svc.label} direct launch failed on attempt={runtime.launch_attempts}: {exc}")
                 return
+            finally:
+                if log_handle is not None:
+                    try:
+                        log_handle.close()
+                    except Exception:
+                        pass
 
         wrapped = self._build_wrapped_shell_command(svc)
         terminal_cmd = self._build_terminal_command(f"Teleop - {svc.label}", wrapped)
@@ -1978,6 +2032,19 @@ class WatchdogManager:
                 self._log(f"[ERROR] {svc.label} exited during activation")
                 return
 
+            activation_probe_interval = max(
+                0.25,
+                min(
+                    DEFAULT_ACTIVATION_PROBE_INTERVAL_SECONDS,
+                    float(svc.health_check_interval_seconds or DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS),
+                ),
+            )
+            if runtime.last_health_probe_at and (
+                now - runtime.last_health_probe_at
+            ) < activation_probe_interval:
+                return
+
+            runtime.last_health_probe_at = now
             runtime.activation_checks += 1
             probe_ok, probe_detail = self._health_probe_with_runtime(svc, runtime)
             if probe_ok:
@@ -1987,7 +2054,6 @@ class WatchdogManager:
                 runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
                 runtime.activation_method = f"probe:{probe_detail}"
                 runtime.last_health_ok_at = now
-                runtime.last_health_probe_at = now
                 self._reset_runtime_health(runtime)
                 self._set_state(
                     svc,

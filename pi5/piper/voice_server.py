@@ -20,6 +20,21 @@ DEFAULT_RAW_AUDIO_PORT = 6353
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 3.0
 DEFAULT_MAX_CONNECT_ATTEMPTS = 4
 DEFAULT_RETRY_DELAY_SECONDS = 0.7
+VERBOSE_CONNECTION_LOGS = str(os.environ.get("VOICE_SERVER_VERBOSE_CONNECTION_LOGS", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def _log(message):
+    print(str(message), flush=True)
+
+
+def _debug(message):
+    if VERBOSE_CONNECTION_LOGS:
+        _log(message)
 
 
 def _get_nested(data, path, default=None):
@@ -143,7 +158,7 @@ def _send_audio_to_output(raw_audio: bytes, settings: dict) -> bool:
                 audio_socket.sendall(raw_audio)
                 return True
         except Exception as exc:
-            print(f"Raw audio send failed attempt={attempt}/{attempts} {host}:{port}: {exc}")
+            _log(f"Raw audio send failed attempt={attempt}/{attempts} {host}:{port}: {exc}")
             if attempt < attempts:
                 time.sleep(retry_delay)
     return False
@@ -156,7 +171,7 @@ def tts_worker(queue: Queue):
             queue.task_done()
             break
         try:
-            print(f"Processing text: {text_content}")
+            _debug(f"Processing text: {text_content}")
             process = subprocess.Popen(
                 [
                     PIPER_EXECUTABLE,
@@ -170,15 +185,15 @@ def tts_worker(queue: Queue):
             )
             stdout, stderr = process.communicate(input=text_content.encode("utf-8"))
             if stderr:
-                print(f"Piper error: {stderr.decode('utf-8', errors='replace')}")
+                _log(f"Piper error: {stderr.decode('utf-8', errors='replace')}")
 
             settings = _load_runtime_settings()
             if _send_audio_to_output(stdout or b"", settings):
-                print("Raw audio forwarded to output service.")
+                _debug("Raw audio forwarded to output service.")
             else:
-                print("Raw audio forwarding failed after retries.")
+                _log("Raw audio forwarding failed after retries.")
         except Exception as exc:
-            print(f"TTS worker error: {exc}")
+            _log(f"TTS worker error: {exc}")
         finally:
             queue.task_done()
 
@@ -194,7 +209,7 @@ def handle_client_connection(client_socket: socket.socket, queue: Queue):
                 continue
             queue.put(prompt)
     except Exception as exc:
-        print(f"Error handling client: {exc}")
+        _log(f"Error handling client: {exc}")
     finally:
         try:
             client_socket.close()
@@ -217,21 +232,21 @@ def main():
                     text_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     text_server.bind((settings["tts_listen_host"], int(settings["tts_listen_port"])))
                     text_server.listen(8)
-                    print(
+                    _log(
                         f"Listening for text content on "
                         f"{settings['tts_listen_host']}:{settings['tts_listen_port']} "
                         f"(audio->{settings['raw_audio_host']}:{settings['raw_audio_port']})..."
                     )
 
                 client_socket, addr = text_server.accept()
-                print(f"Connection established with {addr}")
+                _debug(f"Connection established with {addr}")
                 threading.Thread(
                     target=handle_client_connection,
                     args=(client_socket, tts_queue),
                     daemon=True,
                 ).start()
             except Exception as exc:
-                print(f"Server loop error: {exc}")
+                _log(f"Server loop error: {exc}")
                 if text_server:
                     try:
                         text_server.close()
@@ -240,7 +255,7 @@ def main():
                     text_server = None
                 time.sleep(2.0)
     except KeyboardInterrupt:
-        print("Shutting down server...")
+        _log("Shutting down server...")
     finally:
         try:
             tts_queue.put(None)
@@ -252,7 +267,7 @@ def main():
                 text_server.close()
         except Exception:
             pass
-        print("Server closed.")
+        _log("Server closed.")
 
 
 if __name__ == "__main__":

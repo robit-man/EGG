@@ -753,7 +753,7 @@ else:
         while True:
             try:
                 client_sock, addr = server_socket.accept()
-                logging.info(f"Receiver Thread: Accepted connection from {addr}")
+                logging.debug(f"Receiver Thread: Accepted connection from {addr}")
                 # Start a new thread to handle the client
                 client_handler = threading.Thread(
                     target=handle_client,
@@ -777,12 +777,12 @@ else:
         try:
             data = client_sock.recv(65536)
             if not data:
-                logging.info(f"ClientHandler: No data from {addr}, closing connection.")
+                logging.debug(f"ClientHandler: No data from {addr}, closing connection.")
                 client_sock.close()
                 return
             user_message = data.decode('utf-8').strip()
             if not user_message:
-                logging.info(f"ClientHandler: Empty prompt from {addr}, ignoring.")
+                logging.debug(f"ClientHandler: Empty prompt from {addr}, ignoring.")
                 client_sock.close()
                 return
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
@@ -827,7 +827,7 @@ else:
             logging.error(f"ClientHandler: Unexpected error: {e}")
         finally:
             client_sock.close()
-            logging.info(f"ClientHandler: Connection with {addr} closed.")
+            logging.debug(f"ClientHandler: Connection with {addr} closed.")
 
     #############################################
     # Step 12: Server Handling with Dedicated Receiver Thread #

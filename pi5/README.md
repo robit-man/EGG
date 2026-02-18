@@ -5,27 +5,44 @@
 
 ### ASR > Ollama > TTS Pipeline for Pi5 - EXPERIMENTAL RELEASE!
 
-# Setup and Restart of speech feedback stack with one copy and paste to command line 
+## Setup and restart with one copy/paste
 ## (PLEASE REPORT BUGS, THERE ARE SOME ASSUMPTIONS OF HARDWARE BELOW)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/setup.sh -o /home/$(whoami)/voice/setup.sh && chmod +x /home/$(whoami)/voice/setup.sh && bash /home/$(whoami)/voice/setup.sh && mkdir -p ~/.config/autostart && cat <<EOF > ~/.config/autostart/voice_setup.desktop
-[Desktop Entry]
-Type=Application
-Exec=/bin/bash /home/$(whoami)/voice/setup.sh
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Name=Voice Setup
-Comment=Run Voice Setup on startup
-EOF
+mkdir -p /home/$(whoami)/voice && curl -fsSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/setup.sh -o /home/$(whoami)/voice/setup.sh && chmod +x /home/$(whoami)/voice/setup.sh && bash /home/$(whoami)/voice/setup.sh
 ```
 
-## Teardown and clean up of the speech stack with one copy and paste
+The setup script now:
+- upgrades packages (unless `EGG_SKIP_APT_UPGRADE=1`)
+- syncs runtime scripts from `EGG_repo` to `/home/<user>/voice`
+- installs watchdog + router + camera/pipeline services
+- creates `~/.config/autostart/mini_egg_watchdog.desktop`
+- enables watchdog auto-update from `https://github.com/robit-man/EGG.git`
+
+## Teardown and cleanup with one copy/paste
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -o /tmp/egg_teardown.sh && chmod +x /tmp/egg_teardown.sh && bash /tmp/egg_teardown.sh && rm -f /tmp/egg_teardown.sh
 ```
+
+## Runtime services and local endpoints
+
+- `watchdog.py`: toggles services and keeps them alive
+- `router.py`: NKN sidecar + persistent router address + remote tunnel discovery
+- `camera_router.py`: camera list/snapshot/video routes
+- `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt
+- `run_asr_stream.py`: Whisper stream -> LLM bridge
+- `run_voice_server.py`: Docker voice server wrapper
+- `run_ollama_service.py`: Ollama service wrapper
+
+Local ports:
+- `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
+- `8080` camera router (`/list`, `/snapshot/cam0`, `/video/cam0`)
+- `6590` pipeline API (`/health`, `/llm/prompt`, `/tts/speak`)
+- `6545` model bridge (`model_to_tts.py`)
+- `6434` voice server (`voice_server.py` via Docker)
+- `6353` audio output (`output.py`)
+- `11434` ollama (`ollama serve`)
 
 ## Installation and Runtime
 

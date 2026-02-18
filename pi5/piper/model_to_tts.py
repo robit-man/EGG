@@ -61,16 +61,28 @@ def setup_venv(online=True):
     # Determine pip path based on OS
     pip_path = os.path.join(VENV_DIR, 'bin', 'pip') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'pip.exe')
 
-    if online:
-        try:
-            logging.info("Installing required packages...")
-            subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
-            logging.info("Required packages installed successfully.")
-        except subprocess.CalledProcessError as e:
+    try:
+        logging.info("Installing required packages...")
+        subprocess.check_call([pip_path, 'install', '--upgrade', 'pip'])
+        subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
+        logging.info("Required packages installed successfully.")
+    except subprocess.CalledProcessError as e:
+        if not online:
+            logging.warning(f"Offline mode package install failed: {e}")
+        else:
             logging.error(f"Failed to install required packages: {e}")
-            logging.warning("Proceeding without installing all packages. Ensure required packages are installed.")
-    else:
-        logging.warning("Offline mode: Skipping package installation. Ensure required packages are installed.")
+        logging.warning("Proceeding without installing all packages. Ensure required packages are installed.")
+
+
+def ensure_runtime_packages():
+    pip_path = os.path.join(VENV_DIR, 'bin', 'pip') if os.name != 'nt' else os.path.join(VENV_DIR, 'Scripts', 'pip.exe')
+    if not os.path.exists(pip_path):
+        return False
+    try:
+        subprocess.check_call([pip_path, 'install'] + NEEDED_PACKAGES)
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 def relaunch_in_venv():
     # Relaunch inside venv python
@@ -100,9 +112,15 @@ else:
         import requests
         from num2words import num2words
     except ImportError as e:
-        logging.error(f"Failed to import required modules: {e}")
-        logging.error("Ensure all required packages are installed in the virtual environment.")
-        sys.exit(1)
+        logging.warning(f"Initial import failed: {e}. Attempting runtime package install...")
+        ensure_runtime_packages()
+        try:
+            import requests
+            from num2words import num2words
+        except ImportError as inner_exc:
+            logging.error(f"Failed to import required modules: {inner_exc}")
+            logging.error("Ensure all required packages are installed in the virtual environment.")
+            sys.exit(1)
 
     try:
         import alsaaudio  # Optional ALSA module

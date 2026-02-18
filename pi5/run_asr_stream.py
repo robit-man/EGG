@@ -40,7 +40,7 @@ def _ensure_whispercpp_available(python_exe: str, base_dir: str) -> bool:
     def can_import() -> bool:
         try:
             check = subprocess.run(
-                [python_exe, "-c", "import whispercpp"],
+                [python_exe, "-c", "import whispercpp as w; _ = w.api.SAMPLE_RATE"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -126,10 +126,12 @@ def main() -> int:
     )
 
     env = os.environ.copy()
-    extra_path = os.path.join(base_dir, "whispercpp", "src")
-    if os.path.isdir(extra_path):
-        existing = str(env.get("PYTHONPATH", "")).strip()
-        env["PYTHONPATH"] = f"{extra_path}{os.pathsep}{existing}" if existing else extra_path
+    # Keep runtime imports wheel-first; source path fallback is opt-in only.
+    if str(env.get("ASR_USE_SOURCE_PATH", "")).strip().lower() in ("1", "true", "yes", "on"):
+        extra_path = os.path.join(base_dir, "whispercpp", "src")
+        if os.path.isdir(extra_path):
+            existing = str(env.get("PYTHONPATH", "")).strip()
+            env["PYTHONPATH"] = f"{extra_path}{os.pathsep}{existing}" if existing else extra_path
 
     argv = [
         python_exe,

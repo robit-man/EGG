@@ -31,6 +31,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
 - `camera_router.py`: camera list/snapshot/video routes + terminal dashboard
 - `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt + terminal dashboard
+- `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
 - `run_ollama_service.py`: Ollama service wrapper

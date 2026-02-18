@@ -114,6 +114,7 @@ class ServiceSpec:
     script_relpath: str
     args: Tuple[str, ...] = ()
     auto_start: bool = True
+    launch_in_terminal: bool = True
     health_mode: str = "process"  # process | tcp | http
     health_port: int = 0
     health_path: str = ""
@@ -250,6 +251,7 @@ class WatchdogManager:
                 "tts_output",
                 "TTS Output",
                 "output.py",
+                launch_in_terminal=False,
                 health_mode="tcp",
                 health_port=6353,
                 activation_timeout_seconds=180.0,
@@ -258,6 +260,7 @@ class WatchdogManager:
                 "llm_bridge",
                 "LLM Bridge",
                 "model_to_tts.py",
+                launch_in_terminal=False,
                 health_mode="tcp",
                 health_port=6545,
                 activation_timeout_seconds=180.0,
@@ -266,6 +269,7 @@ class WatchdogManager:
                 "tts_voice",
                 "TTS Voice",
                 "run_voice_server.py",
+                launch_in_terminal=False,
                 health_mode="tcp",
                 health_port=6434,
                 activation_timeout_seconds=120.0,
@@ -274,6 +278,7 @@ class WatchdogManager:
                 "asr_stream",
                 "ASR Stream",
                 "run_asr_stream.py",
+                launch_in_terminal=False,
                 health_mode="process",
                 activation_timeout_seconds=60.0,
             ),
@@ -281,6 +286,7 @@ class WatchdogManager:
                 "ollama",
                 "Ollama",
                 "run_ollama_service.py",
+                launch_in_terminal=False,
                 health_mode="http",
                 health_port=11434,
                 health_path="/api/tags",
@@ -1650,6 +1656,40 @@ class WatchdogManager:
             except Exception as exc:
                 self._mark_launch_failure(svc, runtime, now, f"Launch failed: {exc}")
                 self._log(f"[ERROR] {svc.label} launch failed on attempt={runtime.launch_attempts}: {exc}")
+                return
+
+        if not svc.launch_in_terminal:
+            try:
+                popen_kwargs = {
+                    "cwd": str(svc.working_dir(self.base_dir)),
+                    "env": child_env,
+                }
+                if self._os_name != "windows":
+                    popen_kwargs["start_new_session"] = True
+                proc = subprocess.Popen(
+                    [sys.executable, str(script_path)] + list(svc.args),
+                    **popen_kwargs,
+                )
+                runtime.terminal_process = proc
+                runtime.pid = proc.pid
+                runtime.process_stable_since = now
+                runtime.stop_stage = 0
+                runtime.stop_requested_at = 0.0
+                self._set_state(
+                    svc,
+                    runtime,
+                    "activating",
+                    now,
+                    event=f"Spawned pid={proc.pid} (direct); waiting for activation probe",
+                    error="",
+                )
+                runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
+                self._write_pid_file(svc, proc.pid)
+                self._log(f"[LAUNCH] {svc.label} attempt={runtime.launch_attempts} direct pid={proc.pid}")
+                return
+            except Exception as exc:
+                self._mark_launch_failure(svc, runtime, now, f"Launch failed: {exc}")
+                self._log(f"[ERROR] {svc.label} direct launch failed on attempt={runtime.launch_attempts}: {exc}")
                 return
 
         wrapped = self._build_wrapped_shell_command(svc)

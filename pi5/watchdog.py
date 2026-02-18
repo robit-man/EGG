@@ -1357,8 +1357,8 @@ class WatchdogManager:
                         self._log(f"[DISCOVER] {svc.label} health probe realigned to port {candidate}")
                 return True, f"tcp listen {candidate}"
 
-            if self._has_passive_tcp_tools:
-                return False, "tcp not listening"
+            # Passive inspection can miss listeners owned by other users/namespaces
+            # (for example docker host-network processes). Fall back to active probe.
 
         target = self._build_health_target(svc, port_override=active_port)
         ok, detail = self._probe_target(mode, target)

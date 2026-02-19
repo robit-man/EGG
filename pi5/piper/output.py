@@ -213,18 +213,25 @@ def handle_client_connection(client_socket, settings, addr):
         import alsaaudio
         import numpy as np
 
-        audio_out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, device=settings["pcm_device"])
-        audio_out.setchannels(int(settings["channels"]))
-        audio_out.setrate(int(settings["rate"]))
-        audio_out.setformat(alsaaudio.PCM_FORMAT_S16_LE)
-        audio_out.setperiodsize(int(settings["chunk"]))
+        channels = int(settings["channels"])
+        rate = int(settings["rate"])
+        chunk_bytes = int(settings["chunk"])
+        # PCM S16_LE is 2 bytes/sample per channel.
+        bytes_per_frame = max(2, channels * 2)
+        period_frames = max(128, chunk_bytes // bytes_per_frame)
 
-        chunk = int(settings["chunk"])
+        audio_out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, device=settings["pcm_device"])
+        audio_out.setchannels(channels)
+        audio_out.setrate(rate)
+        audio_out.setformat(alsaaudio.PCM_FORMAT_S16_LE)
+        audio_out.setperiodsize(period_frames)
+
         volume = float(settings["volume"])
         received_any = False
+        drained = False
 
         while True:
-            data = client_socket.recv(chunk)
+            data = client_socket.recv(chunk_bytes)
             if not data:
                 if received_any:
                     _debug(f"Audio client disconnected: {addr}")
@@ -235,6 +242,19 @@ def handle_client_connection(client_socket, settings, addr):
             audio_samples *= volume
             audio_samples = np.clip(audio_samples, -32768, 32767)
             audio_out.write(audio_samples.astype(np.int16).tobytes())
+        if received_any:
+            # Ensure final buffered frames are rendered before stream teardown.
+            drain = getattr(audio_out, "drain", None)
+            if callable(drain):
+                try:
+                    drain()
+                    drained = True
+                except Exception as exc:
+                    _debug(f"Audio drain failed for {addr}: {exc}")
+            if not drained:
+                # Fallback wait for at least one period if drain() is unavailable.
+                period_seconds = max(0.02, float(period_frames) / float(max(8000, rate)))
+                time.sleep(period_seconds * 1.15)
     except Exception as exc:
         _log(f"Error in client connection: {exc}")
     finally:

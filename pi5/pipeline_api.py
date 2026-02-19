@@ -287,6 +287,18 @@ llm_pull_state = {
     "updated_at": 0.0,
     "events": [],
 }
+PIPELINE_EVENT_LIMIT = 240
+pipeline_state_lock = threading.Lock()
+pipeline_state = {
+    "seq": 0,
+    "updated_at": 0.0,
+    "stages": {
+        "asr": {"state": "idle", "updated_at": 0.0, "source": "", "detail": "", "last_text": ""},
+        "llm": {"state": "idle", "updated_at": 0.0, "source": "", "detail": "", "last_text": ""},
+        "tts": {"state": "idle", "updated_at": 0.0, "source": "", "detail": "", "last_text": ""},
+    },
+    "events": [],
+}
 
 
 def _tcp_ok(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -590,6 +602,96 @@ def _llm_config_payload(llm_config: Dict[str, Any]) -> Dict[str, Any]:
         "model_installed": model in set(models),
         "model_fetch_error": model_error,
     }
+
+
+def _short_text(value: str, limit: int = 220) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _record_pipeline_event(
+    stage: str,
+    state: str,
+    *,
+    source: str = "pipeline_api",
+    text: str = "",
+    detail: str = "",
+    level: str = "info",
+) -> Dict[str, Any]:
+    stage_key = str(stage or "").strip().lower()
+    if stage_key not in ("asr", "llm", "tts"):
+        stage_key = "llm"
+    now = time.time()
+    event = {}
+    with pipeline_state_lock:
+        pipeline_state["seq"] = int(pipeline_state.get("seq", 0)) + 1
+        seq = int(pipeline_state["seq"])
+        event = {
+            "seq": seq,
+            "timestamp": int(now * 1000),
+            "stage": stage_key,
+            "state": str(state or "").strip() or "event",
+            "source": str(source or "pipeline_api").strip() or "pipeline_api",
+            "text": _short_text(text, 320),
+            "detail": _short_text(detail, 240),
+            "level": str(level or "info").strip().lower() or "info",
+        }
+        stages = pipeline_state.get("stages", {})
+        if isinstance(stages, dict):
+            slot = stages.get(stage_key, {})
+            if not isinstance(slot, dict):
+                slot = {}
+            slot.update(
+                {
+                    "state": event["state"],
+                    "updated_at": now,
+                    "source": event["source"],
+                    "detail": event["detail"],
+                    "last_text": event["text"],
+                }
+            )
+            stages[stage_key] = slot
+            pipeline_state["stages"] = stages
+        events = list(pipeline_state.get("events", []))
+        events.append(event)
+        if len(events) > PIPELINE_EVENT_LIMIT:
+            events = events[-PIPELINE_EVENT_LIMIT:]
+        pipeline_state["events"] = events
+        pipeline_state["updated_at"] = now
+
+    rendered = f"[PIPELINE] {event['stage'].upper()}:{event['state']} ({event['source']})"
+    if event["text"]:
+        rendered += f" text=\"{event['text']}\""
+    if event["detail"]:
+        rendered += f" detail={event['detail']}"
+    print(rendered, flush=True)
+    if ui:
+        try:
+            ui.log(rendered)
+        except Exception:
+            pass
+    return event
+
+
+def _pipeline_snapshot() -> Dict[str, Any]:
+    with pipeline_state_lock:
+        snap = json.loads(json.dumps(pipeline_state))
+    now_ms = int(time.time() * 1000)
+    snap["now"] = now_ms
+    return snap
+
+
+def _is_local_request() -> bool:
+    remote = str(request.remote_addr or "").strip().lower()
+    if not remote:
+        return False
+    if remote == "::1" or remote.startswith("127.") or remote == "localhost":
+        return True
+    if remote.startswith("::ffff:127."):
+        return True
+    return False
 
 
 def _send_llm_prompt(prompt: str) -> None:
@@ -945,22 +1047,23 @@ def _llm_dashboard_html(session_key: str) -> str:
   <title>EGG LLM Dashboard</title>
   <style>
     :root {
-      --bg: #f3f6f8;
-      --card: #ffffff;
-      --text: #12202b;
-      --muted: #557285;
-      --line: #d6e1e8;
-      --accent: #007ea7;
-      --ok: #167c4a;
-      --err: #b93c3c;
-      --warn: #a46604;
+      --bg: #111;
+      --panel: #1b1b1b;
+      --text: #f4f7ff;
+      --muted: #9aa9c0;
+      --line: #333;
+      --accent: #2f7ef5;
+      --ok: #00d08a;
+      --err: #ff6666;
+      --warn: #ffcc66;
+      --subpanel: #161616;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Segoe UI", Tahoma, sans-serif;
+      font-family: monospace;
       color: var(--text);
-      background: radial-gradient(circle at top right, #d9ecf8 0%, var(--bg) 40%, #edf4f9 100%);
+      background: var(--bg);
     }
     .wrap {
       max-width: 1080px;
@@ -970,11 +1073,10 @@ def _llm_dashboard_html(session_key: str) -> str:
       gap: 12px;
     }
     .card {
-      background: var(--card);
+      background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 14px;
-      box-shadow: 0 4px 14px rgba(18, 32, 43, 0.06);
     }
     h1 {
       margin: 0;
@@ -1011,7 +1113,7 @@ def _llm_dashboard_html(session_key: str) -> str:
     }
     input, select {
       width: 100%;
-      background: #fff;
+      background: var(--subpanel);
       color: var(--text);
     }
     button {
@@ -1022,7 +1124,7 @@ def _llm_dashboard_html(session_key: str) -> str:
       cursor: pointer;
     }
     button.secondary {
-      background: #fff;
+      background: #222;
       color: var(--text);
       border-color: var(--line);
     }
@@ -1036,7 +1138,7 @@ def _llm_dashboard_html(session_key: str) -> str:
       border: 1px solid var(--line);
       font-size: 0.78rem;
       color: var(--muted);
-      background: #f7fbfe;
+      background: #222;
     }
     .ok { color: var(--ok); }
     .err { color: var(--err); }
@@ -1054,13 +1156,35 @@ def _llm_dashboard_html(session_key: str) -> str:
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0d1820;
+      background: var(--subpanel);
       color: #d6ecff;
       padding: 8px;
       font-family: Consolas, "Courier New", monospace;
       font-size: 0.78rem;
       line-height: 1.3;
       white-space: pre-wrap;
+    }
+    .stage-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .stage-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      background: var(--subpanel);
+    }
+    .stage-title {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .stage-value {
+      font-size: 0.96rem;
+      margin-top: 4px;
+      word-break: break-word;
     }
     .status {
       font-size: 0.88rem;
@@ -1155,6 +1279,26 @@ def _llm_dashboard_html(session_key: str) -> str:
       <h2>Model Pull Log</h2>
       <div id="pullLog" class="log">No pull activity yet.</div>
     </div>
+
+    <div class="card">
+      <h2>Pipeline Stages</h2>
+      <div class="stage-grid">
+        <div class="stage-card">
+          <div class="stage-title">ASR</div>
+          <div id="asrState" class="stage-value">idle</div>
+        </div>
+        <div class="stage-card">
+          <div class="stage-title">LLM</div>
+          <div id="llmState" class="stage-value">idle</div>
+        </div>
+        <div class="stage-card">
+          <div class="stage-title">TTS</div>
+          <div id="ttsState" class="stage-value">idle</div>
+        </div>
+      </div>
+      <div class="muted" style="margin-top: 8px;">Live event stream from ASR, LLM bridge, and TTS forwarding.</div>
+      <div id="pipelineLog" class="log" style="margin-top: 8px;">No pipeline activity yet.</div>
+    </div>
   </div>
 
   <script>
@@ -1185,6 +1329,10 @@ def _llm_dashboard_html(session_key: str) -> str:
       refreshPull: document.getElementById("refreshPull"),
       pullSummary: document.getElementById("pullSummary"),
       pullLog: document.getElementById("pullLog"),
+      asrState: document.getElementById("asrState"),
+      llmState: document.getElementById("llmState"),
+      ttsState: document.getElementById("ttsState"),
+      pipelineLog: document.getElementById("pipelineLog"),
     };
 
     function setTopStatus(message, level) {
@@ -1316,11 +1464,54 @@ def _llm_dashboard_html(session_key: str) -> str:
       return payload;
     }
 
+    function formatPipelineStage(slot, fallbackState = "idle") {
+      const state = String((slot && slot.state) || fallbackState || "idle");
+      const src = String((slot && slot.source) || "").trim();
+      const text = String((slot && slot.last_text) || "").trim();
+      const detail = String((slot && slot.detail) || "").trim();
+      let message = state;
+      if (src) message += ` (${src})`;
+      if (text) message += ` | ${text}`;
+      else if (detail) message += ` | ${detail}`;
+      return message;
+    }
+
+    async function loadPipelineState() {
+      const payload = await fetchJson("/pipeline/state");
+      const state = payload.pipeline_state || {};
+      const stages = state.stages || {};
+      els.asrState.textContent = formatPipelineStage(stages.asr, "idle");
+      els.llmState.textContent = formatPipelineStage(stages.llm, "idle");
+      els.ttsState.textContent = formatPipelineStage(stages.tts, "idle");
+      const events = Array.isArray(state.events) ? state.events : [];
+      if (!events.length) {
+        els.pipelineLog.textContent = "No pipeline activity yet.";
+      } else {
+        const lines = events.slice(-120).map((evt) => {
+          const ts = Number(evt.timestamp || 0);
+          const dt = ts > 0 ? new Date(ts).toLocaleTimeString() : "";
+          const stage = String(evt.stage || "pipeline").toUpperCase();
+          const status = String(evt.state || "event");
+          const src = String(evt.source || "");
+          const text = String(evt.text || "").trim();
+          const detail = String(evt.detail || "").trim();
+          let line = `${dt} [${stage}] ${status}`;
+          if (src) line += ` (${src})`;
+          if (text) line += ` | ${text}`;
+          if (detail) line += ` | ${detail}`;
+          return line;
+        });
+        els.pipelineLog.textContent = lines.join("\\n");
+      }
+      return payload;
+    }
+
     async function refreshAll() {
       try {
         setTopStatus("Refreshing LLM dashboard...", "warn");
         await loadConfig();
         await loadPullStatus();
+        await loadPipelineState();
         setTopStatus("Dashboard updated.", "ok");
       } catch (err) {
         setTopStatus(`Refresh failed: ${err.message}`, "error");
@@ -1411,8 +1602,9 @@ def _llm_dashboard_html(session_key: str) -> str:
       refreshTimer = setInterval(async () => {
         try {
           await loadPullStatus();
+          await loadPipelineState();
         } catch (err) {
-          setTopStatus(`Pull polling failed: ${err.message}`, "warn");
+          setTopStatus(`Polling failed: ${err.message}`, "warn");
         }
       }, 3000);
     }
@@ -1448,6 +1640,7 @@ def index():
                 "llm_config": "/llm/config",
                 "llm_pull": "/llm/pull",
                 "llm_pull_status": "/llm/pull/status",
+                "pipeline_state": "/pipeline/state",
                 "tts_speak": "/tts/speak",
             },
         }
@@ -1499,6 +1692,7 @@ def list_routes():
                 "llm_config": "/llm/config",
                 "llm_pull": "/llm/pull",
                 "llm_pull_status": "/llm/pull/status",
+                "pipeline_state": "/pipeline/state",
                 "tts_speak": "/tts/speak",
             },
             "endpoints": {
@@ -1511,6 +1705,7 @@ def list_routes():
                 "llm_config_url": f"{publish_base}/llm/config",
                 "llm_pull_url": f"{publish_base}/llm/pull",
                 "llm_pull_status_url": f"{publish_base}/llm/pull/status",
+                "pipeline_state_url": f"{publish_base}/pipeline/state",
                 "tts_speak_url": f"{publish_base}/tts/speak",
                 "router_info_url": f"{publish_base}/router_info",
                 "local_health_url": f"{local_base}/health",
@@ -1522,6 +1717,7 @@ def list_routes():
                 "local_llm_config_url": f"{local_base}/llm/config",
                 "local_llm_pull_url": f"{local_base}/llm/pull",
                 "local_llm_pull_status_url": f"{local_base}/llm/pull/status",
+                "local_pipeline_state_url": f"{local_base}/pipeline/state",
                 "local_tts_speak_url": f"{local_base}/tts/speak",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
                 "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
@@ -1532,6 +1728,7 @@ def list_routes():
                 "lan_llm_config_url": f"{lan_base}/llm/config" if lan_base else "",
                 "lan_llm_pull_url": f"{lan_base}/llm/pull" if lan_base else "",
                 "lan_llm_pull_status_url": f"{lan_base}/llm/pull/status" if lan_base else "",
+                "lan_pipeline_state_url": f"{lan_base}/pipeline/state" if lan_base else "",
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
                 "tunnel_health_url": f"{tunnel_base}/health" if tunnel_base else "",
                 "tunnel_auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
@@ -1542,6 +1739,7 @@ def list_routes():
                 "tunnel_llm_config_url": f"{tunnel_base}/llm/config" if tunnel_base else "",
                 "tunnel_llm_pull_url": f"{tunnel_base}/llm/pull" if tunnel_base else "",
                 "tunnel_llm_pull_status_url": f"{tunnel_base}/llm/pull/status" if tunnel_base else "",
+                "tunnel_pipeline_state_url": f"{tunnel_base}/pipeline/state" if tunnel_base else "",
                 "tunnel_tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             },
             "tunnel": tunnel,
@@ -1716,6 +1914,42 @@ def llm_pull_status():
     )
 
 
+@app.route("/pipeline/state", methods=["GET"])
+@_auth_required
+def pipeline_state_view():
+    return jsonify(
+        {
+            "status": "success",
+            "service": "pipeline_api",
+            "pipeline_state": _pipeline_snapshot(),
+        }
+    )
+
+
+@app.route("/pipeline/event", methods=["POST"])
+def pipeline_event():
+    if not _is_local_request():
+        return jsonify({"status": "error", "message": "local requests only"}), 403
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
+    stage = str(data.get("stage", "")).strip().lower() or "llm"
+    state = str(data.get("state", "")).strip().lower() or "event"
+    source = str(data.get("source", "pipeline_agent")).strip() or "pipeline_agent"
+    text = str(data.get("text", "")).strip()
+    detail = str(data.get("detail", "")).strip()
+    level = str(data.get("level", "info")).strip().lower() or "info"
+    event = _record_pipeline_event(
+        stage,
+        state,
+        source=source,
+        text=text,
+        detail=detail,
+        level=level,
+    )
+    return jsonify({"status": "success", "service": "pipeline_api", "event": event})
+
+
 @app.route("/llm/prompt", methods=["POST"])
 @_auth_required
 def llm_prompt():
@@ -1726,8 +1960,23 @@ def llm_prompt():
     if len(prompt) > prompt_max_chars:
         return jsonify({"status": "error", "message": "Prompt too long"}), 400
     try:
+        _record_pipeline_event(
+            "llm",
+            "queued",
+            source="pipeline_api",
+            text=prompt,
+            detail="received via /llm/prompt",
+        )
         _send_llm_prompt(prompt)
     except Exception as exc:
+        _record_pipeline_event(
+            "llm",
+            "error",
+            source="pipeline_api",
+            text=prompt,
+            detail=f"/llm/prompt forward failed: {exc}",
+            level="error",
+        )
         return jsonify({"status": "error", "message": f"Failed to forward prompt: {exc}"}), 502
     return jsonify({"status": "success", "message": "Prompt forwarded"})
 
@@ -1742,8 +1991,23 @@ def tts_speak():
     if len(prompt) > prompt_max_chars:
         return jsonify({"status": "error", "message": "Prompt too long"}), 400
     try:
+        _record_pipeline_event(
+            "tts",
+            "requested",
+            source="pipeline_api",
+            text=prompt,
+            detail="received via /tts/speak",
+        )
         _send_tts_prompt(prompt)
     except Exception as exc:
+        _record_pipeline_event(
+            "tts",
+            "error",
+            source="pipeline_api",
+            text=prompt,
+            detail=f"/tts/speak forward failed: {exc}",
+            level="error",
+        )
         return jsonify({"status": "error", "message": f"TTS request failed: {exc}"}), 502
     return jsonify({"status": "success", "message": "TTS prompt forwarded"})
 
@@ -1809,6 +2073,7 @@ def tunnel_info():
             "llm_config_url": f"{tunnel_base}/llm/config" if tunnel_base else "",
             "llm_pull_url": f"{tunnel_base}/llm/pull" if tunnel_base else "",
             "llm_pull_status_url": f"{tunnel_base}/llm/pull/status" if tunnel_base else "",
+            "pipeline_state_url": f"{tunnel_base}/pipeline/state" if tunnel_base else "",
             "tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             "stale_tunnel_url": str(tunnel.get("stale_tunnel_url") or ""),
             "error": str(tunnel.get("error") or ""),
@@ -1843,6 +2108,7 @@ def router_info():
                 "llm_config_url": f"{publish_base}/llm/config",
                 "llm_pull_url": f"{publish_base}/llm/pull",
                 "llm_pull_status_url": f"{publish_base}/llm/pull/status",
+                "pipeline_state_url": f"{publish_base}/pipeline/state",
                 "tts_speak_url": f"{publish_base}/tts/speak",
                 "local_auth_url": f"{local_base}/auth",
                 "local_session_rotate_url": f"{local_base}/session/rotate",
@@ -1854,6 +2120,7 @@ def router_info():
                 "local_llm_config_url": f"{local_base}/llm/config",
                 "local_llm_pull_url": f"{local_base}/llm/pull",
                 "local_llm_pull_status_url": f"{local_base}/llm/pull/status",
+                "local_pipeline_state_url": f"{local_base}/pipeline/state",
                 "local_tts_speak_url": f"{local_base}/tts/speak",
                 "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
                 "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
@@ -1865,6 +2132,7 @@ def router_info():
                 "lan_llm_config_url": f"{lan_base}/llm/config" if lan_base else "",
                 "lan_llm_pull_url": f"{lan_base}/llm/pull" if lan_base else "",
                 "lan_llm_pull_status_url": f"{lan_base}/llm/pull/status" if lan_base else "",
+                "lan_pipeline_state_url": f"{lan_base}/pipeline/state" if lan_base else "",
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
             },
             "tunnel": {
@@ -1879,6 +2147,7 @@ def router_info():
                 "llm_config_url": f"{tunnel_base}/llm/config" if tunnel_base else "",
                 "llm_pull_url": f"{tunnel_base}/llm/pull" if tunnel_base else "",
                 "llm_pull_status_url": f"{tunnel_base}/llm/pull/status" if tunnel_base else "",
+                "pipeline_state_url": f"{tunnel_base}/pipeline/state" if tunnel_base else "",
                 "tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             },
             "security": _security_payload(publish_base),
@@ -1893,6 +2162,7 @@ def router_info():
                 "llm_config": "/llm/config",
                 "llm_pull": "/llm/pull",
                 "llm_pull_status": "/llm/pull/status",
+                "pipeline_state": "/pipeline/state",
                 "tts_speak": "/tts/speak",
             },
             "stack": stack,
@@ -2094,6 +2364,9 @@ def main() -> int:
     global ui
     try:
         service_running.set()
+        _record_pipeline_event("asr", "idle", source="pipeline_api", detail="pipeline service startup")
+        _record_pipeline_event("llm", "idle", source="pipeline_api", detail="pipeline service startup")
+        _record_pipeline_event("tts", "idle", source="pipeline_api", detail="pipeline service startup")
         if tunnel_enabled:
             if not _is_cloudflared_installed():
                 if auto_install_cloudflared:

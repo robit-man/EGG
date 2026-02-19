@@ -33,9 +33,12 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
   - `S` opens CPU throttle settings (governor/min/max/auto-apply + apply-now)
   - `C` copies selected service dashboard/link target, `L` logs all discovered service links
   - click `[copy]` in the service table (mouse-enabled terminals) to copy that row link
+  - copied service links auto-include service session keys (`session_key=...`) when auth is enabled
+  - watchdog pulls pipeline observability events and shows ASR/LLM/TTS progress + recognized text in log pane
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
 - `camera_router.py`: camera list/snapshot/video (+ `/mjpeg` and `/jpeg`) routes + terminal dashboard
 - `pipeline_api.py`: HTTP bridge for LLM prompt/TTS prompt + LLM model dashboard (`/llm/dashboard`) + terminal dashboard
+  - includes `/pipeline/state` for live ASR -> LLM -> TTS stage/event observability
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
@@ -49,7 +52,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
 - `8080` camera router (`/auth`, `/list`, `/snapshot/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`)
-- `6590` pipeline API (`/auth`, `/list`, `/health`, `/llm/prompt`, `/llm/dashboard`, `/llm/models`, `/llm/config`, `/llm/pull`, `/llm/pull/status`, `/tts/speak`)
+- `6590` pipeline API (`/auth`, `/list`, `/health`, `/pipeline/state`, `/llm/prompt`, `/llm/dashboard`, `/llm/models`, `/llm/config`, `/llm/pull`, `/llm/pull/status`, `/tts/speak`)
 - `8090` audio router (`/auth`, `/list`, `/devices`, `/devices/select`, `/llm/prompt`, `/tts/speak`, `/webrtc/offer`)
 - `6545` model bridge (`model_to_tts.py`)
 - `6434` voice server (`voice_server.py` via Docker)

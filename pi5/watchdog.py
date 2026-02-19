@@ -62,6 +62,7 @@ import threading
 import time
 import base64
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
@@ -100,6 +101,8 @@ AUTO_UPDATE_PULL_TIMEOUT_SECONDS = 120.0
 AUTO_UPDATE_RUNTIME_SYNC_TIMEOUT_SECONDS = 180.0
 SERVICE_LINK_REFRESH_SECONDS = 15.0
 SERVICE_LINK_HTTP_TIMEOUT_SECONDS = 1.2
+SERVICE_SESSION_REFRESH_SAFETY_SECONDS = 12.0
+PIPELINE_OBS_POLL_SECONDS = 1.2
 DIRECT_LAUNCH_SERVICE_IDS = (
     "tts_output",
     "llm_bridge",
@@ -350,6 +353,7 @@ class WatchdogManager:
         self.runtime_by_id: Dict[str, ServiceRuntime] = {}
 
         self._lock = threading.Lock()
+        self._session_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._service_link_thread: Optional[threading.Thread] = None
@@ -362,9 +366,16 @@ class WatchdogManager:
         self._service_links: Dict[str, Dict[str, str]] = {}
         self._service_link_errors: Dict[str, str] = {}
         self._service_link_last_refresh_at = 0.0
+        self._service_sessions: Dict[str, Dict[str, object]] = {}
         self._service_link_refresh_interval = max(
             8.0,
             float(os.environ.get("WATCHDOG_LINK_REFRESH_SECONDS", SERVICE_LINK_REFRESH_SECONDS)),
+        )
+        self._pipeline_obs_last_seq = 0
+        self._pipeline_obs_last_poll_at = 0.0
+        self._pipeline_obs_poll_interval = max(
+            0.4,
+            float(os.environ.get("WATCHDOG_PIPELINE_OBS_POLL_SECONDS", PIPELINE_OBS_POLL_SECONDS)),
         )
         self._lan_ip = self._detect_lan_ip()
         self.repo_dir = pathlib.Path(
@@ -2621,6 +2632,7 @@ class WatchdogManager:
                     runtime = self.runtime_by_id[svc.service_id]
                     self._sync_single_service(svc, runtime, now)
                 self._update_resource_usage(now)
+            self._poll_pipeline_observability(now)
             self._poll_for_auto_update()
             time.sleep(MONITOR_INTERVAL_SECONDS)
 
@@ -2779,6 +2791,130 @@ class WatchdogManager:
                 next_prefix = f"{prefix}_{idx}" if prefix else str(idx)
                 self._collect_url_values(value, next_prefix, out, depth + 1)
 
+    @staticmethod
+    def _url_with_session_key(url: str, session_key: str) -> str:
+        raw = str(url or "").strip()
+        key = str(session_key or "").strip()
+        if not raw or not key or not (raw.startswith("http://") or raw.startswith("https://")):
+            return raw
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            if not any(str(k) == "session_key" for k, _ in query_pairs):
+                query_pairs.append(("session_key", key))
+            query = urllib.parse.urlencode(query_pairs)
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
+        except Exception:
+            sep = "&" if "?" in raw else "?"
+            return f"{raw}{sep}session_key={urllib.parse.quote_plus(key)}"
+
+    def _service_security_settings(self, svc: ServiceSpec) -> Dict[str, object]:
+        defaults = {"require_auth": False, "password": "egg", "session_timeout": 300}
+        rel = str(svc.config_relpath or "").strip()
+        if not rel:
+            return defaults
+        cfg_path = (self.base_dir / rel).resolve()
+        if not cfg_path.exists():
+            return defaults
+        try:
+            payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            return defaults
+        if not isinstance(payload, dict):
+            return defaults
+
+        base_keys = [
+            str(svc.service_id or "").strip(),
+            "pipeline_api" if svc.service_id == "llm_bridge" else "",
+            "security",
+        ]
+        candidates = []
+        for base in base_keys:
+            base = str(base or "").strip()
+            if not base:
+                continue
+            if base == "security":
+                candidates.append("security")
+            else:
+                candidates.append(f"{base}.security")
+
+        require_auth = defaults["require_auth"]
+        password = defaults["password"]
+        session_timeout = defaults["session_timeout"]
+        for prefix in candidates:
+            req_val = _get_nested(payload, f"{prefix}.require_auth", None)
+            if req_val is not None:
+                if isinstance(req_val, bool):
+                    require_auth = bool(req_val)
+                else:
+                    require_auth = str(req_val).strip().lower() in ("1", "true", "yes", "on")
+            pwd_val = _get_nested(payload, f"{prefix}.password", None)
+            if pwd_val is not None and str(pwd_val).strip():
+                password = str(pwd_val).strip()
+            timeout_val = _get_nested(payload, f"{prefix}.session_timeout", None)
+            if timeout_val is not None:
+                try:
+                    parsed_timeout = int(timeout_val)
+                    if parsed_timeout > 0:
+                        session_timeout = parsed_timeout
+                except Exception:
+                    pass
+
+        return {
+            "require_auth": bool(require_auth),
+            "password": str(password or "egg"),
+            "session_timeout": int(session_timeout if int(session_timeout) > 0 else 300),
+        }
+
+    def _service_session_key(self, svc: ServiceSpec, local_base_url: str) -> Tuple[str, str]:
+        base = str(local_base_url or "").strip().rstrip("/")
+        if not base or not base.startswith("http"):
+            return "", "invalid local base URL"
+        security = self._service_security_settings(svc)
+        require_auth = bool(security.get("require_auth", False))
+        if not require_auth:
+            return "", ""
+
+        now = time.time()
+        with self._session_lock:
+            cached = dict(self._service_sessions.get(svc.service_id, {}))
+        cached_key = str(cached.get("session_key") or "").strip()
+        expires_at = float(cached.get("expires_at") or 0.0)
+        if cached_key and (expires_at - SERVICE_SESSION_REFRESH_SAFETY_SECONDS) > now:
+            return cached_key, ""
+
+        auth_url = f"{base}/auth"
+        password = str(security.get("password") or "egg")
+        timeout = max(0.3, min(3.0, SERVICE_LINK_HTTP_TIMEOUT_SECONDS))
+        try:
+            payload = self._http_json(
+                "POST",
+                auth_url,
+                payload={"password": password},
+                timeout=timeout,
+            )
+            if not isinstance(payload, dict):
+                return "", "auth payload invalid"
+            session_key = str(payload.get("session_key") or "").strip()
+            if not session_key:
+                message = str(payload.get("message") or "missing session_key").strip()
+                return "", message
+            session_timeout = payload.get("timeout", security.get("session_timeout", 300))
+            try:
+                session_timeout = int(session_timeout)
+            except Exception:
+                session_timeout = int(security.get("session_timeout", 300))
+            session_timeout = max(30, session_timeout)
+            with self._session_lock:
+                self._service_sessions[svc.service_id] = {
+                    "session_key": session_key,
+                    "expires_at": now + float(session_timeout),
+                    "timeout": int(session_timeout),
+                }
+            return session_key, ""
+        except Exception as exc:
+            return "", str(exc)
+
     def _service_port(self, svc: ServiceSpec, runtime: Optional[ServiceRuntime] = None) -> int:
         if runtime is not None:
             try:
@@ -2816,9 +2952,26 @@ class WatchdogManager:
                 pipeline_rt = self.runtime_by_id.get("pipeline_api")
                 pipeline_port = self._service_port(pipeline_svc, pipeline_rt) if pipeline_svc else 0
                 if pipeline_port > 0:
-                    links["local_llm_dashboard_url"] = f"http://127.0.0.1:{pipeline_port}/llm/dashboard"
+                    pipeline_base = f"http://127.0.0.1:{pipeline_port}"
+                    pipeline_key = ""
+                    pipeline_err = ""
+                    if pipeline_svc:
+                        pipeline_key, pipeline_err = self._service_session_key(pipeline_svc, pipeline_base)
+                    links["local_llm_dashboard_url"] = self._url_with_session_key(
+                        f"{pipeline_base}/llm/dashboard", pipeline_key
+                    )
+                    links["local_pipeline_state_url"] = self._url_with_session_key(
+                        f"{pipeline_base}/pipeline/state", pipeline_key
+                    )
                     if self._lan_ip:
-                        links["lan_llm_dashboard_url"] = f"http://{self._lan_ip}:{pipeline_port}/llm/dashboard"
+                        links["lan_llm_dashboard_url"] = self._url_with_session_key(
+                            f"http://{self._lan_ip}:{pipeline_port}/llm/dashboard", pipeline_key
+                        )
+                        links["lan_pipeline_state_url"] = self._url_with_session_key(
+                            f"http://{self._lan_ip}:{pipeline_port}/pipeline/state", pipeline_key
+                        )
+                    if pipeline_err and not err:
+                        err = f"pipeline auth: {pipeline_err}"
             return links, err
 
         if port <= 0:
@@ -2844,6 +2997,18 @@ class WatchdogManager:
                     self._collect_url_values(payload, "", links)
             except Exception as exc:
                 err = str(exc)
+
+        session_key, auth_error = self._service_session_key(svc, local_base)
+        if session_key:
+            for key, value in list(links.items()):
+                text = str(value or "").strip()
+                if not (text.startswith("http://") or text.startswith("https://")):
+                    continue
+                if key.endswith("auth_url"):
+                    continue
+                links[key] = self._url_with_session_key(text, session_key)
+        if auth_error and not err:
+            err = f"auth: {auth_error}"
 
         return links, err
 
@@ -2944,6 +3109,79 @@ class WatchdogManager:
             self._service_links = links_by_id
             self._service_link_errors = errors_by_id
             self._service_link_last_refresh_at = time.time()
+
+    def _poll_pipeline_observability(self, now: float):
+        if now - float(self._pipeline_obs_last_poll_at or 0.0) < self._pipeline_obs_poll_interval:
+            return
+        self._pipeline_obs_last_poll_at = now
+
+        svc = self.service_by_id.get("pipeline_api")
+        runtime = self.runtime_by_id.get("pipeline_api")
+        if svc is None or runtime is None:
+            return
+        if runtime.state not in ("running", "degraded", "activating", "launching"):
+            return
+        port = self._service_port(svc, runtime)
+        if port <= 0:
+            return
+        local_base = f"http://127.0.0.1:{port}"
+        session_key, _ = self._service_session_key(svc, local_base)
+        state_url = self._url_with_session_key(f"{local_base}/pipeline/state", session_key)
+        try:
+            payload = self._http_json("GET", state_url, timeout=0.9)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        state = payload.get("pipeline_state", payload.get("state", payload))
+        if not isinstance(state, dict):
+            return
+        events = state.get("events", [])
+        if not isinstance(events, list):
+            return
+
+        latest_seq = int(self._pipeline_obs_last_seq or 0)
+        try:
+            state_seq = int(state.get("seq") or 0)
+        except Exception:
+            state_seq = 0
+        if latest_seq > 0 and state_seq >= 0 and state_seq < latest_seq:
+            # pipeline_api likely restarted and reset sequence numbering; resume from fresh stream.
+            latest_seq = 0
+        new_events = []
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            try:
+                seq = int(item.get("seq") or 0)
+            except Exception:
+                seq = 0
+            if seq > latest_seq:
+                new_events.append(item)
+        if not new_events:
+            return
+
+        new_events.sort(key=lambda evt: int(evt.get("seq") or 0))
+        for evt in new_events[-12:]:
+            stage = str(evt.get("stage") or "").strip().upper() or "PIPELINE"
+            step_state = str(evt.get("state") or "").strip() or "event"
+            source = str(evt.get("source") or "").strip() or "pipeline"
+            text = str(evt.get("text") or "").strip()
+            detail = str(evt.get("detail") or "").strip()
+            text_short = text if len(text) <= 160 else (text[:157] + "...")
+            detail_short = detail if len(detail) <= 120 else (detail[:117] + "...")
+            message = f"[PIPELINE] {stage}:{step_state} ({source})"
+            if text_short:
+                message += f" | text=\"{text_short}\""
+            if detail_short:
+                message += f" | {detail_short}"
+            self._log(message)
+            try:
+                seq_val = int(evt.get("seq") or 0)
+                latest_seq = max(latest_seq, seq_val)
+            except Exception:
+                pass
+        self._pipeline_obs_last_seq = latest_seq
 
     def _service_link_loop(self):
         while not self._stop_event.is_set():

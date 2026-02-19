@@ -200,6 +200,7 @@ else:
         "audio_out_port": 6353,
         "audio_out_sample_rate": 22050,
         "audio_out_channels": 1,
+        "pipeline_event_url": "http://127.0.0.1:6590/pipeline/event",
         "ollama_url": "http://localhost:11434/api/chat",
         "max_history_messages": 3,  # New Configuration Parameter
         "interrupt_on_new_prompt": False,
@@ -207,6 +208,7 @@ else:
     }
     CONFIG_PATH = "llm_bridge_config.json"
     AUDIO_ROUTER_CONFIG_PATH = "audio_router_config.json"
+    PIPELINE_API_CONFIG_PATH = "pipeline_api_config.json"
     
     def load_config():
         if not os.path.exists(CONFIG_PATH):
@@ -363,9 +365,30 @@ else:
         config["audio_out_sample_rate"] = max(8000, audio_out_rate)
         config["audio_out_channels"] = max(1, min(2, audio_out_channels))
         return config
+
+    def apply_pipeline_api_overrides(config):
+        try:
+            with open(PIPELINE_API_CONFIG_PATH, "r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+            if not isinstance(payload, dict):
+                return config
+        except Exception:
+            return config
+
+        host = str(_get_nested(payload, "pipeline_api.network.listen_host", "127.0.0.1")).strip() or "127.0.0.1"
+        if host in ("0.0.0.0", "::"):
+            host = "127.0.0.1"
+        port = _get_nested(payload, "pipeline_api.network.listen_port", 6590)
+        try:
+            port = int(port)
+        except Exception:
+            port = 6590
+        config["pipeline_event_url"] = f"http://{host}:{port}/pipeline/event"
+        return config
     
     CONFIG = merge_config_and_args(CONFIG, args)
     CONFIG = apply_audio_router_overrides(CONFIG)
+    CONFIG = apply_pipeline_api_overrides(CONFIG)
     CONFIG_LOCK = threading.Lock()
     CONFIG_FILE_ABS = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_PATH)
     _config_mtime = 0.0
@@ -478,6 +501,7 @@ else:
         try:
             loaded = load_config()
             loaded = apply_audio_router_overrides(loaded)
+            loaded = apply_pipeline_api_overrides(loaded)
             previous_model = str(CONFIG.get("model", "")).strip()
             with CONFIG_LOCK:
                 CONFIG.clear()
@@ -570,6 +594,30 @@ else:
                 sock.sendall(pcm)
         except Exception:
             # Cue tone is best-effort only; never block request handling.
+            pass
+
+    def _emit_pipeline_event(
+        stage: str,
+        state: str,
+        text: str = "",
+        detail: str = "",
+        source: str = "llm_bridge",
+        level: str = "info",
+    ):
+        try:
+            event_url = str(CONFIG.get("pipeline_event_url", "")).strip()
+            if not event_url:
+                return
+            payload = {
+                "stage": str(stage or "").strip().lower(),
+                "state": str(state or "").strip().lower(),
+                "source": str(source or "llm_bridge").strip(),
+                "text": str(text or "")[:320],
+                "detail": str(detail or "")[:240],
+                "level": str(level or "info").strip().lower() or "info",
+            }
+            requests.post(event_url, json=payload, timeout=0.45)
+        except Exception:
             pass
     
     #############################################
@@ -733,6 +781,7 @@ else:
                 update_history("assistant", sentence)
                 # Enqueue sentence to TTS queue
                 tts_queue.put(sentence)
+                _emit_pipeline_event("tts", "queued", text=sentence, detail="inference sentence enqueued")
                 logging.debug(f"Inference to TTS Handler: Enqueued sentence to TTS: {sentence}")
             except Exception as e:
                 logging.error(f"Inference to TTS Handler: {e}")
@@ -773,6 +822,7 @@ else:
                         logging.info("Ollama Worker: Ongoing inference process terminated.")
                     break
                 logging.info(f"Ollama Worker: Received new prompt: {user_message}")
+                _emit_pipeline_event("llm", "queued", text=user_message, detail=f"request_id={request_id}")
 
                 response_queue = None
                 with response_dict_lock:
@@ -791,6 +841,7 @@ else:
                     args=(user_message, inference_queue)
                 )
                 current_inference_process.start()
+                _emit_pipeline_event("llm", "processing", text=user_message, detail=f"pid={current_inference_process.pid}")
                 logging.info(f"Ollama Worker: Inference process started with PID {current_inference_process.pid}.")
                 if response_queue is not None:
                     try:
@@ -798,11 +849,13 @@ else:
                     except Exception:
                         pass
                 current_inference_process.join()
+                _emit_pipeline_event("llm", "completed", detail=f"request_id={request_id}")
                 logging.info("Ollama Worker: Inference process finished.")
 
             except Empty:
                 continue
             except Exception as e:
+                _emit_pipeline_event("llm", "error", detail=f"worker: {e}", level="error")
                 logging.error(f"Ollama Worker: Unexpected error: {e}")
     
     def inference_process(user_message, output_queue):
@@ -942,12 +995,16 @@ else:
             with socket.create_connection((tts_host, tts_port), timeout=10) as sock:
                 sock.sendall(json.dumps(payload).encode("utf-8"))
             logging.info("TTS prompt forwarded successfully.")
+            _emit_pipeline_event("tts", "forwarded", text=sentence, detail=f"tts_host={tts_host}:{tts_port}")
         except socket.timeout:
             logging.error("TTS socket request timed out.")
+            _emit_pipeline_event("tts", "error", text=sentence, detail="tts socket timeout", level="error")
         except OSError as ce:
             logging.error(f"Connection error during TTS socket forward: {ce}")
+            _emit_pipeline_event("tts", "error", text=sentence, detail=f"tts connection error: {ce}", level="error")
         except Exception as e:
             logging.error(f"Unexpected error during TTS: {e}")
+            _emit_pipeline_event("tts", "error", text=sentence, detail=f"tts forward exception: {e}", level="error")
 
     def update_history(role, content):
         """
@@ -1042,6 +1099,7 @@ else:
                 client_sock.close()
                 return
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
+            _emit_pipeline_event("asr", "captured", text=user_message, detail=f"source={addr[0]}")
 
             thinking_toggle = _parse_thinking_toggle_command(user_message)
             if thinking_toggle is not None:
@@ -1053,6 +1111,8 @@ else:
                 update_history("user", user_message)
                 update_history("assistant", response_content)
                 tts_queue.put(response_content)
+                _emit_pipeline_event("llm", "toggle", text=user_message, detail=response_content)
+                _emit_pipeline_event("tts", "queued", text=response_content, detail="thinking toggle feedback")
                 try:
                     client_sock.sendall(response_content.encode("utf-8"))
                 except Exception as send_exc:
@@ -1065,6 +1125,7 @@ else:
             if current_model and not _ollama_model_installed(current_model):
                 _ensure_ollama_model_ready(current_model)
             _emit_processing_blip(frequency_hz=6000.0, duration_seconds=0.2)
+            _emit_pipeline_event("llm", "processing", text=user_message, detail="llm bridge accepted prompt")
 
             # Generate a unique request ID
             with request_id_lock:

@@ -1907,11 +1907,22 @@ ROUTER_DASHBOARD_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>NKN Router Dashboard</title>
     <style>
+      :root {
+        --bg: #111;
+        --panel: #1b1b1b;
+        --subpanel: #161616;
+        --text: #f4f7ff;
+        --muted: #9aa9c0;
+        --line: #333;
+        --ok: #00d08a;
+        --warn: #ffcc66;
+        --err: #ff6666;
+      }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        background: #111;
-        color: #fff;
+        background: var(--bg);
+        color: var(--text);
         font-family: monospace;
       }
       .wrap {
@@ -1920,9 +1931,9 @@ ROUTER_DASHBOARD_HTML = """
         padding: 1rem;
       }
       .panel {
-        background: #1b1b1b;
-        border: 1px solid #333;
-        border-radius: 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
         padding: 1rem;
         margin-bottom: 1rem;
       }
@@ -1936,17 +1947,17 @@ ROUTER_DASHBOARD_HTML = """
         margin: 0;
       }
       .muted {
-        opacity: 0.85;
+        color: var(--muted);
       }
-      .ok { color: #00d08a; }
-      .warn { color: #ffcc66; }
-      .bad { color: #ff5c5c; }
-      code { color: #ffcc66; }
+      .ok { color: var(--ok); }
+      .warn { color: var(--warn); }
+      .bad { color: var(--err); }
+      code { color: var(--warn); }
       .addr {
-        border: 1px solid #444;
-        border-radius: 6px;
-        background: #222;
-        color: #fff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--subpanel);
+        color: var(--text);
         padding: 0.5rem;
         max-width: 100%;
         overflow: hidden;
@@ -1956,9 +1967,9 @@ ROUTER_DASHBOARD_HTML = """
       }
       button {
         background: #222;
-        color: #fff;
-        border: 1px solid #444;
-        border-radius: 6px;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 8px;
         padding: 0.5rem;
         cursor: pointer;
       }
@@ -1966,8 +1977,8 @@ ROUTER_DASHBOARD_HTML = """
         width: 132px;
         height: 132px;
         padding: 4px;
-        border: 1px solid #444;
-        border-radius: 8px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
         background: #fff;
         color: #111;
         display: flex;
@@ -1976,7 +1987,7 @@ ROUTER_DASHBOARD_HTML = """
         font-size: 0.72rem;
       }
       .router-qr.empty {
-        background: #1b1b1b;
+        background: var(--panel);
         color: #bcbcbc;
       }
       .router-qr img,
@@ -1991,13 +2002,13 @@ ROUTER_DASHBOARD_HTML = """
         gap: 0.75rem;
       }
       .card {
-        background: #1b1b1b;
-        border: 1px solid #333;
-        border-radius: 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
         padding: 0.8rem;
       }
       .card .label {
-        opacity: 0.85;
+        color: var(--muted);
         font-size: 0.78rem;
       }
       .card .value {
@@ -2008,9 +2019,9 @@ ROUTER_DASHBOARD_HTML = """
         width: 100%;
         height: 220px;
         display: block;
-        border-radius: 8px;
-        border: 1px solid #333;
-        background: #161616;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--subpanel);
       }
       .split {
         display: grid;
@@ -2029,22 +2040,22 @@ ROUTER_DASHBOARD_HTML = """
       th, td {
         text-align: left;
         padding: 6px;
-        border-bottom: 1px solid #333;
+        border-bottom: 1px solid var(--line);
         vertical-align: top;
       }
-      th { opacity: 0.85; font-weight: 600; }
+      th { color: var(--muted); font-weight: 600; }
       .small { font-size: 0.82rem; }
       .logs {
         max-height: 320px;
         overflow: auto;
-        background: #161616;
-        border: 1px solid #333;
-        border-radius: 8px;
+        background: var(--subpanel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
         padding: 8px;
       }
       .log-row {
         padding: 4px 0;
-        border-bottom: 1px dotted #333;
+        border-bottom: 1px dotted var(--line);
       }
       .log-row:last-child { border-bottom: 0; }
       @media (max-width: 980px) {

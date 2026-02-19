@@ -8,6 +8,7 @@ import sys
 
 
 CONFIG_PATH = "audio_router_config.json"
+PIPELINE_CONFIG_PATH = "pipeline_api_config.json"
 
 
 def _get_nested(data, path, default=None):
@@ -22,6 +23,16 @@ def _get_nested(data, path, default=None):
 
 def _load_config(base_dir: str) -> dict:
     path = os.path.join(base_dir, CONFIG_PATH)
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_pipeline_config(base_dir: str) -> dict:
+    path = os.path.join(base_dir, PIPELINE_CONFIG_PATH)
     try:
         with open(path, "r", encoding="utf-8") as fp:
             payload = json.load(fp)
@@ -117,6 +128,7 @@ def main() -> int:
     stream_script = os.path.join(base_dir, "whispercpp", "examples", "stream", "stream.py")
     venv_python = os.path.join(base_dir, "whispercpp", "whisper", "bin", "python")
     cfg = _load_config(base_dir)
+    pipeline_cfg = _load_pipeline_config(base_dir)
 
     if not os.path.exists(stream_script):
         print(f"[ASR] Missing stream.py at {stream_script}", flush=True)
@@ -152,6 +164,18 @@ def main() -> int:
         os.environ.get("ASR_CUE_CHANNELS", "").strip() or _get_nested(cfg, "audio_router.audio.output_channels", 1),
         1,
     )
+    pipeline_event_host = (
+        os.environ.get("ASR_PIPELINE_EVENT_HOST", "").strip()
+        or str(_get_nested(pipeline_cfg, "pipeline_api.network.listen_host", "127.0.0.1")).strip()
+        or "127.0.0.1"
+    )
+    if pipeline_event_host in ("0.0.0.0", "::"):
+        pipeline_event_host = "127.0.0.1"
+    pipeline_event_port = _as_int(
+        os.environ.get("ASR_PIPELINE_EVENT_PORT", "").strip()
+        or _get_nested(pipeline_cfg, "pipeline_api.network.listen_port", 6590),
+        6590,
+    )
     model_name = os.environ.get("ASR_MODEL_NAME", "tiny.en").strip() or "tiny.en"
     device_id = _as_int(
         os.environ.get("ASR_DEVICE_ID", "").strip() or _get_nested(cfg, "audio_router.audio.asr_device_id", 0),
@@ -183,6 +207,10 @@ def main() -> int:
         str(cue_rate),
         "--asr_blip_channels",
         str(cue_channels),
+        "--pipeline_event_host",
+        pipeline_event_host,
+        "--pipeline_event_port",
+        str(pipeline_event_port),
         "--device_id",
         str(device_id),
     ]

@@ -2192,21 +2192,40 @@ def index():
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
     <title>Audio Router</title>
     <style>
-      body {{ font-family: monospace; background: #111; color: #f0f0f0; margin: 0; }}
+      :root {{
+        --bg: #111;
+        --panel: #1b1b1b;
+        --line: #333;
+        --text: #f4f7ff;
+        --muted: #a8b6cc;
+        --ok: #00d08a;
+        --warn: #ffcc66;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{ font-family: monospace; background: var(--bg); color: var(--text); margin: 0; }}
       .wrap {{ max-width: 980px; margin: 0 auto; padding: 1rem; }}
-      .card {{ border: 1px solid #333; border-radius: 10px; padding: 1rem; background: #1b1b1b; }}
-      .ok {{ color: #00d08a; }}
-      .warn {{ color: #ffcc66; }}
-      code {{ color: #ffcc66; }}
+      .card {{ border: 1px solid var(--line); border-radius: 12px; padding: 1rem; background: var(--panel); }}
+      .ok {{ color: var(--ok); }}
+      .warn {{ color: var(--warn); }}
+      .muted {{ color: var(--muted); }}
+      code {{ color: var(--warn); }}
+      .chip {{
+        display: inline-block;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 2px 8px;
+        background: #222;
+        color: var(--muted);
+      }}
     </style>
   </head>
   <body>
     <div class=\"wrap\">
       <div class=\"card\">
         <h2 style=\"margin-top:0\">Audio Router</h2>
-        <p>Service is running.</p>
+        <p class=\"muted\">Service is running.</p>
         <p>Use <code>/auth</code> then <code>/list</code>, <code>/llm/prompt</code>, <code>/tts/speak</code>, and <code>/webrtc/offer</code>.</p>
-        <p class=\"warn\">WebRTC: {'enabled' if WEBRTC_AVAILABLE else 'disabled'} | Audio backend: {'enabled' if AUDIO_BACKEND_AVAILABLE else 'disabled'}</p>
+        <p class=\"warn\">WebRTC: <span class=\"chip\">{'enabled' if WEBRTC_AVAILABLE else 'disabled'}</span> | Audio backend: <span class=\"chip\">{'enabled' if AUDIO_BACKEND_AVAILABLE else 'disabled'}</span></p>
       </div>
     </div>
   </body>
@@ -2587,21 +2606,49 @@ def webrtc_player():
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
     <title>Audio Router WebRTC Player</title>
     <style>
-      body { margin: 0; background: #111; color: #fff; font-family: monospace; }
+      :root {
+        --bg: #111;
+        --panel: #1b1b1b;
+        --line: #333;
+        --text: #f4f7ff;
+        --muted: #a8b6cc;
+        --ok: #00d08a;
+        --err: #ff6666;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font-family: monospace; }
       .wrap { max-width: 900px; margin: 0 auto; padding: 1rem; }
-      button { padding: 0.5rem 0.8rem; }
-      audio { width: 100%; margin-top: 0.75rem; }
-      .meta { opacity: 0.85; }
+      .panel { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 1rem; }
+      .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+      button {
+        padding: 0.5rem 0.8rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #222;
+        color: var(--text);
+      }
+      audio {
+        width: 100%;
+        margin-top: 0.75rem;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #161616;
+      }
+      .meta { color: var(--muted); }
     </style>
   </head>
   <body>
     <div class=\"wrap\">
-      <h2>Audio Router WebRTC</h2>
-      <p class=\"meta\">Click Start, allow microphone access, and keep this page open.</p>
-      <button id=\"startBtn\" type=\"button\">Start</button>
-      <button id=\"stopBtn\" type=\"button\">Stop</button>
-      <audio id=\"remoteAudio\" autoplay controls playsinline></audio>
-      <p id=\"status\" class=\"meta\">Idle</p>
+      <div class=\"panel\">
+        <h2 style=\"margin-top:0\">Audio Router WebRTC</h2>
+        <p class=\"meta\">Click Start, allow microphone access, and keep this page open.</p>
+        <div class=\"row\">
+          <button id=\"startBtn\" type=\"button\">Start</button>
+          <button id=\"stopBtn\" type=\"button\">Stop</button>
+        </div>
+        <audio id=\"remoteAudio\" autoplay controls playsinline></audio>
+        <p id=\"status\" class=\"meta\">Idle</p>
+      </div>
     </div>
     <script>
       const params = new URLSearchParams(window.location.search);

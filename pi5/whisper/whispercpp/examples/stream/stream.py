@@ -4,6 +4,8 @@ import time
 import socket
 import re
 import math
+import json
+import urllib.request
 import whispercpp as w
 
 class StreamTranscriber:
@@ -16,6 +18,8 @@ class StreamTranscriber:
         asr_blip_port: int = 6353,
         asr_blip_rate: int = 22050,
         asr_blip_channels: int = 1,
+        pipeline_event_host: str = "127.0.0.1",
+        pipeline_event_port: int = 6590,
     ):
         self.transcriber = w.Whisper.from_pretrained(model_name)
         self.paused = False
@@ -25,6 +29,8 @@ class StreamTranscriber:
         self.asr_blip_port = int(asr_blip_port or 6353)
         self.asr_blip_rate = max(8000, int(asr_blip_rate or 22050))
         self.asr_blip_channels = max(1, min(2, int(asr_blip_channels or 1)))
+        self.pipeline_event_host = str(pipeline_event_host or "127.0.0.1")
+        self.pipeline_event_port = int(pipeline_event_port or 6590)
         self._blip_last_at = 0.0
 
     def clean_text(self, text: str) -> str:
@@ -46,6 +52,12 @@ class StreamTranscriber:
         cleaned_text = self.clean_text(text)
         if cleaned_text:  # Only send if there's text left after cleaning
             self.play_asr_blip()
+            self.emit_pipeline_event(
+                stage="asr",
+                state="captured",
+                text=cleaned_text,
+                detail=f"target={self.target_host}:{self.target_port}",
+            )
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
                     client_socket.connect((self.target_host, self.target_port))
@@ -91,6 +103,28 @@ class StreamTranscriber:
         except Exception:
             pass
 
+    def emit_pipeline_event(self, stage: str, state: str, text: str = "", detail: str = ""):
+        try:
+            payload = {
+                "stage": str(stage or "").strip().lower(),
+                "state": str(state or "").strip().lower(),
+                "source": "asr_stream",
+                "text": str(text or "")[:320],
+                "detail": str(detail or "")[:240],
+            }
+            url = f"http://{self.pipeline_event_host}:{self.pipeline_event_port}/pipeline/event"
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=0.35):
+                pass
+        except Exception:
+            pass
+
     def store_transcript_handler(self, ctx, n_new, data):
         segment = ctx.full_n_segments() - n_new
         cur_segment = ""
@@ -111,6 +145,8 @@ class StreamTranscriber:
             "asr_blip_port",
             "asr_blip_rate",
             "asr_blip_channels",
+            "pipeline_event_host",
+            "pipeline_event_port",
         ):
             runtime_kwargs.pop(ignored_key, None)
         try:
@@ -214,6 +250,18 @@ if __name__ == "__main__":
         help="Channel count for ASR cue tone generation.",
         default=1,
     )
+    parser.add_argument(
+        "--pipeline_event_host",
+        type=str,
+        help="Host for pipeline event ingestion endpoint.",
+        default="127.0.0.1",
+    )
+    parser.add_argument(
+        "--pipeline_event_port",
+        type=int,
+        help="Port for pipeline event ingestion endpoint.",
+        default=6590,
+    )
 
     args = parser.parse_args()
 
@@ -229,5 +277,7 @@ if __name__ == "__main__":
         asr_blip_port=args.asr_blip_port,
         asr_blip_rate=args.asr_blip_rate,
         asr_blip_channels=args.asr_blip_channels,
+        pipeline_event_host=args.pipeline_event_host,
+        pipeline_event_port=args.pipeline_event_port,
     )
     transcriber.main(**vars(args))

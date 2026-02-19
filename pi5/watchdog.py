@@ -365,6 +365,7 @@ class WatchdogManager:
         self._auto_update_poll_seconds = AUTO_UPDATE_POLL_SECONDS
         self._next_auto_update_check_at = 0.0
         self._auto_update_enabled = False
+        self._auto_update_stash_dirty = self._env_flag("WATCHDOG_AUTO_UPDATE_STASH_DIRTY", True)
         self._port_reclaim_enabled = self._env_flag("WATCHDOG_RECLAIM_PORTS", True)
         self._port_reclaim_force = self._env_flag("WATCHDOG_RECLAIM_FORCE", False)
         self._tcp_passive_probe = self._env_flag("WATCHDOG_TCP_PASSIVE_PROBE", True)
@@ -824,6 +825,23 @@ class WatchdogManager:
             self._restart_reason = message
             self._log(f"[UPDATE] {message}; restarting watchdog")
 
+    @staticmethod
+    def _dirty_paths_from_status(status_text: str, limit: int = 6) -> Tuple[List[str], int]:
+        entries = []
+        for raw in str(status_text or "").splitlines():
+            line = str(raw or "").rstrip()
+            if not line:
+                continue
+            path = line[3:].strip() if len(line) >= 4 else line.strip()
+            if "->" in path:
+                path = path.split("->", 1)[-1].strip()
+            if path:
+                entries.append(path)
+        total = len(entries)
+        if limit > 0 and total > limit:
+            return entries[:limit], total
+        return entries, total
+
     def _poll_for_auto_update(self):
         if not self._auto_update_enabled or self._restart_requested:
             return
@@ -886,8 +904,24 @@ class WatchdogManager:
             self._log(f"[WARN] Auto-update skipped (status check failed: {err or 'unknown'})")
             return
         if status_text:
-            self._log("[WARN] Auto-update skipped (local tracked changes present)")
-            return
+            sample_paths, total_paths = self._dirty_paths_from_status(status_text)
+            suffix = ", ".join(sample_paths)
+            if total_paths > len(sample_paths):
+                suffix = f"{suffix}, +{total_paths - len(sample_paths)} more" if suffix else f"+{total_paths} files"
+            if not suffix:
+                suffix = f"{total_paths} file(s)"
+
+            if self._auto_update_stash_dirty:
+                stash_label = datetime.datetime.now().strftime("watchdog-auto-update-%Y%m%d-%H%M%S")
+                ok, stash_out, stash_err = self._git_output("stash", "push", "-m", stash_label)
+                if not ok:
+                    detail = stash_err or stash_out or "unknown stash error"
+                    self._log(f"[WARN] Auto-update skipped (dirty tree and stash failed: {detail})")
+                    return
+                self._log(f"[UPDATE] Stashed {total_paths} local change(s) before pull ({suffix})")
+            else:
+                self._log(f"[WARN] Auto-update skipped (local tracked changes present: {suffix})")
+                return
 
         ok, pull_out, pull_err = self._git_output(
             "pull",

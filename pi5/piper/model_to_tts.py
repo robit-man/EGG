@@ -13,6 +13,7 @@ import time
 import logging
 import multiprocessing  # For handling inference processes
 import math
+import difflib
 from urllib.parse import urlsplit
 
 PSUTIL_AVAILABLE = False
@@ -543,6 +544,206 @@ else:
         if re.search(r"\bthinking(?: mode)? off\b", cleaned):
             return False
         return None
+
+    MODEL_SWITCH_TIMEOUT_SECONDS = 45.0
+    _model_switch_lock = threading.Lock()
+    _pending_model_switch = {
+        "active": False,
+        "query": "",
+        "options": [],
+        "created_at": 0.0,
+        "expires_at": 0.0,
+    }
+
+    def _list_ollama_models():
+        base_url = _resolve_ollama_base_url(CONFIG.get("ollama_url", ""))
+        tags_url = f"{base_url}/api/tags"
+        names = []
+        try:
+            response = requests.get(tags_url, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+            models = payload.get("models", []) if isinstance(payload, dict) else []
+            seen = set()
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        except Exception as exc:
+            logging.warning(f"Model list fetch failed via {tags_url}: {exc}")
+            return []
+        names.sort(key=lambda value: value.lower())
+        return names
+
+    def _normalize_model_key(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+    def _match_model_candidates(query: str, models, limit: int = 4):
+        needle = str(query or "").strip()
+        if not needle:
+            return list(models[: max(1, int(limit))])
+        needle_l = needle.lower()
+        needle_n = _normalize_model_key(needle)
+        ranked = []
+        for name in models:
+            model = str(name or "").strip()
+            if not model:
+                continue
+            model_l = model.lower()
+            model_n = _normalize_model_key(model)
+            score = 0.0
+            if model_l == needle_l:
+                score = 1000.0
+            elif model_n == needle_n and needle_n:
+                score = 960.0
+            elif model_l.startswith(needle_l):
+                score = 840.0
+            elif needle_l in model_l:
+                score = 760.0
+            elif needle_n and needle_n in model_n:
+                score = 700.0
+            else:
+                ratio = difflib.SequenceMatcher(None, needle_l, model_l).ratio()
+                score = ratio * 600.0
+            ranked.append((score, len(model), model))
+        ranked.sort(key=lambda item: (-item[0], item[1], item[2].lower()))
+        top = []
+        seen = set()
+        for score, _, model in ranked:
+            if model in seen:
+                continue
+            if score < 280.0:
+                continue
+            top.append(model)
+            seen.add(model)
+            if len(top) >= max(1, int(limit)):
+                break
+        return top
+
+    def _parse_model_switch_request(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        patterns = (
+            r"^(?:please\s+)?(?:switch|change|set|use)\s+(?:the\s+)?model(?:\s+(?:to|as))?\s*(.*)$",
+            r"^(?:please\s+)?model\s+(?:to|as)\s+(.*)$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, cleaned)
+            if not match:
+                continue
+            target = str(match.group(1) or "").strip()
+            target = re.sub(r"^(?:to|as)\s+", "", target).strip()
+            return target
+        return None
+
+    def _set_pending_model_switch(query_text: str, options):
+        now = time.time()
+        with _model_switch_lock:
+            _pending_model_switch["active"] = True
+            _pending_model_switch["query"] = str(query_text or "").strip()
+            _pending_model_switch["options"] = list(options or [])
+            _pending_model_switch["created_at"] = now
+            _pending_model_switch["expires_at"] = now + MODEL_SWITCH_TIMEOUT_SECONDS
+
+    def _clear_pending_model_switch():
+        with _model_switch_lock:
+            _pending_model_switch["active"] = False
+            _pending_model_switch["query"] = ""
+            _pending_model_switch["options"] = []
+            _pending_model_switch["created_at"] = 0.0
+            _pending_model_switch["expires_at"] = 0.0
+
+    def _get_pending_model_switch():
+        with _model_switch_lock:
+            if not bool(_pending_model_switch.get("active")):
+                return None
+            if float(_pending_model_switch.get("expires_at") or 0.0) <= time.time():
+                _pending_model_switch["active"] = False
+                _pending_model_switch["query"] = ""
+                _pending_model_switch["options"] = []
+                _pending_model_switch["created_at"] = 0.0
+                _pending_model_switch["expires_at"] = 0.0
+                return None
+            return {
+                "query": str(_pending_model_switch.get("query") or ""),
+                "options": list(_pending_model_switch.get("options") or []),
+                "expires_at": float(_pending_model_switch.get("expires_at") or 0.0),
+            }
+
+    def _parse_model_choice_index(text: str, option_count: int):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        if cleaned in ("cancel", "stop", "never mind", "nevermind", "forget it", "abort"):
+            return -1
+
+        number_words = {
+            "one": 1,
+            "two": 2,
+            "three": 3,
+            "four": 4,
+            "five": 5,
+            "first": 1,
+            "second": 2,
+            "third": 3,
+            "fourth": 4,
+            "fifth": 5,
+        }
+        match = re.search(r"\b(\d+)\b", cleaned)
+        if match:
+            try:
+                value = int(match.group(1))
+                if 1 <= value <= option_count:
+                    return value - 1
+            except Exception:
+                pass
+        for word, number in number_words.items():
+            if re.search(rf"\b{re.escape(word)}\b", cleaned):
+                if 1 <= number <= option_count:
+                    return number - 1
+        return None
+
+    def _switch_model_to(target_model: str):
+        target = str(target_model or "").strip()
+        if not target:
+            return False, "Missing model name."
+        with CONFIG_LOCK:
+            current = str(CONFIG.get("model", "")).strip()
+        if current == target:
+            return True, f"Model already set to {target}."
+
+        _emit_pipeline_event("llm", "model_switching", detail=f"from={current or 'unknown'} to={target}")
+        if not _ensure_ollama_model_ready(target):
+            _emit_pipeline_event(
+                "llm",
+                "error",
+                detail=f"model switch failed target={target} reason=prepare_failed",
+                level="error",
+            )
+            return False, f"I could not prepare model {target}."
+
+        with CONFIG_LOCK:
+            CONFIG["model"] = target
+        if not _persist_config():
+            return False, f"I prepared {target}, but failed to save config."
+        _emit_pipeline_event("llm", "model_switched", detail=f"from={current or 'unknown'} to={target}")
+        return True, f"Switching model to {target}."
+
+    def _build_model_choice_prompt(query_text: str, options):
+        display = []
+        for idx, name in enumerate(options, start=1):
+            display.append(f"{idx}. {name}")
+        options_text = " ".join(display)
+        query = str(query_text or "").strip()
+        if query:
+            return f"I found these model matches for {query}. {options_text} Say 1, 2, 3, or 4."
+        return f"Pick a model. {options_text} Say 1, 2, 3, or 4."
 
     def _emit_processing_blip(frequency_hz: float = 6000.0, duration_seconds: float = 0.2):
         """
@@ -1212,6 +1413,152 @@ else:
                     client_sock.sendall(response_content.encode("utf-8"))
                 except Exception as send_exc:
                     logging.error(f"ClientHandler: Failed to send thinking toggle response: {send_exc}")
+                return
+
+            switch_request = _parse_model_switch_request(user_message)
+            if switch_request is not None:
+                available_models = _list_ollama_models()
+                if not available_models:
+                    response_content = "I cannot fetch model list right now. Please try again."
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    _emit_pipeline_event("llm", "error", text=user_message, detail="model switch list unavailable", level="error")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch failure feedback")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+
+                query_text = str(switch_request or "").strip()
+                if not query_text:
+                    with CONFIG_LOCK:
+                        current_model = str(CONFIG.get("model", "")).strip() or "unknown"
+                    preview = available_models[:4]
+                    _set_pending_model_switch("", preview)
+                    response_content = (
+                        f"Current model is {current_model}. "
+                        + _build_model_choice_prompt("", preview)
+                    )
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    _emit_pipeline_event("llm", "model_switch_prompt", detail=f"current={current_model} options={len(preview)}")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch prompt")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+
+                candidates = _match_model_candidates(query_text, available_models, limit=4)
+                if not candidates:
+                    response_content = f"I could not find a close model match for {query_text}."
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    _emit_pipeline_event("llm", "error", text=user_message, detail=f"model switch no match query={query_text}", level="error")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch no-match feedback")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+
+                if len(candidates) == 1:
+                    ok, response_content = _switch_model_to(candidates[0])
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    if ok:
+                        _clear_pending_model_switch()
+                        _emit_pipeline_event("llm", "model_switch", detail=response_content)
+                    else:
+                        _emit_pipeline_event("llm", "error", detail=response_content, level="error")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch feedback")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+
+                _set_pending_model_switch(query_text, candidates)
+                response_content = _build_model_choice_prompt(query_text, candidates)
+                update_history("user", user_message)
+                update_history("assistant", response_content)
+                tts_queue.put(response_content)
+                _emit_pipeline_event(
+                    "llm",
+                    "model_switch_prompt",
+                    text=user_message,
+                    detail=f"query={query_text} candidates={','.join(candidates)}",
+                )
+                _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch prompt")
+                try:
+                    client_sock.sendall(response_content.encode("utf-8"))
+                except Exception as send_exc:
+                    logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                return
+
+            pending_model_switch = _get_pending_model_switch()
+            if pending_model_switch:
+                options = list(pending_model_switch.get("options") or [])
+                choice_index = _parse_model_choice_index(user_message, len(options))
+                if choice_index == -1:
+                    _clear_pending_model_switch()
+                    response_content = "Model switch cancelled."
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    _emit_pipeline_event("llm", "model_switch_cancelled", text=user_message, detail="user cancelled")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch cancel feedback")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+                if choice_index is None:
+                    response_content = _build_model_choice_prompt(str(pending_model_switch.get("query") or ""), options)
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    _emit_pipeline_event("llm", "model_switch_prompt", text=user_message, detail="awaiting numeric selection")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch reprompt")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+                if not (0 <= choice_index < len(options)):
+                    response_content = "Please choose one of the listed model numbers."
+                    update_history("user", user_message)
+                    update_history("assistant", response_content)
+                    tts_queue.put(response_content)
+                    _emit_pipeline_event("llm", "model_switch_prompt", text=user_message, detail="invalid numeric choice")
+                    _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch invalid choice")
+                    try:
+                        client_sock.sendall(response_content.encode("utf-8"))
+                    except Exception as send_exc:
+                        logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
+                    return
+
+                selected_model = str(options[choice_index]).strip()
+                ok, response_content = _switch_model_to(selected_model)
+                if ok:
+                    _clear_pending_model_switch()
+                update_history("user", user_message)
+                update_history("assistant", response_content)
+                tts_queue.put(response_content)
+                if ok:
+                    _emit_pipeline_event("llm", "model_switch", detail=response_content)
+                else:
+                    _emit_pipeline_event("llm", "error", detail=response_content, level="error")
+                _emit_pipeline_event("tts", "queued", text=response_content, detail="model switch selection feedback")
+                try:
+                    client_sock.sendall(response_content.encode("utf-8"))
+                except Exception as send_exc:
+                    logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
                 return
 
             # Append user message to history

@@ -377,6 +377,7 @@ class WatchdogManager:
             0.4,
             float(os.environ.get("WATCHDOG_PIPELINE_OBS_POLL_SECONDS", PIPELINE_OBS_POLL_SECONDS)),
         )
+        self._pipeline_stage_state: Dict[str, str] = {"asr": "idle", "llm": "idle", "tts": "idle"}
         self._lan_ip = self._detect_lan_ip()
         self.repo_dir = pathlib.Path(
             os.environ.get("WATCHDOG_REPO_DIR", str((self.base_dir / "EGG_repo").resolve()))
@@ -415,7 +416,13 @@ class WatchdogManager:
             "min_khz": 800000,
             "max_khz": 1800000,
             "auto_apply": False,
+            "asr_llm_throttle_enable": True,
+            "asr_llm_throttle_percent": 65,
+            "asr_llm_throttle_cycle_ms": 320,
         }
+        self._asr_throttle_paused = False
+        self._asr_throttle_last_switch_at = 0.0
+        self._asr_throttle_target_pid = 0
         self._refresh_cpu_throttle_support()
         self._terminal_emulator = self._detect_terminal_emulator()
         if (
@@ -560,11 +567,26 @@ class WatchdogManager:
         self._cpu_throttle["min_khz"] = int(max(100000, min_khz))
         self._cpu_throttle["max_khz"] = int(max(100000, max_khz))
         self._cpu_throttle["auto_apply"] = bool(self._cpu_throttle.get("auto_apply", False))
+        self._cpu_throttle["asr_llm_throttle_enable"] = bool(
+            self._cpu_throttle.get("asr_llm_throttle_enable", True)
+        )
+        pct = self._parse_int(self._cpu_throttle.get("asr_llm_throttle_percent"), 65)
+        self._cpu_throttle["asr_llm_throttle_percent"] = max(0, min(95, int(pct)))
+        cycle_ms = self._parse_int(self._cpu_throttle.get("asr_llm_throttle_cycle_ms"), 320)
+        self._cpu_throttle["asr_llm_throttle_cycle_ms"] = max(80, min(2000, int(cycle_ms)))
 
     def _apply_loaded_cpu_throttle(self, payload: dict):
         if not isinstance(payload, dict):
             return
-        for key in ("governor", "min_khz", "max_khz", "auto_apply"):
+        for key in (
+            "governor",
+            "min_khz",
+            "max_khz",
+            "auto_apply",
+            "asr_llm_throttle_enable",
+            "asr_llm_throttle_percent",
+            "asr_llm_throttle_cycle_ms",
+        ):
             if key in payload:
                 self._cpu_throttle[key] = payload.get(key)
         self._normalize_cpu_throttle_settings()
@@ -668,6 +690,9 @@ class WatchdogManager:
                 "min_khz": int(self._cpu_throttle.get("min_khz", 0) or 0),
                 "max_khz": int(self._cpu_throttle.get("max_khz", 0) or 0),
                 "auto_apply": bool(self._cpu_throttle.get("auto_apply", False)),
+                "asr_llm_throttle_enable": bool(self._cpu_throttle.get("asr_llm_throttle_enable", True)),
+                "asr_llm_throttle_percent": int(self._cpu_throttle.get("asr_llm_throttle_percent", 65) or 65),
+                "asr_llm_throttle_cycle_ms": int(self._cpu_throttle.get("asr_llm_throttle_cycle_ms", 320) or 320),
             },
         }
         for svc in self.services:
@@ -1068,6 +1093,31 @@ class WatchdogManager:
                     stack.append(int(child))
         return cpu_total, rss_total
 
+    @staticmethod
+    def _aggregate_usage_for_pids(
+        root_pids: Sequence[int],
+        usage_by_pid: Dict[int, Tuple[float, float]],
+        children_by_pid: Dict[int, List[int]],
+    ) -> Tuple[float, float]:
+        cpu_total = 0.0
+        rss_total = 0.0
+        stack = [int(pid) for pid in root_pids if int(pid or 0) > 0]
+        seen = set()
+        while stack:
+            pid = int(stack.pop())
+            if pid in seen:
+                continue
+            seen.add(pid)
+            sample = usage_by_pid.get(pid)
+            if sample:
+                cpu_total += float(sample[0])
+                rss_total += float(sample[1])
+            for child in children_by_pid.get(pid, []):
+                child_pid = int(child or 0)
+                if child_pid > 0 and child_pid not in seen:
+                    stack.append(child_pid)
+        return cpu_total, rss_total
+
     def _update_resource_usage(self, now: float):
         if self._os_name == "windows":
             return
@@ -1081,7 +1131,7 @@ class WatchdogManager:
 
         try:
             result = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,pcpu=,rss="],
+                ["ps", "-eo", "pid=,ppid=,pcpu=,rss=,args="],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -1093,11 +1143,12 @@ class WatchdogManager:
 
         usage_by_pid: Dict[int, Tuple[float, float]] = {}
         children_by_pid: Dict[int, List[int]] = {}
+        args_by_pid: Dict[int, str] = {}
         for raw in (result.stdout or "").splitlines():
             line = raw.strip()
             if not line:
                 continue
-            parts = line.split()
+            parts = line.split(None, 4)
             if len(parts) < 4:
                 continue
             try:
@@ -1107,35 +1158,56 @@ class WatchdogManager:
                 rss_kb = float(parts[3])
             except Exception:
                 continue
+            cmdline = str(parts[4]).strip() if len(parts) > 4 else ""
             usage_by_pid[pid] = (cpu, rss_kb)
+            args_by_pid[pid] = cmdline
             if ppid > 0:
                 children_by_pid.setdefault(ppid, []).append(pid)
 
         for svc in self.services:
             runtime = self.runtime_by_id[svc.service_id]
-            cpu_total = 0.0
-            rss_total = 0.0
-
+            root_pids: List[int] = []
             if runtime.pid and runtime.pid > 0:
-                cpu_total, rss_total = self._aggregate_usage_for_pid(
-                    int(runtime.pid), usage_by_pid, children_by_pid
-                )
+                root_pids.append(int(runtime.pid))
 
             # Wrapper services may host the real worker under a different pid.
-            if cpu_total <= 0.01 and svc.health_mode == "tcp":
-                candidate_port = int(
-                    (runtime.resolved_health_port or 0)
-                    or (svc.resolved_health_port(self.base_dir) or 0)
-                    or (svc.health_port or 0)
-                )
-                if candidate_port > 0:
-                    extra_pids = self._list_listening_pids_for_port(candidate_port)
-                    for pid in extra_pids:
-                        add_cpu, add_rss = self._aggregate_usage_for_pid(
-                            int(pid), usage_by_pid, children_by_pid
-                        )
-                        cpu_total += add_cpu
-                        rss_total += add_rss
+            candidate_port = int(
+                (runtime.resolved_health_port or 0)
+                or (svc.resolved_health_port(self.base_dir) or 0)
+                or (svc.health_port or 0)
+            )
+            if candidate_port > 0:
+                for pid in self._list_listening_pids_for_port(candidate_port):
+                    if int(pid or 0) > 0:
+                        root_pids.append(int(pid))
+
+            # LLM Bridge load is mostly on Ollama runners; include those while LLM is busy.
+            llm_state = str(self._pipeline_stage_state.get("llm") or "idle").strip().lower()
+            llm_busy = llm_state in ("queued", "processing", "streaming", "model_switching")
+            if svc.service_id == "llm_bridge" and llm_busy:
+                for pid, cmdline in args_by_pid.items():
+                    cmd = str(cmdline or "").lower()
+                    if "ollama runner" in cmd:
+                        root_pids.append(int(pid))
+                for pid in self._list_listening_pids_for_port(11434):
+                    if int(pid or 0) > 0:
+                        root_pids.append(int(pid))
+
+            # Ensure Ollama service row reflects active runner subprocesses too.
+            if svc.service_id == "ollama":
+                for pid, cmdline in args_by_pid.items():
+                    cmd = str(cmdline or "").lower()
+                    if "ollama serve" in cmd or "ollama runner" in cmd:
+                        root_pids.append(int(pid))
+                for pid in self._list_listening_pids_for_port(11434):
+                    if int(pid or 0) > 0:
+                        root_pids.append(int(pid))
+
+            cpu_total, rss_total = self._aggregate_usage_for_pids(
+                root_pids,
+                usage_by_pid,
+                children_by_pid,
+            )
 
             runtime.cpu_percent = max(0.0, float(cpu_total))
             runtime.rss_mb = max(0.0, float(rss_total) / 1024.0)
@@ -2624,6 +2696,77 @@ class WatchdogManager:
 
         self._launch_service(svc, runtime, now)
 
+    def _resume_asr_if_paused(self, pid: int = 0):
+        target = int(pid or self._asr_throttle_target_pid or 0)
+        if target <= 0 or not self._asr_throttle_paused:
+            return
+        if self._os_name == "windows":
+            self._asr_throttle_paused = False
+            self._asr_throttle_target_pid = 0
+            return
+        try:
+            os.kill(target, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+        self._asr_throttle_paused = False
+        self._asr_throttle_target_pid = 0
+        self._asr_throttle_last_switch_at = time.time()
+
+    def _apply_asr_llm_throttle(self, now: float):
+        if self._os_name == "windows":
+            return
+        asr_rt = self.runtime_by_id.get("asr_stream")
+        if asr_rt is None or not int(asr_rt.pid or 0):
+            self._resume_asr_if_paused()
+            return
+        asr_pid = int(asr_rt.pid or 0)
+        if not self._is_pid_running(asr_pid):
+            self._resume_asr_if_paused()
+            return
+
+        enabled = bool(self._cpu_throttle.get("asr_llm_throttle_enable", True))
+        llm_state = str(self._pipeline_stage_state.get("llm") or "idle").strip().lower()
+        llm_busy = llm_state in ("queued", "processing", "streaming", "model_switching")
+        if not enabled or not llm_busy:
+            self._resume_asr_if_paused(asr_pid)
+            return
+
+        pct = int(self._cpu_throttle.get("asr_llm_throttle_percent", 65) or 65)
+        pct = max(0, min(95, pct))
+        if pct <= 0:
+            self._resume_asr_if_paused(asr_pid)
+            return
+        cycle_ms = int(self._cpu_throttle.get("asr_llm_throttle_cycle_ms", 320) or 320)
+        cycle_s = max(0.08, min(2.0, float(cycle_ms) / 1000.0))
+        pause_s = cycle_s * (float(pct) / 100.0)
+        run_s = max(0.02, cycle_s - pause_s)
+        elapsed = now - float(self._asr_throttle_last_switch_at or 0.0)
+
+        self._asr_throttle_target_pid = asr_pid
+        if self._asr_throttle_paused:
+            if elapsed >= pause_s:
+                try:
+                    os.kill(asr_pid, signal.SIGCONT)
+                    self._asr_throttle_paused = False
+                    self._asr_throttle_last_switch_at = now
+                except ProcessLookupError:
+                    self._asr_throttle_paused = False
+                except Exception:
+                    pass
+            return
+
+        if elapsed >= run_s:
+            try:
+                os.kill(asr_pid, signal.SIGSTOP)
+                self._asr_throttle_paused = True
+                self._asr_throttle_last_switch_at = now
+            except ProcessLookupError:
+                self._asr_throttle_paused = False
+            except Exception:
+                pass
+
     def _monitor_loop(self):
         while not self._stop_event.is_set():
             now = time.time()
@@ -2632,6 +2775,7 @@ class WatchdogManager:
                     runtime = self.runtime_by_id[svc.service_id]
                     self._sync_single_service(svc, runtime, now)
                 self._update_resource_usage(now)
+                self._apply_asr_llm_throttle(now)
             self._poll_pipeline_observability(now)
             self._poll_for_auto_update()
             time.sleep(MONITOR_INTERVAL_SECONDS)
@@ -2649,6 +2793,7 @@ class WatchdogManager:
         self._service_link_thread.start()
 
     def request_shutdown(self):
+        self._resume_asr_if_paused()
         with self._lock:
             for svc in self.services:
                 runtime = self.runtime_by_id[svc.service_id]
@@ -3136,6 +3281,16 @@ class WatchdogManager:
         state = payload.get("pipeline_state", payload.get("state", payload))
         if not isinstance(state, dict):
             return
+        stages = state.get("stages", {})
+        if isinstance(stages, dict):
+            next_stage_state = {}
+            for key in ("asr", "llm", "tts"):
+                entry = stages.get(key, {})
+                if isinstance(entry, dict):
+                    next_stage_state[key] = str(entry.get("state") or "idle").strip().lower() or "idle"
+                else:
+                    next_stage_state[key] = "idle"
+            self._pipeline_stage_state = next_stage_state
         events = state.get("events", [])
         if not isinstance(events, list):
             return
@@ -3454,6 +3609,9 @@ class WatchdogManager:
             "Min Frequency (kHz)",
             "Max Frequency (kHz)",
             "Auto Apply On Start",
+            "ASR Throttle On LLM",
+            "ASR Throttle Percent",
+            "ASR Throttle Cycle (ms)",
             "Apply Now",
             "Save",
             "Cancel",
@@ -3505,6 +3663,9 @@ class WatchdogManager:
                 str(local_cfg.get("min_khz", "")),
                 str(local_cfg.get("max_khz", "")),
                 "ON" if bool(local_cfg.get("auto_apply", False)) else "OFF",
+                "ON" if bool(local_cfg.get("asr_llm_throttle_enable", True)) else "OFF",
+                str(local_cfg.get("asr_llm_throttle_percent", 65)),
+                str(local_cfg.get("asr_llm_throttle_cycle_ms", 320)),
                 "Apply desired values now",
                 "Save desired values",
                 "Discard changes",
@@ -3580,6 +3741,26 @@ class WatchdogManager:
             elif selected == 3:
                 local_cfg["auto_apply"] = not bool(local_cfg.get("auto_apply", False))
             elif selected == 4:
+                local_cfg["asr_llm_throttle_enable"] = not bool(local_cfg.get("asr_llm_throttle_enable", True))
+            elif selected == 5:
+                typed = self._prompt_text_input(
+                    stdscr,
+                    "ASR throttle percent (0-95): ",
+                    str(local_cfg.get("asr_llm_throttle_percent", "65")),
+                )
+                if typed:
+                    parsed = self._parse_int(typed, int(local_cfg.get("asr_llm_throttle_percent", 65) or 65))
+                    local_cfg["asr_llm_throttle_percent"] = max(0, min(95, parsed))
+            elif selected == 6:
+                typed = self._prompt_text_input(
+                    stdscr,
+                    "ASR throttle cycle ms (80-2000): ",
+                    str(local_cfg.get("asr_llm_throttle_cycle_ms", "320")),
+                )
+                if typed:
+                    parsed = self._parse_int(typed, int(local_cfg.get("asr_llm_throttle_cycle_ms", 320) or 320))
+                    local_cfg["asr_llm_throttle_cycle_ms"] = max(80, min(2000, parsed))
+            elif selected == 7:
                 with self._lock:
                     self._cpu_throttle.update(local_cfg)
                     self._normalize_cpu_throttle_settings()
@@ -3597,7 +3778,7 @@ class WatchdogManager:
                     throttle_supported = bool(self._cpu_throttle_supported)
                     hw_min = int(self._cpu_hw_min_khz or 0)
                     hw_max = int(self._cpu_hw_max_khz or 0)
-            elif selected == 5:
+            elif selected == 8:
                 with self._lock:
                     self._cpu_throttle.update(local_cfg)
                     self._normalize_cpu_throttle_settings()
@@ -3610,7 +3791,7 @@ class WatchdogManager:
                         f"auto={'on' if self._cpu_throttle['auto_apply'] else 'off'}"
                     )
                 return
-            elif selected == 6:
+            elif selected == 9:
                 return
 
             if int(local_cfg.get("min_khz", 0) or 0) > int(local_cfg.get("max_khz", 0) or 0):

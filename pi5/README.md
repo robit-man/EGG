@@ -41,6 +41,10 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
 - `run_ollama_service.py`: Ollama service wrapper
+- Audio cues:
+  - ASR capture cue: short high blip when transcript is captured and forwarded
+  - LLM processing cue: short mid blip when LLM prompt processing begins
+  - `audio_router.audio.tts_tail_silence_ms` (default `90`) adds post-TTS silence padding to reduce clipped phrase endings
 
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)

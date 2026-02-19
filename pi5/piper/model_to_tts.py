@@ -12,6 +12,7 @@ import shutil
 import time
 import logging
 import multiprocessing  # For handling inference processes
+import math
 from urllib.parse import urlsplit
 
 PSUTIL_AVAILABLE = False
@@ -195,6 +196,10 @@ else:
         "tts_host": "127.0.0.1",
         "tts_port": 6434,
         "tts_url": "http://localhost:6434",
+        "audio_out_host": "127.0.0.1",
+        "audio_out_port": 6353,
+        "audio_out_sample_rate": 22050,
+        "audio_out_channels": 1,
         "ollama_url": "http://localhost:11434/api/chat",
         "max_history_messages": 3,  # New Configuration Parameter
         "interrupt_on_new_prompt": False,
@@ -330,6 +335,33 @@ else:
             config["tts_host"] = tts_host
         config["tts_port"] = tts_port
         config["tts_url"] = f"http://{config['tts_host']}:{config['tts_port']}"
+        audio_out_host = str(
+            _get_nested(payload, "audio_router.integrations.audio_out_host", config.get("audio_out_host", "127.0.0.1"))
+        ).strip()
+        audio_out_port = _get_nested(payload, "audio_router.integrations.audio_out_port", config.get("audio_out_port", 6353))
+        audio_out_rate = _get_nested(
+            payload, "audio_router.audio.output_sample_rate", config.get("audio_out_sample_rate", 22050)
+        )
+        audio_out_channels = _get_nested(
+            payload, "audio_router.audio.output_channels", config.get("audio_out_channels", 1)
+        )
+        try:
+            audio_out_port = int(audio_out_port)
+        except Exception:
+            audio_out_port = int(config.get("audio_out_port", 6353))
+        try:
+            audio_out_rate = int(audio_out_rate)
+        except Exception:
+            audio_out_rate = int(config.get("audio_out_sample_rate", 22050))
+        try:
+            audio_out_channels = int(audio_out_channels)
+        except Exception:
+            audio_out_channels = int(config.get("audio_out_channels", 1))
+
+        config["audio_out_host"] = audio_out_host or "127.0.0.1"
+        config["audio_out_port"] = audio_out_port
+        config["audio_out_sample_rate"] = max(8000, audio_out_rate)
+        config["audio_out_channels"] = max(1, min(2, audio_out_channels))
         return config
     
     CONFIG = merge_config_and_args(CONFIG, args)
@@ -487,6 +519,58 @@ else:
         if re.search(r"\bthinking(?: mode)? off\b", cleaned):
             return False
         return None
+
+    def _emit_processing_blip(frequency_hz: float = 6000.0, duration_seconds: float = 0.2):
+        """
+        Emit a short PCM cue directly to the raw audio output socket.
+        This avoids TTS inference overhead for immediate auditory feedback.
+        """
+        try:
+            host = str(CONFIG.get("audio_out_host", "127.0.0.1")).strip() or "127.0.0.1"
+            try:
+                port = int(CONFIG.get("audio_out_port", 6353))
+            except Exception:
+                port = 6353
+            try:
+                sample_rate = int(CONFIG.get("audio_out_sample_rate", 22050))
+            except Exception:
+                sample_rate = 22050
+            sample_rate = max(8000, sample_rate)
+            try:
+                channels = int(CONFIG.get("audio_out_channels", 1))
+            except Exception:
+                channels = 1
+            channels = max(1, min(2, channels))
+
+            # Keep cue stable if configured sample-rate cannot represent requested tone.
+            safe_max_hz = (sample_rate * 0.5) - 120.0
+            if safe_max_hz < 200.0:
+                safe_max_hz = 200.0
+            freq = min(float(frequency_hz), safe_max_hz)
+            duration = max(0.02, float(duration_seconds))
+            frame_count = max(1, int(sample_rate * duration))
+            amplitude = 0.18
+            omega = (2.0 * math.pi * freq) / float(sample_rate)
+
+            pcm = bytearray(frame_count * channels * 2)
+            pos = 0
+            for i in range(frame_count):
+                sample = int(32767.0 * amplitude * math.sin(omega * i))
+                if sample > 32767:
+                    sample = 32767
+                if sample < -32768:
+                    sample = -32768
+                lo = sample & 0xFF
+                hi = (sample >> 8) & 0xFF
+                for _ in range(channels):
+                    pcm[pos] = lo
+                    pcm[pos + 1] = hi
+                    pos += 2
+            with socket.create_connection((host, port), timeout=0.25) as sock:
+                sock.sendall(pcm)
+        except Exception:
+            # Cue tone is best-effort only; never block request handling.
+            pass
     
     #############################################
     # Step 6: Load Optional Configurations       #
@@ -980,6 +1064,7 @@ else:
             current_model = str(CONFIG.get("model", "")).strip()
             if current_model and not _ollama_model_installed(current_model):
                 _ensure_ollama_model_ready(current_model)
+            _emit_processing_blip(frequency_hz=6000.0, duration_seconds=0.2)
 
             # Generate a unique request ID
             with request_id_lock:

@@ -135,6 +135,23 @@ def main() -> int:
         os.environ.get("ASR_TARGET_PORT", "").strip() or _get_nested(cfg, "audio_router.integrations.llm_port", 6545),
         6545,
     )
+    cue_host = (
+        os.environ.get("ASR_CUE_HOST", "").strip()
+        or str(_get_nested(cfg, "audio_router.integrations.audio_out_host", "127.0.0.1")).strip()
+        or "127.0.0.1"
+    )
+    cue_port = _as_int(
+        os.environ.get("ASR_CUE_PORT", "").strip() or _get_nested(cfg, "audio_router.integrations.audio_out_port", 6353),
+        6353,
+    )
+    cue_rate = _as_int(
+        os.environ.get("ASR_CUE_RATE", "").strip() or _get_nested(cfg, "audio_router.audio.output_sample_rate", 22050),
+        22050,
+    )
+    cue_channels = _as_int(
+        os.environ.get("ASR_CUE_CHANNELS", "").strip() or _get_nested(cfg, "audio_router.audio.output_channels", 1),
+        1,
+    )
     model_name = os.environ.get("ASR_MODEL_NAME", "tiny.en").strip() or "tiny.en"
     device_id = _as_int(
         os.environ.get("ASR_DEVICE_ID", "").strip() or _get_nested(cfg, "audio_router.audio.asr_device_id", 0),
@@ -158,6 +175,14 @@ def main() -> int:
         target_host,
         "--target_port",
         str(target_port),
+        "--asr_blip_host",
+        cue_host,
+        "--asr_blip_port",
+        str(cue_port),
+        "--asr_blip_rate",
+        str(cue_rate),
+        "--asr_blip_channels",
+        str(cue_channels),
         "--device_id",
         str(device_id),
     ]

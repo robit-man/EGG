@@ -23,6 +23,9 @@ DEFAULT_RETRY_DELAY_SECONDS = 0.7
 DEFAULT_STARTUP_ANNOUNCEMENT_ENABLED = True
 DEFAULT_STARTUP_ANNOUNCEMENT_TEXT = "hello there, egg is online"
 DEFAULT_STARTUP_ANNOUNCEMENT_TIMEOUT_SECONDS = 45.0
+DEFAULT_OUTPUT_SAMPLE_RATE = 22050
+DEFAULT_OUTPUT_CHANNELS = 1
+DEFAULT_TTS_TAIL_SILENCE_MS = 90
 VERBOSE_CONNECTION_LOGS = str(os.environ.get("VOICE_SERVER_VERBOSE_CONNECTION_LOGS", "0")).strip().lower() in (
     "1",
     "true",
@@ -158,6 +161,24 @@ def _load_runtime_settings():
             minimum=1.0,
             maximum=300.0,
         ),
+        "output_sample_rate": _as_int(
+            _get_nested(payload, "audio_router.audio.output_sample_rate", DEFAULT_OUTPUT_SAMPLE_RATE),
+            DEFAULT_OUTPUT_SAMPLE_RATE,
+            minimum=8000,
+            maximum=192000,
+        ),
+        "output_channels": _as_int(
+            _get_nested(payload, "audio_router.audio.output_channels", DEFAULT_OUTPUT_CHANNELS),
+            DEFAULT_OUTPUT_CHANNELS,
+            minimum=1,
+            maximum=2,
+        ),
+        "tts_tail_silence_ms": _as_float(
+            _get_nested(payload, "audio_router.audio.tts_tail_silence_ms", DEFAULT_TTS_TAIL_SILENCE_MS),
+            DEFAULT_TTS_TAIL_SILENCE_MS,
+            minimum=0.0,
+            maximum=500.0,
+        ),
     }
 
 
@@ -201,6 +222,33 @@ def _send_audio_to_output(raw_audio: bytes, settings: dict) -> bool:
     return False
 
 
+def _append_tail_silence(raw_audio: bytes, settings: dict) -> bytes:
+    data = raw_audio or b""
+    try:
+        tail_ms = float(settings.get("tts_tail_silence_ms", DEFAULT_TTS_TAIL_SILENCE_MS))
+    except Exception:
+        tail_ms = float(DEFAULT_TTS_TAIL_SILENCE_MS)
+    if tail_ms <= 0.0:
+        return data
+
+    try:
+        sample_rate = int(settings.get("output_sample_rate", DEFAULT_OUTPUT_SAMPLE_RATE))
+    except Exception:
+        sample_rate = int(DEFAULT_OUTPUT_SAMPLE_RATE)
+    sample_rate = max(8000, sample_rate)
+    try:
+        channels = int(settings.get("output_channels", DEFAULT_OUTPUT_CHANNELS))
+    except Exception:
+        channels = int(DEFAULT_OUTPUT_CHANNELS)
+    channels = max(1, min(2, channels))
+
+    frame_count = int((sample_rate * tail_ms) / 1000.0)
+    if frame_count <= 0:
+        return data
+    silence = b"\x00\x00" * channels * frame_count
+    return data + silence
+
+
 def tts_worker(queue: Queue):
     while True:
         text_content = queue.get()
@@ -225,7 +273,8 @@ def tts_worker(queue: Queue):
                 _log(f"Piper error: {stderr.decode('utf-8', errors='replace')}")
 
             settings = _load_runtime_settings()
-            if _send_audio_to_output(stdout or b"", settings):
+            raw_audio = _append_tail_silence(stdout or b"", settings)
+            if _send_audio_to_output(raw_audio, settings):
                 _debug("Raw audio forwarded to output service.")
             else:
                 _log("Raw audio forwarding failed after retries.")

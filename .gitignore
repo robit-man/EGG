@@ -1,2 +1,42 @@
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+*/.venv/
+*/venv/
+*/env/
+pi5/watchdog_venv/
+pi5/camera_router_venv/
+pi5/output_venv/
+
+# Watchdog/runtime artifacts
+pi5/.watchdog_runtime/
+pi5/*.pid
+pi5/*.log
+*.log
+
+# Local runtime-generated service config/state
+pi5/router_config.json
+pi5/camera_router_config.json
+pi5/pipeline_api_config.json
+pi5/audio_router_config.json
+pi5/llm_bridge_config.json
+pi5/chat.json
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+pi5/whisper/whispercpp/dist/
+pi5/whisper/whispercpp/build/
+pi5/whisper/whispercpp/.pytest_cache/
+pi5/whisper/whispercpp/.mypy_cache/
+
+# Existing per-folder cache patterns
 pi5/__*
 pi5/piper/__*

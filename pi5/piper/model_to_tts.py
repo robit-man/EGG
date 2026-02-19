@@ -12,6 +12,7 @@ import shutil
 import time
 import logging
 import multiprocessing  # For handling inference processes
+from urllib.parse import urlsplit
 
 PSUTIL_AVAILABLE = False
 ALSAAUDIO_AVAILABLE = False
@@ -164,8 +165,9 @@ else:
     #############################################
     
     DEFAULT_CONFIG = {
-        "model": "llama3.2:3b",
+        "model": "qwen3:0.6b",
         "stream": True,
+        "thinking_enabled": False,
         "format": None,
         "system": ("You are a highly efficient and curious small language model running on a Raspberry Pi 5. "
                    "Your primary goal is to provide clear, concise, and actionable responses. Avoid disclaimers about "
@@ -195,6 +197,7 @@ else:
         "tts_url": "http://localhost:6434",
         "ollama_url": "http://localhost:11434/api/chat",
         "max_history_messages": 3,  # New Configuration Parameter
+        "interrupt_on_new_prompt": False,
         "offline_mode": False  # Default offline mode
     }
     CONFIG_PATH = "llm_bridge_config.json"
@@ -233,6 +236,8 @@ else:
     
     parser.add_argument("--model", type=str, help="Model name to use.")
     parser.add_argument("--stream", action="store_true", help="Enable streaming responses from the model.")
+    parser.add_argument("--thinking", dest="thinking_enabled", action="store_true", help="Enable model thinking mode.")
+    parser.add_argument("--thinking-off", dest="thinking_enabled", action="store_false", help="Disable model thinking mode.")
     parser.add_argument("--format", type=str, help="Structured output format: 'json' or path to JSON schema file.")
     parser.add_argument("--system", type=str, help="System message override.")
     parser.add_argument("--raw", action="store_true", help="If set, use raw mode (no template).")
@@ -252,6 +257,7 @@ else:
     
     # New Argument to Force Offline Mode
     parser.add_argument("--offline", action="store_true", help="Force the script to operate in offline mode.")
+    parser.set_defaults(thinking_enabled=None)
     
     args = parser.parse_args()
     
@@ -260,6 +266,8 @@ else:
             config["model"] = args.model
         if args.stream:
             config["stream"] = True
+        if args.thinking_enabled is not None:
+            config["thinking_enabled"] = bool(args.thinking_enabled)
         if args.format is not None:
             config["format"] = args.format
         if args.system is not None:
@@ -326,6 +334,159 @@ else:
     
     CONFIG = merge_config_and_args(CONFIG, args)
     CONFIG = apply_audio_router_overrides(CONFIG)
+    CONFIG_LOCK = threading.Lock()
+    CONFIG_FILE_ABS = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_PATH)
+    _config_mtime = 0.0
+
+    def _as_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return bool(default)
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    def _persist_config():
+        try:
+            with CONFIG_LOCK:
+                with open(CONFIG_FILE_ABS, "w", encoding="utf-8") as fp:
+                    json.dump(CONFIG, fp, indent=2)
+            return True
+        except Exception as exc:
+            logging.error(f"Failed to persist {CONFIG_PATH}: {exc}")
+            return False
+
+    def _resolve_ollama_base_url(chat_url: str) -> str:
+        raw = str(chat_url or "").strip() or "http://127.0.0.1:11434/api/chat"
+        candidate = raw if "://" in raw else f"http://{raw.lstrip('/')}"
+        parsed = urlsplit(candidate)
+        if parsed.netloc:
+            scheme = parsed.scheme or "http"
+            return f"{scheme}://{parsed.netloc}".rstrip("/")
+        return "http://127.0.0.1:11434"
+
+    def _ollama_model_installed(model_name: str) -> bool:
+        model = str(model_name or "").strip()
+        if not model:
+            return False
+        base_url = _resolve_ollama_base_url(CONFIG.get("ollama_url", ""))
+        tags_url = f"{base_url}/api/tags"
+        try:
+            response = requests.get(tags_url, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+            models = payload.get("models", []) if isinstance(payload, dict) else []
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name == model:
+                    return True
+        except Exception as exc:
+            logging.warning(f"Model check failed for '{model}' via {tags_url}: {exc}")
+        return False
+
+    def _pull_ollama_model(model_name: str) -> bool:
+        model = str(model_name or "").strip()
+        if not model:
+            return False
+        base_url = _resolve_ollama_base_url(CONFIG.get("ollama_url", ""))
+        pull_url = f"{base_url}/api/pull"
+        logging.info(f"Pulling missing model '{model}' from {pull_url}...")
+        try:
+            with requests.post(
+                pull_url,
+                json={"model": model, "stream": True},
+                headers={"Content-Type": "application/json"},
+                stream=True,
+                timeout=(10, 3600),
+            ) as response:
+                response.raise_for_status()
+                last_status = ""
+                for line in response.iter_lines(decode_unicode=True):
+                    text = str(line or "").strip()
+                    if not text:
+                        continue
+                    status_line = text
+                    try:
+                        payload = json.loads(text)
+                        if isinstance(payload, dict):
+                            status_line = str(payload.get("status") or text).strip() or text
+                            if payload.get("error"):
+                                raise RuntimeError(str(payload.get("error")))
+                    except json.JSONDecodeError:
+                        pass
+                    if status_line != last_status:
+                        logging.info(f"[MODEL PULL] {status_line}")
+                        last_status = status_line
+            return True
+        except Exception as exc:
+            logging.error(f"Failed to pull model '{model}': {exc}")
+            return False
+
+    def _ensure_ollama_model_ready(model_name: str) -> bool:
+        model = str(model_name or "").strip()
+        if not model:
+            return False
+        if _ollama_model_installed(model):
+            return True
+        logging.warning(f"Configured model '{model}' is missing; auto-pull requested.")
+        ok = _pull_ollama_model(model)
+        if not ok:
+            return False
+        return _ollama_model_installed(model)
+
+    def _reload_config_if_updated():
+        global _config_mtime
+        try:
+            current_mtime = os.path.getmtime(CONFIG_FILE_ABS)
+        except Exception:
+            return
+        if current_mtime <= (_config_mtime or 0.0):
+            return
+        try:
+            loaded = load_config()
+            loaded = apply_audio_router_overrides(loaded)
+            previous_model = str(CONFIG.get("model", "")).strip()
+            with CONFIG_LOCK:
+                CONFIG.clear()
+                CONFIG.update(loaded)
+            _config_mtime = float(current_mtime)
+            next_model = str(CONFIG.get("model", "")).strip()
+            if next_model and next_model != previous_model:
+                _ensure_ollama_model_ready(next_model)
+            logging.info(
+                "Reloaded llm bridge config: "
+                f"model={CONFIG.get('model')} thinking={'on' if _as_bool(CONFIG.get('thinking_enabled'), False) else 'off'}"
+            )
+        except Exception as exc:
+            logging.warning(f"Config hot-reload failed: {exc}")
+
+    def _set_thinking_enabled(enabled: bool):
+        target = bool(enabled)
+        changed = False
+        with CONFIG_LOCK:
+            current = _as_bool(CONFIG.get("thinking_enabled", False), False)
+            if current != target:
+                CONFIG["thinking_enabled"] = target
+                changed = True
+        if changed:
+            _persist_config()
+        return changed
+
+    def _parse_thinking_toggle_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        if re.search(r"\bturn(?: the)? thinking(?: mode)? on\b", cleaned):
+            return True
+        if re.search(r"\bturn(?: the)? thinking(?: mode)? off\b", cleaned):
+            return False
+        if re.search(r"\bthinking(?: mode)? on\b", cleaned):
+            return True
+        if re.search(r"\bthinking(?: mode)? off\b", cleaned):
+            return False
+        return None
     
     #############################################
     # Step 6: Load Optional Configurations       #
@@ -377,14 +538,22 @@ else:
     #############################################
     # Step 7: Ensure Ollama and Model are Installed #
     #############################################
-    
-    # Removed all functions and checks related to model availability and installation.
-    # The script will now always attempt to use the model specified in the configuration without verifying its availability.
-    # This includes removing the 'ensure_ollama_and_model' function and setting 'MODEL_AVAILABLE' to True unconditionally.
-    
-    # Set MODEL_AVAILABLE to True to always enable model inference.
-    MODEL_AVAILABLE = True
-    logging.info(f"Configured to use model: {CONFIG['model']} regardless of availability.")
+
+    try:
+        _config_mtime = float(os.path.getmtime(CONFIG_FILE_ABS))
+    except Exception:
+        _config_mtime = 0.0
+
+    MODEL_AVAILABLE = _ensure_ollama_model_ready(str(CONFIG.get("model", "")))
+    if MODEL_AVAILABLE:
+        logging.info(
+            f"Configured model ready: {CONFIG.get('model')} "
+            f"(thinking {'on' if _as_bool(CONFIG.get('thinking_enabled', False), False) else 'off'})"
+        )
+    else:
+        logging.warning(
+            f"Configured model '{CONFIG.get('model')}' is unavailable; requests may fail until pull completes."
+        )
     
     #############################################
     # Step 8: Ollama chat interaction
@@ -432,7 +601,8 @@ else:
         payload = {
             "model": CONFIG["model"],
             "messages": messages,
-            "stream": CONFIG["stream"]
+            "stream": CONFIG["stream"],
+            "think": _as_bool(CONFIG.get("thinking_enabled", False), False),
         }
     
         if format_schema:
@@ -503,7 +673,7 @@ else:
     def ollama_worker():
         """
         Worker thread that processes messages from the Ollama queue.
-        Manages inference processes and handles CPU usage constraints.
+        Processes one inference at a time to avoid interrupting active speech output.
         """
         current_inference_process = None  # Track the current inference process
         while True:
@@ -519,22 +689,17 @@ else:
                         logging.info("Ollama Worker: Ongoing inference process terminated.")
                     break
                 logging.info(f"Ollama Worker: Received new prompt: {user_message}")
-                
-                # Check if an inference process is already running
+
+                response_queue = None
+                with response_dict_lock:
+                    response_queue = response_dict.pop(request_id, None)
+
+                # Wait for any active inference to finish before starting a new prompt.
                 if current_inference_process and current_inference_process.is_alive():
-                    cpu_usage = _cpu_percent(interval=1)
-                    logging.info(f"Ollama Worker: Current CPU usage is {cpu_usage}%.")
-                    if cpu_usage > 50:
-                        logging.info("Ollama Worker: CPU usage > 50%. Terminating current inference.")
-                        current_inference_process.terminate()
-                        current_inference_process.join()
-                        logging.info("Ollama Worker: Current inference terminated.")
-                    else:
-                        logging.info("Ollama Worker: CPU usage <= 50%. Waiting for current inference to finish.")
-                        # Wait until the current inference finishes
-                        current_inference_process.join()
-                        logging.info("Ollama Worker: Previous inference completed.")
-                
+                    logging.info("Ollama Worker: Waiting for active inference to complete before next prompt.")
+                    current_inference_process.join()
+                    logging.info("Ollama Worker: Previous inference completed.")
+
                 # Start a new inference process for the new prompt
                 logging.info("Ollama Worker: Starting new inference process.")
                 current_inference_process = multiprocessing.Process(
@@ -543,9 +708,14 @@ else:
                 )
                 current_inference_process.start()
                 logging.info(f"Ollama Worker: Inference process started with PID {current_inference_process.pid}.")
-                
-                # Continue listening for new prompts
-                
+                if response_queue is not None:
+                    try:
+                        response_queue.put("Prompt accepted.")
+                    except Exception:
+                        pass
+                current_inference_process.join()
+                logging.info("Ollama Worker: Inference process finished.")
+
             except Empty:
                 continue
             except Exception as e:
@@ -557,11 +727,12 @@ else:
         Sends sentences to the output_queue for TTS.
         """
         try:
+            ollama_chat_url = str(CONFIG.get("ollama_url", OLLAMA_CHAT_URL)).strip() or OLLAMA_CHAT_URL
             payload = build_payload(user_message)
             if CONFIG["stream"]:
                 # Streaming response
                 with requests.post(
-                    OLLAMA_CHAT_URL,
+                    ollama_chat_url,
                     json=payload,
                     headers={"Content-Type": "application/json"},
                     stream=True
@@ -602,7 +773,7 @@ else:
             else:
                 # Non-streaming response
                 r = requests.post(
-                    OLLAMA_CHAT_URL,
+                    ollama_chat_url,
                     json=payload,
                     headers={"Content-Type": "application/json"}
                 )
@@ -775,6 +946,7 @@ else:
         Handle individual client connections.
         """
         try:
+            _reload_config_if_updated()
             data = client_sock.recv(65536)
             if not data:
                 logging.debug(f"ClientHandler: No data from {addr}, closing connection.")
@@ -787,8 +959,27 @@ else:
                 return
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
 
+            thinking_toggle = _parse_thinking_toggle_command(user_message)
+            if thinking_toggle is not None:
+                changed = _set_thinking_enabled(thinking_toggle)
+                state_text = "On" if thinking_toggle else "Off"
+                response_content = f"Turned Thinking {state_text}"
+                if not changed:
+                    response_content = f"Thinking already {state_text}"
+                update_history("user", user_message)
+                update_history("assistant", response_content)
+                tts_queue.put(response_content)
+                try:
+                    client_sock.sendall(response_content.encode("utf-8"))
+                except Exception as send_exc:
+                    logging.error(f"ClientHandler: Failed to send thinking toggle response: {send_exc}")
+                return
+
             # Append user message to history
             update_history("user", user_message)
+            current_model = str(CONFIG.get("model", "")).strip()
+            if current_model and not _ollama_model_installed(current_model):
+                _ensure_ollama_model_ready(current_model)
 
             # Generate a unique request ID
             with request_id_lock:

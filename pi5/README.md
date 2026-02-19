@@ -31,9 +31,11 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
   - live per-service CPU and RAM usage in the service table
   - top-line heaviest/peak resource summary
   - `S` opens CPU throttle settings (governor/min/max/auto-apply + apply-now)
+  - `C` copies selected service dashboard/link target, `L` logs all discovered service links
+  - click `[copy]` in the service table (mouse-enabled terminals) to copy that row link
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
 - `camera_router.py`: camera list/snapshot/video (+ `/mjpeg` and `/jpeg`) routes + terminal dashboard
-- `pipeline_api.py`: HTTP bridge for LLM prompt and TTS prompt + terminal dashboard
+- `pipeline_api.py`: HTTP bridge for LLM prompt/TTS prompt + LLM model dashboard (`/llm/dashboard`) + terminal dashboard
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
@@ -43,7 +45,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
 - `8080` camera router (`/auth`, `/list`, `/snapshot/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`)
-- `6590` pipeline API (`/auth`, `/list`, `/health`, `/llm/prompt`, `/tts/speak`)
+- `6590` pipeline API (`/auth`, `/list`, `/health`, `/llm/prompt`, `/llm/dashboard`, `/llm/models`, `/llm/config`, `/llm/pull`, `/llm/pull/status`, `/tts/speak`)
 - `8090` audio router (`/auth`, `/list`, `/devices`, `/devices/select`, `/llm/prompt`, `/tts/speak`, `/webrtc/offer`)
 - `6545` model bridge (`model_to_tts.py`)
 - `6434` voice server (`voice_server.py` via Docker)
@@ -57,6 +59,25 @@ Default service auth:
 - `pipeline_api.py` password defaults to `egg`
 - `audio_router.py` password defaults to `egg`
 - change in `camera_router_config.json`, `pipeline_api_config.json`, or `audio_router_config.json` (or from each service terminal UI under `Security`)
+
+LLM dashboard quick start:
+
+```bash
+# 1) get a session key
+SESSION_KEY=$(curl -sS -X POST "http://<PI_LAN_IP>:6590/auth" -H "Content-Type: application/json" -d '{"password":"egg"}' | python3 -c 'import sys,json; print(json.load(sys.stdin).get("session_key",""))')
+
+# 2) open the dashboard in browser
+echo "http://<PI_LAN_IP>:6590/llm/dashboard?session_key=${SESSION_KEY}"
+```
+
+From the dashboard you can:
+- view available Ollama models
+- set and save the default `llm_bridge_config.json` model (default: `qwen3:0.6b`)
+- toggle `thinking` on/off (default: off)
+- pull new Ollama models and watch pull status/logs
+
+Voice tool toggle:
+- saying `turn thinking on` or `turn thinking off` to the LLM bridge flips mode and sends immediate TTS feedback (`Turned Thinking On/Off`).
 
 ## Installation and Runtime
 

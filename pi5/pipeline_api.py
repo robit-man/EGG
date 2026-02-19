@@ -18,11 +18,20 @@ import sys
 import threading
 import time
 from functools import wraps
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 
 PIPELINE_VENV_DIR_NAME = "pipeline_api_venv"
 CONFIG_PATH = "pipeline_api_config.json"
+LLM_BRIDGE_CONFIG_PATH = "llm_bridge_config.json"
+DEFAULT_LLM_BRIDGE_CONFIG = {
+    "model": "qwen3:0.6b",
+    "stream": True,
+    "thinking_enabled": False,
+    "max_history_messages": 3,
+    "ollama_url": "http://127.0.0.1:11434/api/chat",
+}
 
 
 def ensure_venv() -> None:
@@ -64,7 +73,7 @@ def ensure_venv() -> None:
 ensure_venv()
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 UI_AVAILABLE = False
@@ -265,6 +274,19 @@ tunnel_restart_lock = threading.Lock()
 tunnel_restart_failures = 0
 service_running = threading.Event()
 startup_time = time.time()
+llm_pull_lock = threading.Lock()
+llm_pull_state = {
+    "running": False,
+    "status": "idle",
+    "model": "",
+    "message": "",
+    "error": "",
+    "ollama_base_url": "",
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "updated_at": 0.0,
+    "events": [],
+}
 
 
 def _tcp_ok(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -308,6 +330,265 @@ def _stack_status() -> dict:
             "ready": ollama_ready,
             "health_url": ollama_health_url,
         },
+    }
+
+
+def _llm_bridge_config_file() -> str:
+    return os.path.join(SCRIPT_DIR, LLM_BRIDGE_CONFIG_PATH)
+
+
+def _load_llm_bridge_config() -> Dict[str, Any]:
+    merged = json.loads(json.dumps(DEFAULT_LLM_BRIDGE_CONFIG))
+    path = _llm_bridge_config_file()
+    if not os.path.exists(path):
+        return merged
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            loaded = json.load(fp)
+        if isinstance(loaded, dict):
+            merged.update(loaded)
+    except Exception:
+        pass
+    return merged
+
+
+def _save_llm_bridge_config(config: Dict[str, Any]) -> None:
+    with open(_llm_bridge_config_file(), "w", encoding="utf-8") as fp:
+        json.dump(config, fp, indent=2)
+
+
+def _resolve_ollama_base_url(llm_config: Optional[Dict[str, Any]] = None) -> str:
+    candidates: List[str] = []
+    if isinstance(llm_config, dict):
+        candidates.append(str(llm_config.get("ollama_url", "")).strip())
+    candidates.append(str(ollama_health_url).strip())
+    candidates.append("http://127.0.0.1:11434/api/tags")
+
+    for raw in candidates:
+        if not raw:
+            continue
+        candidate = raw if "://" in raw else f"http://{raw.lstrip('/')}"
+        parsed = urlsplit(candidate)
+        if parsed.netloc:
+            scheme = parsed.scheme or "http"
+            return f"{scheme}://{parsed.netloc}".rstrip("/")
+    return "http://127.0.0.1:11434"
+
+
+def _fetch_ollama_models(llm_config: Optional[Dict[str, Any]] = None) -> Tuple[List[str], str, str]:
+    base_url = _resolve_ollama_base_url(llm_config)
+    tags_url = f"{base_url}/api/tags"
+    try:
+        response = requests.get(tags_url, timeout=12)
+        response.raise_for_status()
+        payload = response.json()
+        models_raw = payload.get("models", []) if isinstance(payload, dict) else []
+        models: List[str] = []
+        seen = set()
+        for item in models_raw:
+            if not isinstance(item, dict):
+                continue
+            model_name = str(item.get("name", "")).strip()
+            if model_name and model_name not in seen:
+                seen.add(model_name)
+                models.append(model_name)
+        models.sort(key=lambda name: name.lower())
+        return models, base_url, ""
+    except Exception as exc:
+        return [], base_url, str(exc)
+
+
+def _llm_pull_snapshot() -> Dict[str, Any]:
+    with llm_pull_lock:
+        snapshot = json.loads(json.dumps(llm_pull_state))
+    started_at = float(snapshot.get("started_at") or 0.0)
+    finished_at = float(snapshot.get("finished_at") or 0.0)
+    if started_at > 0:
+        end = finished_at if finished_at > 0 else time.time()
+        snapshot["elapsed_seconds"] = round(max(0.0, end - started_at), 2)
+    else:
+        snapshot["elapsed_seconds"] = 0.0
+    return snapshot
+
+
+def _set_llm_pull_state(**updates: Any) -> None:
+    with llm_pull_lock:
+        llm_pull_state.update(updates)
+        llm_pull_state["updated_at"] = time.time()
+        events = llm_pull_state.get("events")
+        if isinstance(events, list) and len(events) > 32:
+            llm_pull_state["events"] = events[-32:]
+
+
+def _append_llm_pull_event(message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    with llm_pull_lock:
+        events = list(llm_pull_state.get("events") or [])
+        events.append(
+            {
+                "timestamp": int(time.time() * 1000),
+                "message": text,
+            }
+        )
+        llm_pull_state["events"] = events[-32:]
+        llm_pull_state["updated_at"] = time.time()
+
+
+def _format_pull_progress(payload: Dict[str, Any]) -> str:
+    status_text = str(payload.get("status", "")).strip()
+    completed = payload.get("completed")
+    total = payload.get("total")
+    if isinstance(completed, (int, float)) and isinstance(total, (int, float)) and float(total) > 0:
+        pct = max(0.0, min(100.0, (float(completed) / float(total)) * 100.0))
+        if status_text:
+            return f"{status_text} ({pct:.1f}%)"
+        return f"{pct:.1f}%"
+    if status_text:
+        return status_text
+    return json.dumps(payload, sort_keys=True)
+
+
+def _ollama_pull_worker(model_name: str) -> None:
+    started_at = time.time()
+    llm_config = _load_llm_bridge_config()
+    base_url = _resolve_ollama_base_url(llm_config)
+    pull_url = f"{base_url}/api/pull"
+    _set_llm_pull_state(
+        running=True,
+        status="running",
+        model=model_name,
+        message=f"Pulling '{model_name}'",
+        error="",
+        ollama_base_url=base_url,
+        started_at=started_at,
+        finished_at=0.0,
+        events=[],
+    )
+    _append_llm_pull_event(f"pull start: {model_name}")
+    try:
+        with requests.post(
+            pull_url,
+            json={"model": model_name, "stream": True},
+            headers={"Content-Type": "application/json"},
+            stream=True,
+            timeout=(12, 3600),
+        ) as response:
+            response.raise_for_status()
+            saw_event = False
+            for line in response.iter_lines(decode_unicode=True):
+                text = str(line or "").strip()
+                if not text:
+                    continue
+                saw_event = True
+                progress = text
+                try:
+                    event = json.loads(text)
+                    if isinstance(event, dict):
+                        progress = _format_pull_progress(event)
+                        event_error = str(event.get("error", "")).strip()
+                        if event_error:
+                            raise RuntimeError(event_error)
+                except json.JSONDecodeError:
+                    pass
+                _set_llm_pull_state(status="running", message=progress, ollama_base_url=base_url)
+                _append_llm_pull_event(progress)
+            if not saw_event:
+                _append_llm_pull_event("pull completed (no stream output)")
+        _set_llm_pull_state(
+            running=False,
+            status="success",
+            message=f"Model '{model_name}' is ready",
+            error="",
+            finished_at=time.time(),
+            ollama_base_url=base_url,
+        )
+        _append_llm_pull_event(f"pull complete: {model_name}")
+    except Exception as exc:
+        _set_llm_pull_state(
+            running=False,
+            status="error",
+            message=f"Model pull failed for '{model_name}'",
+            error=str(exc),
+            finished_at=time.time(),
+            ollama_base_url=base_url,
+        )
+        _append_llm_pull_event(f"pull failed: {exc}")
+
+
+def _start_ollama_pull(model_name: str) -> Tuple[bool, str, Dict[str, Any]]:
+    model = str(model_name or "").strip()
+    if not model:
+        return False, "Missing model name", _llm_pull_snapshot()
+    with llm_pull_lock:
+        if llm_pull_state.get("running"):
+            snapshot = json.loads(json.dumps(llm_pull_state))
+            started_at = float(snapshot.get("started_at") or 0.0)
+            finished_at = float(snapshot.get("finished_at") or 0.0)
+            if started_at > 0:
+                end = finished_at if finished_at > 0 else time.time()
+                snapshot["elapsed_seconds"] = round(max(0.0, end - started_at), 2)
+            else:
+                snapshot["elapsed_seconds"] = 0.0
+            return False, "Another pull is already running", snapshot
+        llm_pull_state.update(
+            {
+                "running": True,
+                "status": "starting",
+                "model": model,
+                "message": f"Starting pull for '{model}'",
+                "error": "",
+                "started_at": time.time(),
+                "finished_at": 0.0,
+                "updated_at": time.time(),
+                "events": [],
+            }
+        )
+    thread = threading.Thread(target=_ollama_pull_worker, args=(model,), daemon=True, name="OllamaPull")
+    try:
+        thread.start()
+    except Exception as exc:
+        _set_llm_pull_state(
+            running=False,
+            status="error",
+            message="Failed to start pull worker",
+            error=str(exc),
+            finished_at=time.time(),
+        )
+        return False, f"Failed to start pull worker: {exc}", _llm_pull_snapshot()
+    return True, f"Started pulling '{model}'", _llm_pull_snapshot()
+
+
+def _llm_config_payload(llm_config: Dict[str, Any]) -> Dict[str, Any]:
+    model = str(llm_config.get("model", DEFAULT_LLM_BRIDGE_CONFIG["model"])).strip() or str(
+        DEFAULT_LLM_BRIDGE_CONFIG["model"]
+    )
+    stream = _as_bool(llm_config.get("stream"), default=True)
+    thinking_enabled = _as_bool(
+        llm_config.get("thinking_enabled", DEFAULT_LLM_BRIDGE_CONFIG["thinking_enabled"]),
+        default=bool(DEFAULT_LLM_BRIDGE_CONFIG["thinking_enabled"]),
+    )
+    max_history_messages = _as_int(
+        llm_config.get("max_history_messages", DEFAULT_LLM_BRIDGE_CONFIG["max_history_messages"]),
+        int(DEFAULT_LLM_BRIDGE_CONFIG["max_history_messages"]),
+        minimum=0,
+        maximum=256,
+    )
+    ollama_url = str(llm_config.get("ollama_url", DEFAULT_LLM_BRIDGE_CONFIG["ollama_url"])).strip() or str(
+        DEFAULT_LLM_BRIDGE_CONFIG["ollama_url"]
+    )
+    models, ollama_base_url, model_error = _fetch_ollama_models(llm_config)
+    return {
+        "model": model,
+        "stream": stream,
+        "thinking_enabled": thinking_enabled,
+        "max_history_messages": max_history_messages,
+        "ollama_url": ollama_url,
+        "ollama_base_url": ollama_base_url,
+        "available_models": models,
+        "model_installed": model in set(models),
+        "model_fetch_error": model_error,
     }
 
 
@@ -655,6 +936,499 @@ def _tunnel_payload() -> dict:
     }
 
 
+def _llm_dashboard_html(session_key: str) -> str:
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EGG LLM Dashboard</title>
+  <style>
+    :root {
+      --bg: #f3f6f8;
+      --card: #ffffff;
+      --text: #12202b;
+      --muted: #557285;
+      --line: #d6e1e8;
+      --accent: #007ea7;
+      --ok: #167c4a;
+      --err: #b93c3c;
+      --warn: #a46604;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top right, #d9ecf8 0%, var(--bg) 40%, #edf4f9 100%);
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 4px 14px rgba(18, 32, 43, 0.06);
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.3rem;
+      letter-spacing: 0.02em;
+    }
+    h2 {
+      margin: 0 0 10px 0;
+      font-size: 1.02rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    label {
+      display: block;
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    input, select, button {
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      font-size: 0.93rem;
+    }
+    input, select {
+      width: 100%;
+      background: #fff;
+      color: var(--text);
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--line);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .pill {
+      border-radius: 999px;
+      padding: 2px 10px;
+      border: 1px solid var(--line);
+      font-size: 0.78rem;
+      color: var(--muted);
+      background: #f7fbfe;
+    }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .warn { color: var(--warn); }
+    .mono { font-family: Consolas, "Courier New", monospace; }
+    .kv {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 6px 10px;
+      align-items: baseline;
+      font-size: 0.9rem;
+    }
+    .log {
+      max-height: 220px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0d1820;
+      color: #d6ecff;
+      padding: 8px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.78rem;
+      line-height: 1.3;
+      white-space: pre-wrap;
+    }
+    .status {
+      font-size: 0.88rem;
+      color: var(--muted);
+      min-height: 1.3em;
+    }
+    .muted {
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <h1>LLM Model Control</h1>
+        <span id="readyPill" class="pill">loading</span>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <div style="flex: 2 1 320px;">
+          <label for="sessionKey">Session Key</label>
+          <input id="sessionKey" class="mono" placeholder="Paste session_key from /auth" />
+        </div>
+        <div style="flex: 1 1 180px; min-width: 160px;">
+          <label>&nbsp;</label>
+          <button id="applySession" class="secondary" style="width: 100%;">Apply Session Key</button>
+        </div>
+        <div style="flex: 1 1 180px; min-width: 160px;">
+          <label>&nbsp;</label>
+          <button id="refreshAll" class="secondary" style="width: 100%;">Refresh</button>
+        </div>
+      </div>
+      <div id="topStatus" class="status" style="margin-top: 8px;"></div>
+      <div class="muted">Open this URL as <span class="mono">/llm/dashboard?session_key=...</span> when auth is required.</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Current Config</h2>
+        <div class="kv">
+          <div>Model</div><div id="cfgModel" class="mono">-</div>
+          <div>Stream</div><div id="cfgStream">-</div>
+          <div>Thinking</div><div id="cfgThinking">-</div>
+          <div>Max History</div><div id="cfgHistory">-</div>
+          <div>Ollama URL</div><div id="cfgOllama" class="mono">-</div>
+          <div>Ollama Base</div><div id="cfgOllamaBase" class="mono">-</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Set Default Model</h2>
+        <label for="modelSelect">Available Models</label>
+        <select id="modelSelect"></select>
+        <div class="row" style="margin-top: 8px;">
+          <div style="flex: 1 1 140px;">
+            <label for="streamFlag">Stream Responses</label>
+            <select id="streamFlag">
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </div>
+          <div style="flex: 1 1 140px;">
+            <label for="thinkingFlag">Thinking</label>
+            <select id="thinkingFlag">
+              <option value="false">off</option>
+              <option value="true">on</option>
+            </select>
+          </div>
+          <div style="flex: 1 1 140px;">
+            <label for="maxHistory">Max History</label>
+            <input id="maxHistory" type="number" min="0" max="256" step="1" />
+          </div>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <button id="saveConfig">Save Config</button>
+          <button id="reloadModels" class="secondary">Reload Models</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Pull New Model</h2>
+        <label for="pullName">Model Name</label>
+        <input id="pullName" class="mono" placeholder="Example: qwen3:0.6b" />
+        <div class="row" style="margin-top: 10px;">
+          <button id="startPull">Pull Model</button>
+          <button id="refreshPull" class="secondary">Refresh Pull Status</button>
+        </div>
+        <div id="pullSummary" class="status" style="margin-top: 8px;"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Model Pull Log</h2>
+      <div id="pullLog" class="log">No pull activity yet.</div>
+    </div>
+  </div>
+
+  <script>
+    const initialSessionKey = __SESSION_KEY_JSON__;
+    let sessionKey = initialSessionKey || localStorage.getItem("egg_session_key") || "";
+    let refreshTimer = null;
+
+    const els = {
+      sessionKey: document.getElementById("sessionKey"),
+      applySession: document.getElementById("applySession"),
+      refreshAll: document.getElementById("refreshAll"),
+      topStatus: document.getElementById("topStatus"),
+      readyPill: document.getElementById("readyPill"),
+      cfgModel: document.getElementById("cfgModel"),
+      cfgStream: document.getElementById("cfgStream"),
+      cfgThinking: document.getElementById("cfgThinking"),
+      cfgHistory: document.getElementById("cfgHistory"),
+      cfgOllama: document.getElementById("cfgOllama"),
+      cfgOllamaBase: document.getElementById("cfgOllamaBase"),
+      modelSelect: document.getElementById("modelSelect"),
+      streamFlag: document.getElementById("streamFlag"),
+      thinkingFlag: document.getElementById("thinkingFlag"),
+      maxHistory: document.getElementById("maxHistory"),
+      saveConfig: document.getElementById("saveConfig"),
+      reloadModels: document.getElementById("reloadModels"),
+      pullName: document.getElementById("pullName"),
+      startPull: document.getElementById("startPull"),
+      refreshPull: document.getElementById("refreshPull"),
+      pullSummary: document.getElementById("pullSummary"),
+      pullLog: document.getElementById("pullLog"),
+    };
+
+    function setTopStatus(message, level) {
+      els.topStatus.textContent = message || "";
+      els.topStatus.className = "status";
+      if (level === "error") els.topStatus.classList.add("err");
+      if (level === "ok") els.topStatus.classList.add("ok");
+      if (level === "warn") els.topStatus.classList.add("warn");
+    }
+
+    function withSession(url) {
+      if (!sessionKey) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}session_key=${encodeURIComponent(sessionKey)}`;
+    }
+
+    async function fetchJson(url, options = {}) {
+      const requestOptions = {
+        method: options.method || "GET",
+        headers: Object.assign({ "Accept": "application/json" }, options.headers || {}),
+      };
+      if (sessionKey) {
+        requestOptions.headers["X-Session-Key"] = sessionKey;
+      }
+      if (options.body !== undefined) {
+        requestOptions.headers["Content-Type"] = "application/json";
+        requestOptions.body = JSON.stringify(options.body);
+      }
+      const response = await fetch(withSession(url), requestOptions);
+      const bodyText = await response.text();
+      let data = {};
+      try {
+        data = bodyText ? JSON.parse(bodyText) : {};
+      } catch (err) {
+        data = { message: bodyText || "Invalid response" };
+      }
+      if (!response.ok) {
+        const msg = (data && (data.message || data.error)) || `${response.status} ${response.statusText}`;
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function setModels(models, selectedModel) {
+      els.modelSelect.innerHTML = "";
+      const list = Array.isArray(models) ? models : [];
+      if (!list.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No models available";
+        els.modelSelect.appendChild(option);
+        return;
+      }
+      for (const name of list) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        if (name === selectedModel) {
+          option.selected = true;
+        }
+        els.modelSelect.appendChild(option);
+      }
+    }
+
+    function renderPullStatus(data) {
+      const state = data || {};
+      const status = String(state.status || "idle");
+      const model = String(state.model || "");
+      const message = String(state.message || "");
+      const error = String(state.error || "");
+      const elapsed = Number(state.elapsed_seconds || 0);
+      const running = !!state.running;
+      const summary = `${status}${model ? ` | ${model}` : ""}${elapsed ? ` | ${elapsed.toFixed(1)}s` : ""}${message ? ` | ${message}` : ""}`;
+      els.pullSummary.textContent = summary;
+      els.pullSummary.className = "status " + (status === "error" ? "err" : (running ? "warn" : "ok"));
+      els.readyPill.textContent = running ? "pulling" : status;
+      els.readyPill.className = "pill " + (status === "error" ? "err" : (running ? "warn" : "ok"));
+      const events = Array.isArray(state.events) ? state.events : [];
+      if (!events.length) {
+        els.pullLog.textContent = error || "No pull activity yet.";
+      } else {
+        const lines = events.map((item) => {
+          if (!item || typeof item !== "object") return String(item || "");
+          const ts = Number(item.timestamp || 0);
+          const date = ts > 0 ? new Date(ts).toLocaleTimeString() : "";
+          return `${date}  ${String(item.message || "").trim()}`;
+        });
+        els.pullLog.textContent = lines.join("\\n");
+      }
+      els.startPull.disabled = running;
+    }
+
+    async function loadConfig() {
+      const payload = await fetchJson("/llm/config");
+      const cfg = payload.config || {};
+      els.cfgModel.textContent = cfg.model || "-";
+      els.cfgStream.textContent = String(cfg.stream);
+      els.cfgThinking.textContent = cfg.thinking_enabled ? "on" : "off";
+      els.cfgHistory.textContent = String(cfg.max_history_messages);
+      els.cfgOllama.textContent = cfg.ollama_url || "-";
+      els.cfgOllamaBase.textContent = cfg.ollama_base_url || "-";
+      els.streamFlag.value = String(!!cfg.stream);
+      els.thinkingFlag.value = String(!!cfg.thinking_enabled);
+      els.maxHistory.value = String(cfg.max_history_messages ?? 0);
+      if (cfg.model && !els.pullName.value) {
+        els.pullName.value = cfg.model;
+      }
+      setModels(cfg.available_models || [], cfg.model || "");
+      if (cfg.model && cfg.model_installed === false) {
+        setTopStatus(`Selected model '${cfg.model}' is not installed yet. Pull it now.`, "warn");
+      }
+      if (cfg.model_fetch_error) {
+        setTopStatus(`Model list fetch warning: ${cfg.model_fetch_error}`, "warn");
+      }
+      return payload;
+    }
+
+    async function loadModels() {
+      const payload = await fetchJson("/llm/models");
+      const models = payload.models || [];
+      const selected = els.modelSelect.value || "";
+      setModels(models, selected);
+      return payload;
+    }
+
+    async function loadPullStatus() {
+      const payload = await fetchJson("/llm/pull/status");
+      renderPullStatus(payload.pull || {});
+      return payload;
+    }
+
+    async function refreshAll() {
+      try {
+        setTopStatus("Refreshing LLM dashboard...", "warn");
+        await loadConfig();
+        await loadPullStatus();
+        setTopStatus("Dashboard updated.", "ok");
+      } catch (err) {
+        setTopStatus(`Refresh failed: ${err.message}`, "error");
+      }
+    }
+
+    els.applySession.addEventListener("click", async () => {
+      sessionKey = String(els.sessionKey.value || "").trim();
+      if (sessionKey) {
+        localStorage.setItem("egg_session_key", sessionKey);
+        setTopStatus("Session key saved locally.", "ok");
+      } else {
+        localStorage.removeItem("egg_session_key");
+        setTopStatus("Session key cleared.", "warn");
+      }
+      await refreshAll();
+    });
+
+    els.refreshAll.addEventListener("click", async () => {
+      await refreshAll();
+    });
+
+    els.reloadModels.addEventListener("click", async () => {
+      try {
+        setTopStatus("Reloading model list...", "warn");
+        await loadModels();
+        setTopStatus("Model list updated.", "ok");
+      } catch (err) {
+        setTopStatus(`Model reload failed: ${err.message}`, "error");
+      }
+    });
+
+    els.saveConfig.addEventListener("click", async () => {
+      const model = String(els.modelSelect.value || "").trim();
+      const stream = String(els.streamFlag.value || "true").toLowerCase() === "true";
+      const thinkingEnabled = String(els.thinkingFlag.value || "false").toLowerCase() === "true";
+      const maxHistory = Number(els.maxHistory.value || 0);
+      if (!model) {
+        setTopStatus("Select a model before saving.", "error");
+        return;
+      }
+      try {
+        setTopStatus("Saving LLM config...", "warn");
+        await fetchJson("/llm/config", {
+          method: "POST",
+          body: {
+            model,
+            stream,
+            thinking_enabled: thinkingEnabled,
+            max_history_messages: maxHistory,
+            auto_pull_missing: true,
+          },
+        });
+        await refreshAll();
+        setTopStatus("LLM config saved.", "ok");
+      } catch (err) {
+        setTopStatus(`Save failed: ${err.message}`, "error");
+      }
+    });
+
+    els.startPull.addEventListener("click", async () => {
+      const model = String(els.pullName.value || "").trim();
+      if (!model) {
+        setTopStatus("Enter model name to pull.", "error");
+        return;
+      }
+      try {
+        setTopStatus(`Starting model pull for ${model}...`, "warn");
+        await fetchJson("/llm/pull", { method: "POST", body: { model } });
+        await loadPullStatus();
+        setTopStatus(`Pull started for ${model}.`, "ok");
+      } catch (err) {
+        setTopStatus(`Pull start failed: ${err.message}`, "error");
+      }
+    });
+
+    els.refreshPull.addEventListener("click", async () => {
+      try {
+        await loadPullStatus();
+        setTopStatus("Pull status refreshed.", "ok");
+      } catch (err) {
+        setTopStatus(`Pull status failed: ${err.message}`, "error");
+      }
+    });
+
+    function startPolling() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = setInterval(async () => {
+        try {
+          await loadPullStatus();
+        } catch (err) {
+          setTopStatus(`Pull polling failed: ${err.message}`, "warn");
+        }
+      }, 3000);
+    }
+
+    (async () => {
+      els.sessionKey.value = sessionKey;
+      await refreshAll();
+      startPolling();
+    })();
+  </script>
+</body>
+</html>
+"""
+    return template.replace("__SESSION_KEY_JSON__", json.dumps(str(session_key or "")))
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(
@@ -669,6 +1443,11 @@ def index():
                 "router_info": "/router_info",
                 "tunnel_info": "/tunnel_info",
                 "llm_prompt": "/llm/prompt",
+                "llm_dashboard": "/llm/dashboard",
+                "llm_models": "/llm/models",
+                "llm_config": "/llm/config",
+                "llm_pull": "/llm/pull",
+                "llm_pull_status": "/llm/pull/status",
                 "tts_speak": "/tts/speak",
             },
         }
@@ -715,6 +1494,11 @@ def list_routes():
                 "auth": "/auth",
                 "session_rotate": "/session/rotate",
                 "llm_prompt": "/llm/prompt",
+                "llm_dashboard": "/llm/dashboard",
+                "llm_models": "/llm/models",
+                "llm_config": "/llm/config",
+                "llm_pull": "/llm/pull",
+                "llm_pull_status": "/llm/pull/status",
                 "tts_speak": "/tts/speak",
             },
             "endpoints": {
@@ -722,25 +1506,212 @@ def list_routes():
                 "auth_url": f"{publish_base}/auth",
                 "session_rotate_url": f"{publish_base}/session/rotate",
                 "llm_prompt_url": f"{publish_base}/llm/prompt",
+                "llm_dashboard_url": f"{publish_base}/llm/dashboard",
+                "llm_models_url": f"{publish_base}/llm/models",
+                "llm_config_url": f"{publish_base}/llm/config",
+                "llm_pull_url": f"{publish_base}/llm/pull",
+                "llm_pull_status_url": f"{publish_base}/llm/pull/status",
                 "tts_speak_url": f"{publish_base}/tts/speak",
                 "router_info_url": f"{publish_base}/router_info",
                 "local_health_url": f"{local_base}/health",
                 "local_auth_url": f"{local_base}/auth",
                 "local_session_rotate_url": f"{local_base}/session/rotate",
                 "local_llm_prompt_url": f"{local_base}/llm/prompt",
+                "local_llm_dashboard_url": f"{local_base}/llm/dashboard",
+                "local_llm_models_url": f"{local_base}/llm/models",
+                "local_llm_config_url": f"{local_base}/llm/config",
+                "local_llm_pull_url": f"{local_base}/llm/pull",
+                "local_llm_pull_status_url": f"{local_base}/llm/pull/status",
                 "local_tts_speak_url": f"{local_base}/tts/speak",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
                 "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
                 "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                 "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
+                "lan_llm_dashboard_url": f"{lan_base}/llm/dashboard" if lan_base else "",
+                "lan_llm_models_url": f"{lan_base}/llm/models" if lan_base else "",
+                "lan_llm_config_url": f"{lan_base}/llm/config" if lan_base else "",
+                "lan_llm_pull_url": f"{lan_base}/llm/pull" if lan_base else "",
+                "lan_llm_pull_status_url": f"{lan_base}/llm/pull/status" if lan_base else "",
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
                 "tunnel_health_url": f"{tunnel_base}/health" if tunnel_base else "",
                 "tunnel_auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
                 "tunnel_session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
                 "tunnel_llm_prompt_url": f"{tunnel_base}/llm/prompt" if tunnel_base else "",
+                "tunnel_llm_dashboard_url": f"{tunnel_base}/llm/dashboard" if tunnel_base else "",
+                "tunnel_llm_models_url": f"{tunnel_base}/llm/models" if tunnel_base else "",
+                "tunnel_llm_config_url": f"{tunnel_base}/llm/config" if tunnel_base else "",
+                "tunnel_llm_pull_url": f"{tunnel_base}/llm/pull" if tunnel_base else "",
+                "tunnel_llm_pull_status_url": f"{tunnel_base}/llm/pull/status" if tunnel_base else "",
                 "tunnel_tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             },
             "tunnel": tunnel,
+        }
+    )
+
+
+@app.route("/llm/dashboard", methods=["GET"])
+@_auth_required
+def llm_dashboard():
+    session_key = _get_session_key_from_request()
+    return Response(_llm_dashboard_html(session_key), mimetype="text/html")
+
+
+@app.route("/llm/models", methods=["GET"])
+@_auth_required
+def llm_models():
+    llm_config = _load_llm_bridge_config()
+    models, base_url, error = _fetch_ollama_models(llm_config)
+    model_selected = str(llm_config.get("model", "")).strip()
+    if error:
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "service": "pipeline_api",
+                    "message": f"Failed to fetch Ollama models: {error}",
+                    "ollama_base_url": base_url,
+                    "selected_model": model_selected,
+                    "models": [],
+                }
+            ),
+            502,
+        )
+    return jsonify(
+        {
+            "status": "success",
+            "service": "pipeline_api",
+            "ollama_base_url": base_url,
+            "selected_model": model_selected,
+            "models": models,
+        }
+    )
+
+
+@app.route("/llm/config", methods=["GET", "POST"])
+@_auth_required
+def llm_config():
+    if request.method == "GET":
+        loaded = _load_llm_bridge_config()
+        return jsonify(
+            {
+                "status": "success",
+                "service": "pipeline_api",
+                "config_path": _llm_bridge_config_file(),
+                "config": _llm_config_payload(loaded),
+            }
+        )
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
+
+    loaded = _load_llm_bridge_config()
+    updates: Dict[str, Any] = {}
+
+    if "model" in data:
+        model_name = str(data.get("model", "")).strip()
+        if not model_name:
+            return jsonify({"status": "error", "message": "model cannot be empty"}), 400
+        updates["model"] = model_name
+
+    if "stream" in data:
+        updates["stream"] = _as_bool(data.get("stream"), default=bool(loaded.get("stream", True)))
+
+    if "thinking_enabled" in data:
+        updates["thinking_enabled"] = _as_bool(
+            data.get("thinking_enabled"),
+            default=bool(loaded.get("thinking_enabled", DEFAULT_LLM_BRIDGE_CONFIG["thinking_enabled"])),
+        )
+
+    if "max_history_messages" in data:
+        updates["max_history_messages"] = _as_int(
+            data.get("max_history_messages"),
+            int(loaded.get("max_history_messages", DEFAULT_LLM_BRIDGE_CONFIG["max_history_messages"])),
+            minimum=0,
+            maximum=256,
+        )
+
+    if "ollama_url" in data:
+        ollama_url_value = str(data.get("ollama_url", "")).strip()
+        if not ollama_url_value:
+            return jsonify({"status": "error", "message": "ollama_url cannot be empty"}), 400
+        updates["ollama_url"] = ollama_url_value
+
+    if not updates:
+        return jsonify({"status": "error", "message": "No supported config fields provided"}), 400
+
+    loaded.update(updates)
+    _save_llm_bridge_config(loaded)
+    auto_pull_missing = _as_bool(data.get("auto_pull_missing", True), default=True)
+    pull_result: Dict[str, Any] = {}
+    config_view = _llm_config_payload(loaded)
+    selected_model = str(config_view.get("model") or "").strip()
+    model_installed = bool(config_view.get("model_installed"))
+    if auto_pull_missing and selected_model and not model_installed:
+        accepted, pull_message, pull_snapshot = _start_ollama_pull(selected_model)
+        pull_result = {
+            "status": "success" if accepted else "error",
+            "message": pull_message,
+            "pull": pull_snapshot,
+        }
+
+    return jsonify(
+        {
+            "status": "success",
+            "service": "pipeline_api",
+            "message": "LLM bridge configuration saved",
+            "config_path": _llm_bridge_config_file(),
+            "updated": updates,
+            "config": config_view,
+            "auto_pull_missing": bool(auto_pull_missing),
+            "auto_pull": pull_result,
+            "note": "If llm_bridge does not hot-reload config, restart the LLM Bridge service to apply immediately.",
+        }
+    )
+
+
+@app.route("/llm/pull", methods=["POST"])
+@_auth_required
+def llm_pull():
+    data = request.get_json(silent=True) or {}
+    model_name = ""
+    if isinstance(data, dict):
+        model_name = str(data.get("model") or data.get("name") or "").strip()
+    accepted, message, pull_snapshot = _start_ollama_pull(model_name)
+    if not accepted:
+        code = 409 if "already" in str(message).lower() else 400
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "service": "pipeline_api",
+                    "message": message,
+                    "pull": pull_snapshot,
+                }
+            ),
+            code,
+        )
+    return (
+        jsonify(
+            {
+                "status": "success",
+                "service": "pipeline_api",
+                "message": message,
+                "pull": pull_snapshot,
+            }
+        ),
+        202,
+    )
+
+
+@app.route("/llm/pull/status", methods=["GET"])
+@_auth_required
+def llm_pull_status():
+    return jsonify(
+        {
+            "status": "success",
+            "service": "pipeline_api",
+            "pull": _llm_pull_snapshot(),
         }
     )
 
@@ -833,6 +1804,11 @@ def tunnel_info():
             "list_url": f"{tunnel_base}/list" if tunnel_base else "",
             "health_url": f"{tunnel_base}/health" if tunnel_base else "",
             "llm_prompt_url": f"{tunnel_base}/llm/prompt" if tunnel_base else "",
+            "llm_dashboard_url": f"{tunnel_base}/llm/dashboard" if tunnel_base else "",
+            "llm_models_url": f"{tunnel_base}/llm/models" if tunnel_base else "",
+            "llm_config_url": f"{tunnel_base}/llm/config" if tunnel_base else "",
+            "llm_pull_url": f"{tunnel_base}/llm/pull" if tunnel_base else "",
+            "llm_pull_status_url": f"{tunnel_base}/llm/pull/status" if tunnel_base else "",
             "tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             "stale_tunnel_url": str(tunnel.get("stale_tunnel_url") or ""),
             "error": str(tunnel.get("error") or ""),
@@ -862,18 +1838,33 @@ def router_info():
                 "list_url": f"{publish_base}/list",
                 "health_url": f"{publish_base}/health",
                 "llm_prompt_url": f"{publish_base}/llm/prompt",
+                "llm_dashboard_url": f"{publish_base}/llm/dashboard",
+                "llm_models_url": f"{publish_base}/llm/models",
+                "llm_config_url": f"{publish_base}/llm/config",
+                "llm_pull_url": f"{publish_base}/llm/pull",
+                "llm_pull_status_url": f"{publish_base}/llm/pull/status",
                 "tts_speak_url": f"{publish_base}/tts/speak",
                 "local_auth_url": f"{local_base}/auth",
                 "local_session_rotate_url": f"{local_base}/session/rotate",
                 "local_list_url": f"{local_base}/list",
                 "local_health_url": f"{local_base}/health",
                 "local_llm_prompt_url": f"{local_base}/llm/prompt",
+                "local_llm_dashboard_url": f"{local_base}/llm/dashboard",
+                "local_llm_models_url": f"{local_base}/llm/models",
+                "local_llm_config_url": f"{local_base}/llm/config",
+                "local_llm_pull_url": f"{local_base}/llm/pull",
+                "local_llm_pull_status_url": f"{local_base}/llm/pull/status",
                 "local_tts_speak_url": f"{local_base}/tts/speak",
                 "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
                 "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                 "lan_list_url": f"{lan_base}/list" if lan_base else "",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
                 "lan_llm_prompt_url": f"{lan_base}/llm/prompt" if lan_base else "",
+                "lan_llm_dashboard_url": f"{lan_base}/llm/dashboard" if lan_base else "",
+                "lan_llm_models_url": f"{lan_base}/llm/models" if lan_base else "",
+                "lan_llm_config_url": f"{lan_base}/llm/config" if lan_base else "",
+                "lan_llm_pull_url": f"{lan_base}/llm/pull" if lan_base else "",
+                "lan_llm_pull_status_url": f"{lan_base}/llm/pull/status" if lan_base else "",
                 "lan_tts_speak_url": f"{lan_base}/tts/speak" if lan_base else "",
             },
             "tunnel": {
@@ -883,6 +1874,11 @@ def router_info():
                 "list_url": f"{tunnel_base}/list" if tunnel_base else "",
                 "health_url": f"{tunnel_base}/health" if tunnel_base else "",
                 "llm_prompt_url": f"{tunnel_base}/llm/prompt" if tunnel_base else "",
+                "llm_dashboard_url": f"{tunnel_base}/llm/dashboard" if tunnel_base else "",
+                "llm_models_url": f"{tunnel_base}/llm/models" if tunnel_base else "",
+                "llm_config_url": f"{tunnel_base}/llm/config" if tunnel_base else "",
+                "llm_pull_url": f"{tunnel_base}/llm/pull" if tunnel_base else "",
+                "llm_pull_status_url": f"{tunnel_base}/llm/pull/status" if tunnel_base else "",
                 "tts_speak_url": f"{tunnel_base}/tts/speak" if tunnel_base else "",
             },
             "security": _security_payload(publish_base),
@@ -892,6 +1888,11 @@ def router_info():
                 "auth": "/auth",
                 "session_rotate": "/session/rotate",
                 "llm_prompt": "/llm/prompt",
+                "llm_dashboard": "/llm/dashboard",
+                "llm_models": "/llm/models",
+                "llm_config": "/llm/config",
+                "llm_pull": "/llm/pull",
+                "llm_pull_status": "/llm/pull/status",
                 "tts_speak": "/tts/speak",
             },
             "stack": stack,

@@ -60,6 +60,7 @@ import signal
 import socket
 import threading
 import time
+import base64
 import urllib.error
 import urllib.request
 from collections import deque
@@ -97,6 +98,8 @@ AUTO_UPDATE_POLL_SECONDS = 20.0
 AUTO_UPDATE_FETCH_TIMEOUT_SECONDS = 45.0
 AUTO_UPDATE_PULL_TIMEOUT_SECONDS = 120.0
 AUTO_UPDATE_RUNTIME_SYNC_TIMEOUT_SECONDS = 180.0
+SERVICE_LINK_REFRESH_SECONDS = 15.0
+SERVICE_LINK_HTTP_TIMEOUT_SECONDS = 1.2
 DIRECT_LAUNCH_SERVICE_IDS = (
     "tts_output",
     "llm_bridge",
@@ -349,11 +352,21 @@ class WatchdogManager:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
+        self._service_link_thread: Optional[threading.Thread] = None
         self._logs: Deque[str] = deque(maxlen=300)
+        self._click_regions: List[Dict[str, object]] = []
         self._selected_index = 0
         self._run_started_at = time.time()
         self._instance_lock_acquired = False
         self._instance_lock_handle = None
+        self._service_links: Dict[str, Dict[str, str]] = {}
+        self._service_link_errors: Dict[str, str] = {}
+        self._service_link_last_refresh_at = 0.0
+        self._service_link_refresh_interval = max(
+            8.0,
+            float(os.environ.get("WATCHDOG_LINK_REFRESH_SECONDS", SERVICE_LINK_REFRESH_SECONDS)),
+        )
+        self._lan_ip = self._detect_lan_ip()
         self.repo_dir = pathlib.Path(
             os.environ.get("WATCHDOG_REPO_DIR", str((self.base_dir / "EGG_repo").resolve()))
         ).resolve()
@@ -439,7 +452,10 @@ class WatchdogManager:
             self.runtime_by_id[svc.service_id] = runtime
 
         self._log("Watchdog initialized")
-        self._log("Keys: Up/Down select, Space toggle, R restart, A toggle all, S CPU settings, Q quit")
+        self._log(
+            "Keys: Up/Down select, Space toggle, R restart, A toggle all, "
+            "C copy selected link, L log links, S CPU settings, Q quit"
+        )
         if self._port_reclaim_enabled:
             reclaim_mode = "aggressive (includes foreign pids)" if self._port_reclaim_force else "owned-only"
             self._log(f"[PORT] Auto reclaim enabled ({reclaim_mode})")
@@ -2614,8 +2630,11 @@ class WatchdogManager:
     def start(self):
         if self._monitor_thread and self._monitor_thread.is_alive():
             return
+        self._refresh_service_links()
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_thread.start()
+        self._service_link_thread = threading.Thread(target=self._service_link_loop, daemon=True)
+        self._service_link_thread.start()
 
     def request_shutdown(self):
         with self._lock:
@@ -2644,6 +2663,8 @@ class WatchdogManager:
 
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=2.0)
+        if self._service_link_thread and self._service_link_thread.is_alive():
+            self._service_link_thread.join(timeout=2.0)
 
     def toggle_selected(self):
         svc = self.services[self._selected_index]
@@ -2689,6 +2710,353 @@ class WatchdogManager:
                 runtime.last_event = "Enabled all" if target_enabled else "Disabled all"
             self._log(f"[USER] {'Enabled' if target_enabled else 'Disabled'} all services")
             self._save_desired_state()
+
+    # ------------------------------------------------------------------
+    # Service link discovery and clipboard helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _detect_lan_ip() -> str:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.settimeout(0.5)
+                probe.connect(("8.8.8.8", 80))
+                ip = str(probe.getsockname()[0] or "").strip()
+                if ip and ip != "127.0.0.1":
+                    return ip
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _http_json(method: str, url: str, payload: Optional[Dict[str, object]] = None, timeout: float = 1.2):
+        request_data = None
+        headers = {"Accept": "application/json"}
+        if payload is not None:
+            try:
+                request_data = json.dumps(payload).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+            except Exception:
+                request_data = None
+        req = urllib.request.Request(url, data=request_data, method=str(method or "GET").upper(), headers=headers)
+        with urllib.request.urlopen(req, timeout=max(0.2, float(timeout))) as resp:
+            raw = resp.read()
+        text = raw.decode("utf-8", errors="replace").strip() if raw else ""
+        return json.loads(text) if text else {}
+
+    @staticmethod
+    def _service_default_dashboard_path(service_id: str) -> str:
+        sid = str(service_id or "").strip().lower()
+        if sid == "router":
+            return "/dashboard"
+        if sid == "pipeline_api":
+            return "/llm/dashboard"
+        if sid == "camera_router":
+            return "/list"
+        if sid == "audio_router":
+            return "/"
+        if sid == "ollama":
+            return "/"
+        return ""
+
+    def _collect_url_values(self, payload, prefix: str, out: Dict[str, str], depth: int = 0):
+        if depth > 4:
+            return
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_text = str(key or "").strip()
+                if not key_text:
+                    continue
+                next_prefix = f"{prefix}_{key_text}" if prefix else key_text
+                if isinstance(value, str):
+                    url = value.strip()
+                    if url.startswith("http://") or url.startswith("https://"):
+                        out[next_prefix] = url
+                elif isinstance(value, (dict, list, tuple)):
+                    self._collect_url_values(value, next_prefix, out, depth + 1)
+        elif isinstance(payload, (list, tuple)):
+            # Only inspect the first few items to avoid bloating with camera/per-device duplicates.
+            for idx, value in enumerate(payload[:3]):
+                next_prefix = f"{prefix}_{idx}" if prefix else str(idx)
+                self._collect_url_values(value, next_prefix, out, depth + 1)
+
+    def _service_port(self, svc: ServiceSpec, runtime: Optional[ServiceRuntime] = None) -> int:
+        if runtime is not None:
+            try:
+                active = int(runtime.resolved_health_port or 0)
+            except Exception:
+                active = 0
+            if 1 <= active <= 65535:
+                return active
+        try:
+            configured = int(svc.resolved_health_port(self.base_dir) or 0)
+        except Exception:
+            configured = 0
+        if 1 <= configured <= 65535:
+            return configured
+        try:
+            fallback = int(svc.health_port or 0)
+        except Exception:
+            fallback = 0
+        return fallback if 1 <= fallback <= 65535 else 0
+
+    def _discover_service_links(self, svc: ServiceSpec, runtime: ServiceRuntime) -> Tuple[Dict[str, str], str]:
+        links: Dict[str, str] = {}
+        err = ""
+        if str(svc.health_mode or "").strip().lower() != "http":
+            return links, err
+
+        port = self._service_port(svc, runtime)
+        if port <= 0:
+            return links, "No HTTP port configured"
+
+        local_base = f"http://127.0.0.1:{port}"
+        links["local_base_url"] = local_base
+        if self._lan_ip:
+            links["lan_base_url"] = f"http://{self._lan_ip}:{port}"
+
+        dashboard_path = self._service_default_dashboard_path(svc.service_id)
+        if dashboard_path:
+            links["local_dashboard_url"] = f"{local_base}{dashboard_path}"
+            if self._lan_ip:
+                links["lan_dashboard_url"] = f"http://{self._lan_ip}:{port}{dashboard_path}"
+
+        # Merge URLs exported by service router metadata.
+        for route in ("/router_info", "/tunnel_info"):
+            url = f"{local_base}{route}"
+            try:
+                payload = self._http_json("GET", url, timeout=SERVICE_LINK_HTTP_TIMEOUT_SECONDS)
+                if isinstance(payload, dict):
+                    self._collect_url_values(payload, "", links)
+            except Exception as exc:
+                err = str(exc)
+
+        return links, err
+
+    @staticmethod
+    def _select_primary_link(links: Dict[str, str]) -> Tuple[str, str]:
+        if not links:
+            return "", ""
+
+        preferred_exact = (
+            "lan_llm_dashboard_url",
+            "tunnel_llm_dashboard_url",
+            "local_llm_dashboard_url",
+            "llm_dashboard_url",
+            "lan_dashboard_url",
+            "tunnel_dashboard_url",
+            "local_dashboard_url",
+            "dashboard_url",
+            "lan_list_url",
+            "tunnel_list_url",
+            "local_list_url",
+            "list_url",
+            "lan_base_url",
+            "local_base_url",
+        )
+        for key in preferred_exact:
+            value = str(links.get(key) or "").strip()
+            if value:
+                return key, value
+
+        best_key = ""
+        best_url = ""
+        best_rank = (9, 9, 9, 999)
+        for key, value in links.items():
+            url = str(value or "").strip()
+            if not url:
+                continue
+            key_text = str(key or "").lower()
+            if key_text.startswith("lan_"):
+                scope_rank = 0
+            elif key_text.startswith("tunnel_"):
+                scope_rank = 1
+            elif key_text.startswith("local_"):
+                scope_rank = 2
+            else:
+                scope_rank = 3
+            if "dashboard" in key_text:
+                route_rank = 0
+            elif key_text.endswith("list_url"):
+                route_rank = 1
+            elif key_text.endswith("health_url"):
+                route_rank = 2
+            elif key_text.endswith("_url"):
+                route_rank = 3
+            else:
+                route_rank = 4
+            rank = (scope_rank, route_rank, len(key_text), len(url))
+            if rank < best_rank:
+                best_rank = rank
+                best_key = key
+                best_url = url
+        return best_key, best_url
+
+    @staticmethod
+    def _shorten_url(url: str, max_len: int = 44) -> str:
+        text = str(url or "").strip()
+        if len(text) <= max_len:
+            return text
+        if max_len <= 7:
+            return text[:max_len]
+        keep = max_len - 3
+        left = max(4, int(keep * 0.63))
+        right = max(3, keep - left)
+        return f"{text[:left]}...{text[-right:]}"
+
+    def _refresh_service_links(self):
+        snapshot = []
+        with self._lock:
+            for svc in self.services:
+                runtime = self.runtime_by_id.get(svc.service_id)
+                if runtime is None:
+                    continue
+                snapshot.append((svc, runtime))
+
+        links_by_id: Dict[str, Dict[str, str]] = {}
+        errors_by_id: Dict[str, str] = {}
+        for svc, runtime in snapshot:
+            links, err = self._discover_service_links(svc, runtime)
+            if links:
+                key, url = self._select_primary_link(links)
+                links["primary_key"] = key
+                links["primary_url"] = url
+                links_by_id[svc.service_id] = links
+            if err:
+                errors_by_id[svc.service_id] = err
+
+        with self._lock:
+            self._service_links = links_by_id
+            self._service_link_errors = errors_by_id
+            self._service_link_last_refresh_at = time.time()
+
+    def _service_link_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                self._refresh_service_links()
+            except Exception:
+                pass
+            if self._stop_event.wait(self._service_link_refresh_interval):
+                break
+
+    @staticmethod
+    def _register_click_region(regions: List[Dict[str, object]], row: int, col_start: int, col_end: int, payload: str):
+        regions.append(
+            {
+                "row": int(row),
+                "col_start": int(min(col_start, col_end)),
+                "col_end": int(max(col_start, col_end)),
+                "payload": str(payload or ""),
+            }
+        )
+
+    @staticmethod
+    def _copy_to_clipboard(text: str) -> Tuple[bool, str]:
+        value = str(text or "").strip()
+        if not value:
+            return False, "empty link"
+
+        command_sets: List[Tuple[List[str], str]] = []
+        if os.name == "nt":
+            clip_bin = shutil.which("clip.exe") or shutil.which("clip")
+            if clip_bin:
+                command_sets.append(([clip_bin], "clip.exe"))
+            ps_bin = shutil.which("powershell.exe") or shutil.which("powershell")
+            if ps_bin:
+                command_sets.append(
+                    (
+                        [ps_bin, "-NoProfile", "-Command", "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+                        "powershell",
+                    )
+                )
+        else:
+            wl_copy = shutil.which("wl-copy")
+            if wl_copy:
+                command_sets.append(([wl_copy], "wl-copy"))
+            xclip = shutil.which("xclip")
+            if xclip:
+                command_sets.append(([xclip, "-selection", "clipboard"], "xclip"))
+            xsel = shutil.which("xsel")
+            if xsel:
+                command_sets.append(([xsel, "--clipboard", "--input"], "xsel"))
+            pbcopy = shutil.which("pbcopy")
+            if pbcopy:
+                command_sets.append(([pbcopy], "pbcopy"))
+
+        for command, label in command_sets:
+            try:
+                subprocess.run(command, input=value, text=True, capture_output=True, check=True)
+                return True, label
+            except Exception:
+                continue
+
+        # Final fallback for terminals supporting OSC52 clipboard control.
+        try:
+            encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+            sys.__stdout__.write(f"\033]52;c;{encoded}\a")
+            sys.__stdout__.flush()
+            return True, "OSC52"
+        except Exception as exc:
+            return False, str(exc) or "no clipboard backend"
+
+    def _copy_selected_service_link(self):
+        with self._lock:
+            svc = self.services[self._selected_index]
+            link = self._service_links.get(svc.service_id, {})
+            primary = str(link.get("primary_url") or "").strip()
+        if not primary:
+            self._log(f"[LINK] {svc.label}: no link available to copy")
+            return
+        ok, method = self._copy_to_clipboard(primary)
+        if ok:
+            self._log(f"[LINK] Copied {svc.label}: {primary} ({method})")
+        else:
+            self._log(f"[WARN] {svc.label} copy failed: {method}")
+
+    def _log_all_service_links(self):
+        with self._lock:
+            lines = []
+            for svc in self.services:
+                data = self._service_links.get(svc.service_id, {})
+                url = str(data.get("primary_url") or "").strip()
+                if url:
+                    lines.append(f"[LINK] {svc.label}: {url}")
+                else:
+                    lines.append(f"[LINK] {svc.label}: (no HTTP link)")
+        self._log("[LINK] Service endpoints:")
+        for line in lines:
+            self._log(line)
+
+    def _handle_mouse_event(self) -> bool:
+        try:
+            _, mouse_x, mouse_y, _, button_state = curses.getmouse()
+        except Exception:
+            return False
+        click_mask = (
+            getattr(curses, "BUTTON1_CLICKED", 0)
+            | getattr(curses, "BUTTON1_RELEASED", 0)
+            | getattr(curses, "BUTTON1_PRESSED", 0)
+            | getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0)
+        )
+        if click_mask and not (button_state & click_mask):
+            return False
+
+        with self._lock:
+            regions = list(self._click_regions)
+        for region in reversed(regions):
+            if int(region.get("row", -1)) != int(mouse_y):
+                continue
+            if int(region.get("col_start", 0)) <= int(mouse_x) <= int(region.get("col_end", -1)):
+                payload = str(region.get("payload", "")).strip()
+                if not payload:
+                    return False
+                ok, method = self._copy_to_clipboard(payload)
+                with self._lock:
+                    if ok:
+                        self._log(f"[LINK] Copied: {payload} ({method})")
+                    else:
+                        self._log(f"[WARN] Copy failed: {method}")
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Curses UI
@@ -3069,6 +3437,7 @@ class WatchdogManager:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         now = time.time()
+        self._click_regions = []
 
         if height < 14 or width < 96:
             self._safe_addnstr(
@@ -3083,10 +3452,24 @@ class WatchdogManager:
             return
 
         title = " Teleoperation Watchdog "
-        info = "Up/Down select | Space toggle | R restart | A toggle all | S CPU settings | Q quit"
+        info = (
+            "Up/Down select | Space toggle | R restart | A toggle all | "
+            "C copy link | L log links | S CPU settings | Q quit"
+        )
         self._safe_addnstr(stdscr, 0, 0, title, width - 1, curses.A_BOLD | curses.color_pair(1))
         self._safe_addnstr(stdscr, 1, 0, info, width - 1, curses.A_DIM)
         self._safe_addnstr(stdscr, 2, 0, self._resource_summary_line(), width - 1, curses.A_DIM)
+        last_links_age = "-"
+        if self._service_link_last_refresh_at > 0:
+            last_links_age = self._format_duration(now - self._service_link_last_refresh_at)
+        self._safe_addnstr(
+            stdscr,
+            3,
+            0,
+            f"Service links: click [copy] with mouse or press C | Last refresh: {last_links_age}",
+            width - 1,
+            curses.A_DIM,
+        )
 
         footer_row = height - 1
         table_header_row = 4
@@ -3100,7 +3483,7 @@ class WatchdogManager:
         log_first_row = log_header_row + 1
         log_rows = max(1, footer_row - log_first_row)
 
-        header = "Sel  Service         Desired  State      PID      Uptime    CPU%   RAM(MB)  Last Event / Error"
+        header = "Sel  Service         Desired  State      PID      Uptime    CPU%   RAM(MB)  Last Event / Error + Link"
         self._safe_addnstr(stdscr, table_header_row, 0, header, width - 1, curses.A_BOLD | curses.color_pair(1))
 
         visible_services = max(1, table_end_row - first_service_row)
@@ -3121,7 +3504,11 @@ class WatchdogManager:
             mem_text = f"{runtime.rss_mb:7.1f}" if runtime.rss_mb > 0 else "    0.0"
             state_text = runtime.state.upper()
             message = self._runtime_detail(runtime, now)
-            line = (
+            link_data = self._service_links.get(svc.service_id, {})
+            link_url = str(link_data.get("primary_url") or "").strip()
+            link_display = self._shorten_url(link_url, max_len=max(16, min(46, width // 3)))
+            copy_tag = "[copy]" if link_url else "[----]"
+            prefix = (
                 f"{selected:1}    "
                 f"{svc.label[:14]:14}  "
                 f"{desired:>3}      "
@@ -3130,12 +3517,33 @@ class WatchdogManager:
                 f"{uptime:8}  "
                 f"{cpu_text:>5}  "
                 f"{mem_text:>7}  "
-                f"{message}"
             )
+            min_message_space = 14
+            reserved_for_link = len(copy_tag) + (1 + len(link_display) if link_display else 0) + 3
+            message_space = max(
+                min_message_space,
+                width - len(prefix) - reserved_for_link - 2,
+            )
+            message_text = str(message or "")
+            if len(message_text) > message_space:
+                message_text = message_text[: max(0, message_space - 3)] + "..."
+            line = f"{prefix}{message_text}  {copy_tag}"
+            if link_display:
+                line += f" {link_display}"
             attrs = curses.color_pair(self._state_color(runtime.state))
             if idx == self._selected_index:
                 attrs |= curses.A_REVERSE
             self._safe_addnstr(stdscr, row, 0, line, width - 1, attrs)
+            if link_url:
+                copy_col = line.rfind(copy_tag)
+                if copy_col >= 0:
+                    self._register_click_region(
+                        self._click_regions,
+                        row,
+                        copy_col,
+                        copy_col + len(copy_tag) - 1,
+                        link_url,
+                    )
             row += 1
             if row >= table_end_row:
                 break
@@ -3168,12 +3576,17 @@ class WatchdogManager:
         for i, line in enumerate(logs):
             self._safe_addnstr(stdscr, log_first_row + i, 0, line, width - 1)
 
-        selected_runtime = self.runtime_by_id[self.services[self._selected_index].service_id]
+        selected_service = self.services[self._selected_index]
+        selected_runtime = self.runtime_by_id[selected_service.service_id]
+        selected_link_data = self._service_links.get(selected_service.service_id, {})
+        selected_link = str(selected_link_data.get("primary_url") or "").strip()
+        selected_link_text = self._shorten_url(selected_link, max_len=max(22, width // 3)) if selected_link else "(none)"
         status = (
-            f"Selected: {self.services[self._selected_index].label} | "
+            f"Selected: {selected_service.label} | "
             f"State: {selected_runtime.state.upper()} | "
             f"Desired: {'ON' if selected_runtime.desired_enabled else 'OFF'} | "
-            f"CPU {selected_runtime.cpu_percent:.1f}% | RAM {selected_runtime.rss_mb:.1f}MB"
+            f"CPU {selected_runtime.cpu_percent:.1f}% | RAM {selected_runtime.rss_mb:.1f}MB | "
+            f"Link: {selected_link_text}"
         )
         clock = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         footer = f"{status} | {clock}"
@@ -3189,6 +3602,10 @@ class WatchdogManager:
             curses.curs_set(0)
             stdscr.nodelay(True)
             stdscr.keypad(True)
+            try:
+                curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            except Exception:
+                pass
             curses.start_color()
             curses.use_default_colors()
             curses.init_pair(1, curses.COLOR_WHITE, -1)
@@ -3209,6 +3626,8 @@ class WatchdogManager:
                     continue
 
                 open_cpu_settings = False
+                copy_selected_link = False
+                log_all_links = False
                 with self._lock:
                     if key in (ord("q"), ord("Q")):
                         self._log("[USER] Quit requested")
@@ -3223,8 +3642,19 @@ class WatchdogManager:
                         self.restart_selected()
                     elif key in (ord("a"), ord("A")):
                         self.toggle_all()
+                    elif key in (ord("c"), ord("C")):
+                        copy_selected_link = True
+                    elif key in (ord("l"), ord("L")):
+                        log_all_links = True
                     elif key in (ord("s"), ord("S")):
                         open_cpu_settings = True
+
+                if key == curses.KEY_MOUSE:
+                    self._handle_mouse_event()
+                if copy_selected_link:
+                    self._copy_selected_service_link()
+                if log_all_links:
+                    self._log_all_service_links()
 
                 if open_cpu_settings:
                     self._open_cpu_settings_modal(stdscr)

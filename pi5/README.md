@@ -31,6 +31,9 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
   - live per-service CPU and RAM usage in the service table
   - top-line heaviest/peak resource summary
   - `S` opens CPU throttle settings (governor/min/max/auto-apply + apply-now)
+  - `S` also includes ASR-vs-LLM throttle controls (enable, percent, cycle-ms) to reduce ASR CPU during LLM generation
+  - left/right arrows switch lower-pane tabs: `Logs` and `Resources`
+  - `Resources` tab renders live side-by-side CPU% and RAM% history graphs plus a top-by-CPU service table
   - `C` copies selected service dashboard/link target, `L` logs all discovered service links
   - click `[copy]` in the service table (mouse-enabled terminals) to copy that row link
   - copied service links auto-include service session keys (`session_key=...`) when auth is enabled

@@ -88,6 +88,7 @@ DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 2.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
 HTTP_PROBE_TIMEOUT_SECONDS = 1.5
 RESOURCE_SAMPLE_INTERVAL_SECONDS = 1.0
+RESOURCE_GRAPH_HISTORY_POINTS = 240
 PORT_DISCOVERY_SCAN_LIMIT = 64
 PORT_DISCOVERY_MAX_DELTA = 128
 PORT_RECLAIM_TERM_WAIT_SECONDS = 1.4
@@ -360,6 +361,8 @@ class WatchdogManager:
         self._logs: Deque[str] = deque(maxlen=300)
         self._click_regions: List[Dict[str, object]] = []
         self._selected_index = 0
+        self._bottom_tabs: Tuple[str, str] = ("logs", "resources")
+        self._active_bottom_tab = 0
         self._run_started_at = time.time()
         self._instance_lock_acquired = False
         self._instance_lock_handle = None
@@ -397,6 +400,13 @@ class WatchdogManager:
         self._force_direct = self._env_flag("WATCHDOG_FORCE_DIRECT", False)
         self._last_resource_sample_at = 0.0
         self._resource_sample_interval = max(0.4, float(RESOURCE_SAMPLE_INTERVAL_SECONDS))
+        self._resource_cpu_history: Deque[float] = deque(maxlen=RESOURCE_GRAPH_HISTORY_POINTS)
+        self._resource_ram_history: Deque[float] = deque(maxlen=RESOURCE_GRAPH_HISTORY_POINTS)
+        self._system_cpu_percent = 0.0
+        self._system_ram_percent = 0.0
+        self._system_mem_total_kb = 0
+        self._proc_cpu_prev_total = 0
+        self._proc_cpu_prev_idle = 0
 
         self._os_name = platform.system().lower()
         self._has_passive_tcp_tools = bool(
@@ -498,6 +508,49 @@ class WatchdogManager:
             return str(path.read_text(encoding="utf-8")).strip()
         except Exception:
             return ""
+
+    @staticmethod
+    def _read_proc_stat_cpu() -> Tuple[int, int]:
+        """
+        Return (total_jiffies, idle_jiffies) from /proc/stat.
+        """
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as fp:
+                first = str(fp.readline() or "").strip()
+            parts = first.split()
+            if len(parts) < 5 or parts[0] != "cpu":
+                return 0, 0
+            values = [int(item) for item in parts[1:]]
+            total = int(sum(values))
+            idle = int(values[3]) + (int(values[4]) if len(values) > 4 else 0)
+            return total, idle
+        except Exception:
+            return 0, 0
+
+    @staticmethod
+    def _read_proc_meminfo() -> Tuple[int, int]:
+        """
+        Return (mem_total_kb, mem_available_kb) from /proc/meminfo.
+        """
+        total = 0
+        available = 0
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as fp:
+                for raw in fp:
+                    line = str(raw or "").strip()
+                    if line.startswith("MemTotal:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            total = int(parts[1])
+                    elif line.startswith("MemAvailable:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            available = int(parts[1])
+                    if total > 0 and available > 0:
+                        break
+        except Exception:
+            return 0, 0
+        return int(total), int(available)
 
     @staticmethod
     def _parse_int(value, default: int = 0) -> int:
@@ -1118,6 +1171,29 @@ class WatchdogManager:
                     stack.append(child_pid)
         return cpu_total, rss_total
 
+    def _update_system_resource_snapshot(self):
+        total, idle = self._read_proc_stat_cpu()
+        if total > 0 and idle >= 0:
+            prev_total = int(self._proc_cpu_prev_total or 0)
+            prev_idle = int(self._proc_cpu_prev_idle or 0)
+            if prev_total > 0 and total > prev_total:
+                delta_total = float(total - prev_total)
+                delta_idle = float(max(0, idle - prev_idle))
+                if delta_total > 0.0:
+                    busy_ratio = max(0.0, min(1.0, 1.0 - (delta_idle / delta_total)))
+                    self._system_cpu_percent = busy_ratio * 100.0
+            self._proc_cpu_prev_total = int(total)
+            self._proc_cpu_prev_idle = int(idle)
+
+        mem_total_kb, mem_available_kb = self._read_proc_meminfo()
+        if mem_total_kb > 0:
+            self._system_mem_total_kb = int(mem_total_kb)
+            used_kb = max(0, int(mem_total_kb - max(0, mem_available_kb)))
+            self._system_ram_percent = (float(used_kb) / float(mem_total_kb)) * 100.0
+
+        self._resource_cpu_history.append(max(0.0, min(100.0, float(self._system_cpu_percent))))
+        self._resource_ram_history.append(max(0.0, min(100.0, float(self._system_ram_percent))))
+
     def _update_resource_usage(self, now: float):
         if self._os_name == "windows":
             return
@@ -1127,6 +1203,7 @@ class WatchdogManager:
             return
         self._last_resource_sample_at = now
         if not shutil.which("ps"):
+            self._update_system_resource_snapshot()
             return
 
         try:
@@ -1218,6 +1295,8 @@ class WatchdogManager:
             if runtime.rss_mb > runtime.peak_rss_mb:
                 runtime.peak_rss_mb = runtime.rss_mb
                 runtime.peak_rss_at = now
+
+        self._update_system_resource_snapshot()
 
     def _health_probe(self, svc: ServiceSpec) -> Tuple[bool, str]:
         return self._health_probe_with_runtime(svc, None)
@@ -3557,6 +3636,138 @@ class WatchdogManager:
             f"Peak RAM: {peak_mem_label} {peak_mem_value:.1f}MB"
         )
 
+    def _usage_color_pair(self, value_percent: float, metric: str = "cpu") -> int:
+        value = float(value_percent or 0.0)
+        if value >= 85.0:
+            return 5
+        if value >= 60.0:
+            return 3
+        if str(metric or "").strip().lower() == "ram":
+            return 6
+        return 2
+
+    def _draw_usage_graph(
+        self,
+        stdscr,
+        top_row: int,
+        left_col: int,
+        graph_width: int,
+        graph_height: int,
+        series: Sequence[float],
+        title: str,
+        metric: str,
+    ):
+        if graph_width < 8 or graph_height < 4:
+            self._safe_addnstr(stdscr, top_row, left_col, f"{title}: terminal too small", graph_width)
+            return
+
+        plot_top = top_row + 1
+        plot_bottom = top_row + graph_height - 1
+        plot_height = max(1, plot_bottom - plot_top + 1)
+        plot_width = max(1, graph_width - 2)
+        values = list(series)[-plot_width:]
+        if len(values) < plot_width:
+            values = ([0.0] * (plot_width - len(values))) + values
+        latest = float(values[-1] if values else 0.0)
+
+        title_text = f"{title} {latest:5.1f}%"
+        self._safe_addnstr(stdscr, top_row, left_col, title_text, graph_width, curses.A_BOLD)
+        self._safe_addnstr(stdscr, plot_top - 1, left_col + graph_width - 7, "100%", 6, curses.A_DIM)
+        self._safe_addnstr(stdscr, plot_bottom, left_col + graph_width - 5, "0%", 4, curses.A_DIM)
+
+        for col_idx in range(plot_width):
+            value = max(0.0, min(100.0, float(values[col_idx])))
+            filled = int(round((value / 100.0) * float(plot_height)))
+            color = curses.color_pair(self._usage_color_pair(value, metric))
+            x = left_col + 1 + col_idx
+            for y in range(plot_height):
+                row = plot_bottom - y
+                if y < filled:
+                    self._safe_addnstr(stdscr, row, x, "#", 1, color)
+                else:
+                    self._safe_addnstr(stdscr, row, x, ".", 1, curses.A_DIM)
+
+    def _draw_resources_tab(self, stdscr, top_row: int, first_row: int, row_count: int, width: int):
+        if row_count <= 2:
+            return
+        cpu_series = list(self._resource_cpu_history)
+        ram_series = list(self._resource_ram_history)
+        if not cpu_series:
+            cpu_series = [0.0]
+        if not ram_series:
+            ram_series = [0.0]
+
+        graph_height = max(4, min(10, row_count - 5))
+        left_width = max(18, (width - 2) // 2)
+        right_width = max(18, width - left_width - 1)
+        left_col = 0
+        right_col = left_width + 1
+
+        self._draw_usage_graph(
+            stdscr,
+            first_row,
+            left_col,
+            left_width,
+            graph_height,
+            cpu_series,
+            "CPU Usage",
+            "cpu",
+        )
+        self._draw_usage_graph(
+            stdscr,
+            first_row,
+            right_col,
+            right_width,
+            graph_height,
+            ram_series,
+            "RAM Usage",
+            "ram",
+        )
+
+        sample_count = min(len(cpu_series), len(ram_series))
+        cpu_now = float(cpu_series[-1] if cpu_series else 0.0)
+        cpu_avg = (sum(cpu_series) / float(len(cpu_series))) if cpu_series else 0.0
+        ram_now = float(ram_series[-1] if ram_series else 0.0)
+        ram_avg = (sum(ram_series) / float(len(ram_series))) if ram_series else 0.0
+        mem_total_mb = float(self._system_mem_total_kb or 0) / 1024.0
+        summary_row = first_row + graph_height + 1
+        summary = (
+            f"Tick {self._resource_sample_interval:.1f}s | Samples {sample_count} | "
+            f"CPU now/avg {cpu_now:.1f}/{cpu_avg:.1f}% | "
+            f"RAM now/avg {ram_now:.1f}/{ram_avg:.1f}%"
+        )
+        if mem_total_mb > 0.0:
+            summary += f" | Total RAM {mem_total_mb:.0f}MB"
+        self._safe_addnstr(stdscr, summary_row, 0, summary, width - 1, curses.A_DIM)
+
+        table_row = summary_row + 1
+        remaining_rows = max(0, (first_row + row_count) - table_row)
+        if remaining_rows < 2:
+            return
+        self._safe_addnstr(
+            stdscr,
+            table_row,
+            0,
+            "Top Services by CPU (live): Service         CPU%   RAM(MB)   State",
+            width - 1,
+            curses.A_BOLD | curses.color_pair(1),
+        )
+        rows_left = remaining_rows - 1
+        if rows_left <= 0:
+            return
+        ranked = []
+        for svc in self.services:
+            runtime = self.runtime_by_id.get(svc.service_id)
+            if not runtime:
+                continue
+            ranked.append((float(runtime.cpu_percent), float(runtime.rss_mb), svc.label, runtime.state))
+        ranked.sort(key=lambda item: (-item[0], -item[1], str(item[2]).lower()))
+        for idx, item in enumerate(ranked[:rows_left]):
+            cpu, rss, label, state = item
+            color = curses.color_pair(self._usage_color_pair(cpu, "cpu"))
+            line = f"{label[:14]:14}  {cpu:5.1f}  {rss:8.1f}   {str(state).upper()[:10]}"
+            self._safe_addnstr(stdscr, table_row + 1 + idx, 0, line, width - 1, color)
+
     def _prompt_text_input(self, stdscr, prompt: str, initial: str = "") -> Optional[str]:
         try:
             max_y, max_x = stdscr.getmaxyx()
@@ -3889,7 +4100,7 @@ class WatchdogManager:
         title = " Teleoperation Watchdog "
         info = (
             "Up/Down select | Space toggle | R restart | A toggle all | "
-            "C copy link | L log links | S CPU settings | Q quit"
+            "C copy link | L log links | S CPU settings | <-/-> tabs | Q quit"
         )
         self._safe_addnstr(stdscr, 0, 0, title, width - 1, curses.A_BOLD | curses.color_pair(1))
         self._safe_addnstr(stdscr, 1, 0, info, width - 1, curses.A_DIM)
@@ -4015,19 +4226,38 @@ class WatchdogManager:
 
         separator = "-" * max(1, width - 1)
         self._safe_addnstr(stdscr, table_end_row, 0, separator, width - 1, curses.color_pair(1))
-        self._safe_addnstr(stdscr, log_header_row, 0, " Logs ", width - 1, curses.A_BOLD | curses.color_pair(1))
+        tab_prefix = "[<- / ->] Tabs: "
+        self._safe_addnstr(stdscr, log_header_row, 0, tab_prefix, width - 1, curses.A_BOLD | curses.color_pair(1))
+        tab_col = len(tab_prefix)
+        for idx, tab_name in enumerate(self._bottom_tabs):
+            label = str(tab_name or "").strip().capitalize()
+            if idx > 0:
+                self._safe_addnstr(stdscr, log_header_row, tab_col, "| ", width - tab_col - 1, curses.A_DIM)
+                tab_col += 2
+            tab_attr = curses.A_BOLD | curses.color_pair(1)
+            if idx == self._active_bottom_tab:
+                tab_attr |= curses.A_REVERSE
+            token = f" {label} "
+            self._safe_addnstr(stdscr, log_header_row, tab_col, token, width - tab_col - 1, tab_attr)
+            tab_col += len(token)
 
-        logs = list(self._logs)[-log_rows:]
-        for i, line in enumerate(logs):
-            self._safe_addnstr(stdscr, log_first_row + i, 0, line, width - 1)
+        active_tab = str(self._bottom_tabs[self._active_bottom_tab]).strip().lower()
+        if active_tab == "resources":
+            self._draw_resources_tab(stdscr, log_header_row, log_first_row, log_rows, width)
+        else:
+            logs = list(self._logs)[-log_rows:]
+            for i, line in enumerate(logs):
+                self._safe_addnstr(stdscr, log_first_row + i, 0, line, width - 1)
 
         selected_service = self.services[self._selected_index]
         selected_runtime = self.runtime_by_id[selected_service.service_id]
         selected_link_data = self._service_links.get(selected_service.service_id, {})
         selected_link = str(selected_link_data.get("primary_url") or "").strip()
         selected_link_text = self._shorten_url(selected_link, max_len=max(22, width // 3)) if selected_link else "(none)"
+        active_tab_label = str(self._bottom_tabs[self._active_bottom_tab]).strip().capitalize()
         status = (
             f"Selected: {selected_service.label} | "
+            f"Tab: {active_tab_label} | "
             f"State: {selected_runtime.state.upper()} | "
             f"Desired: {'ON' if selected_runtime.desired_enabled else 'OFF'} | "
             f"CPU {selected_runtime.cpu_percent:.1f}% | RAM {selected_runtime.rss_mb:.1f}MB | "
@@ -4069,6 +4299,7 @@ class WatchdogManager:
             curses.init_pair(3, curses.COLOR_YELLOW, -1)
             curses.init_pair(4, curses.COLOR_MAGENTA, -1)
             curses.init_pair(5, curses.COLOR_RED, -1)
+            curses.init_pair(6, curses.COLOR_CYAN, -1)
 
             while True:
                 with self._lock:
@@ -4092,6 +4323,10 @@ class WatchdogManager:
                         self._selected_index = max(0, self._selected_index - 1)
                     elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
                         self._selected_index = min(len(self.services) - 1, self._selected_index + 1)
+                    elif key == curses.KEY_LEFT:
+                        self._active_bottom_tab = (self._active_bottom_tab - 1) % len(self._bottom_tabs)
+                    elif key == curses.KEY_RIGHT:
+                        self._active_bottom_tab = (self._active_bottom_tab + 1) % len(self._bottom_tabs)
                     elif key == ord(" "):
                         self.toggle_selected()
                     elif key in (ord("r"), ord("R")):

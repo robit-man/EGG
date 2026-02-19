@@ -2802,10 +2802,25 @@ class WatchdogManager:
     def _discover_service_links(self, svc: ServiceSpec, runtime: ServiceRuntime) -> Tuple[Dict[str, str], str]:
         links: Dict[str, str] = {}
         err = ""
-        if str(svc.health_mode or "").strip().lower() != "http":
+        mode = str(svc.health_mode or "").strip().lower()
+        port = self._service_port(svc, runtime)
+        if mode != "http":
+            if port > 0:
+                links["local_base_url"] = f"tcp://127.0.0.1:{port}"
+                if self._lan_ip:
+                    links["lan_base_url"] = f"tcp://{self._lan_ip}:{port}"
+
+            # LLM Bridge is TCP, but model dashboard lives on Pipeline API.
+            if svc.service_id == "llm_bridge":
+                pipeline_svc = self.service_by_id.get("pipeline_api")
+                pipeline_rt = self.runtime_by_id.get("pipeline_api")
+                pipeline_port = self._service_port(pipeline_svc, pipeline_rt) if pipeline_svc else 0
+                if pipeline_port > 0:
+                    links["local_llm_dashboard_url"] = f"http://127.0.0.1:{pipeline_port}/llm/dashboard"
+                    if self._lan_ip:
+                        links["lan_llm_dashboard_url"] = f"http://{self._lan_ip}:{pipeline_port}/llm/dashboard"
             return links, err
 
-        port = self._service_port(svc, runtime)
         if port <= 0:
             return links, "No HTTP port configured"
 
@@ -2839,19 +2854,20 @@ class WatchdogManager:
 
         preferred_exact = (
             "lan_llm_dashboard_url",
-            "tunnel_llm_dashboard_url",
             "local_llm_dashboard_url",
+            "tunnel_llm_dashboard_url",
             "llm_dashboard_url",
             "lan_dashboard_url",
-            "tunnel_dashboard_url",
             "local_dashboard_url",
+            "tunnel_dashboard_url",
             "dashboard_url",
             "lan_list_url",
-            "tunnel_list_url",
             "local_list_url",
+            "tunnel_list_url",
             "list_url",
             "lan_base_url",
             "local_base_url",
+            "tunnel_base_url",
         )
         for key in preferred_exact:
             value = str(links.get(key) or "").strip()
@@ -3466,7 +3482,7 @@ class WatchdogManager:
             stdscr,
             3,
             0,
-            f"Service links: click [copy] with mouse or press C | Last refresh: {last_links_age}",
+            f"Service links: click [copy] or link text to copy full URL | Last refresh: {last_links_age}",
             width - 1,
             curses.A_DIM,
         )
@@ -3544,6 +3560,16 @@ class WatchdogManager:
                         copy_col + len(copy_tag) - 1,
                         link_url,
                     )
+                if link_display:
+                    link_col = line.rfind(link_display)
+                    if link_col >= 0:
+                        self._register_click_region(
+                            self._click_regions,
+                            row,
+                            link_col,
+                            link_col + len(link_display) - 1,
+                            link_url,
+                        )
             row += 1
             if row >= table_end_row:
                 break
@@ -3592,6 +3618,17 @@ class WatchdogManager:
         footer = f"{status} | {clock}"
         self._safe_addnstr(stdscr, footer_row, 0, " " * (width - 1), width - 1, curses.A_REVERSE)
         self._safe_addnstr(stdscr, footer_row, 0, footer, width - 1, curses.A_REVERSE)
+        if selected_link:
+            link_token = f"Link: {selected_link_text}"
+            token_col = footer.find(link_token)
+            if token_col >= 0:
+                self._register_click_region(
+                    self._click_regions,
+                    footer_row,
+                    token_col,
+                    token_col + len(link_token) - 1,
+                    selected_link,
+                )
         stdscr.refresh()
 
     def run_curses(self) -> bool:

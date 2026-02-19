@@ -44,6 +44,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
   - `model_to_tts.py` chunks responses on punctuation for rapid TTS playback (instead of waiting for full sentences only)
   - voice commands: `turn thinking on/off`; `switch model ...` with numbered confirmation flow
+  - dashboard model changes are hot-reloaded and preempt active inference; next ASR prompt runs on the new model
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
 - `run_ollama_service.py`: Ollama service wrapper

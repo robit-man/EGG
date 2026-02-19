@@ -510,7 +510,38 @@ else:
             _config_mtime = float(current_mtime)
             next_model = str(CONFIG.get("model", "")).strip()
             if next_model and next_model != previous_model:
-                _ensure_ollama_model_ready(next_model)
+                _emit_pipeline_event(
+                    "llm",
+                    "model_switching",
+                    detail=f"source=config_hot_reload from={previous_model or 'unknown'} to={next_model}",
+                )
+                try:
+                    _cancel_active_inference(
+                        reason=f"config_model_switch:{previous_model or 'unknown'}->{next_model}"
+                    )
+                    dropped, notified = _discard_pending_prompts(reason="config model switch")
+                    if dropped > 0:
+                        _emit_pipeline_event(
+                            "llm",
+                            "cancelled",
+                            detail=f"config switch dropped_pending={dropped} notified={notified}",
+                            level="warn",
+                        )
+                except Exception:
+                    pass
+                if _ensure_ollama_model_ready(next_model):
+                    _emit_pipeline_event(
+                        "llm",
+                        "model_switched",
+                        detail=f"source=config_hot_reload from={previous_model or 'unknown'} to={next_model}",
+                    )
+                else:
+                    _emit_pipeline_event(
+                        "llm",
+                        "error",
+                        detail=f"source=config_hot_reload model_switch_failed target={next_model}",
+                        level="error",
+                    )
             logging.info(
                 "Reloaded llm bridge config: "
                 f"model={CONFIG.get('model')} thinking={'on' if _as_bool(CONFIG.get('thinking_enabled'), False) else 'off'}"
@@ -546,6 +577,7 @@ else:
         return None
 
     MODEL_SWITCH_TIMEOUT_SECONDS = 45.0
+    CONFIG_WATCH_INTERVAL_SECONDS = 0.75
     _model_switch_lock = threading.Lock()
     _pending_model_switch = {
         "active": False,
@@ -719,6 +751,18 @@ else:
             return True, f"Model already set to {target}."
 
         _emit_pipeline_event("llm", "model_switching", detail=f"from={current or 'unknown'} to={target}")
+        try:
+            _cancel_active_inference(reason=f"voice_model_switch:{current or 'unknown'}->{target}")
+            dropped, notified = _discard_pending_prompts(reason="voice model switch")
+            if dropped > 0:
+                _emit_pipeline_event(
+                    "llm",
+                    "cancelled",
+                    detail=f"voice switch dropped_pending={dropped} notified={notified}",
+                    level="warn",
+                )
+        except Exception:
+            pass
         if not _ensure_ollama_model_ready(target):
             _emit_pipeline_event(
                 "llm",
@@ -997,6 +1041,105 @@ else:
     
     # Initialize a Lock for history updates to ensure thread safety
     history_lock = threading.Lock()
+    active_inference_lock = threading.Lock()
+    active_inference = {
+        "process": None,
+        "request_id": 0,
+        "model": "",
+        "started_at": 0.0,
+    }
+
+    def _set_active_inference(process, request_id: int, model_name: str):
+        with active_inference_lock:
+            active_inference["process"] = process
+            active_inference["request_id"] = int(request_id or 0)
+            active_inference["model"] = str(model_name or "").strip()
+            active_inference["started_at"] = time.time()
+
+    def _clear_active_inference(expected_process=None):
+        with active_inference_lock:
+            current = active_inference.get("process")
+            if expected_process is not None and current is not expected_process:
+                return
+            active_inference["process"] = None
+            active_inference["request_id"] = 0
+            active_inference["model"] = ""
+            active_inference["started_at"] = 0.0
+
+    def _get_active_inference_snapshot():
+        with active_inference_lock:
+            process = active_inference.get("process")
+            return {
+                "process": process,
+                "request_id": int(active_inference.get("request_id") or 0),
+                "model": str(active_inference.get("model") or ""),
+                "started_at": float(active_inference.get("started_at") or 0.0),
+            }
+
+    def _cancel_active_inference(reason: str = "model switch"):
+        snapshot = _get_active_inference_snapshot()
+        process = snapshot.get("process")
+        if process is None:
+            return False
+        request_id = int(snapshot.get("request_id") or 0)
+        model_name = str(snapshot.get("model") or "").strip() or "unknown"
+        if process.is_alive():
+            logging.warning(
+                f"Cancelling active inference pid={process.pid} request_id={request_id} model={model_name} reason={reason}"
+            )
+            _emit_pipeline_event(
+                "llm",
+                "cancelled",
+                detail=f"reason={reason} pid={process.pid} request_id={request_id} model={model_name}",
+                level="warn",
+            )
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            process.join(timeout=3.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                process.join(timeout=2.0)
+        _clear_active_inference(expected_process=process)
+        return True
+
+    def _discard_pending_prompts(reason: str = "model switch"):
+        dropped = 0
+        notified = 0
+        while True:
+            try:
+                item = ollama_queue.get_nowait()
+            except Empty:
+                break
+            except Exception:
+                break
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            req_id, _ = item
+            if req_id is None:
+                # Preserve shutdown sentinel.
+                try:
+                    ollama_queue.put(item)
+                except Exception:
+                    pass
+                break
+            dropped += 1
+            response_queue = None
+            with response_dict_lock:
+                response_queue = response_dict.pop(req_id, None)
+            if response_queue is not None:
+                try:
+                    response_queue.put("Prompt cancelled due to model switch.")
+                    notified += 1
+                except Exception:
+                    pass
+        if dropped > 0:
+            logging.info(f"Dropped {dropped} pending prompt(s) due to {reason}; notified={notified}")
+        return dropped, notified
     
     # Function to handle inter-process communication from inference processes to TTS queue
     def inference_to_tts_handler():
@@ -1037,18 +1180,12 @@ else:
         Worker thread that processes messages from the Ollama queue.
         Processes one inference at a time to avoid interrupting active speech output.
         """
-        current_inference_process = None  # Track the current inference process
         while True:
             try:
                 request_id, user_message = ollama_queue.get(timeout=1)  # Wait for 1 second
                 if request_id is None and user_message is None:
                     logging.info("Ollama Worker: Received shutdown signal.")
-                    # Terminate any ongoing inference process
-                    if current_inference_process and current_inference_process.is_alive():
-                        logging.info("Ollama Worker: Terminating ongoing inference process.")
-                        current_inference_process.terminate()
-                        current_inference_process.join()
-                        logging.info("Ollama Worker: Ongoing inference process terminated.")
+                    _cancel_active_inference(reason="shutdown")
                     break
                 logging.info(f"Ollama Worker: Received new prompt: {user_message}")
                 current_model = str(CONFIG.get("model", "")).strip() or "unknown"
@@ -1065,10 +1202,13 @@ else:
                     response_queue = response_dict.pop(request_id, None)
 
                 # Wait for any active inference to finish before starting a new prompt.
-                if current_inference_process and current_inference_process.is_alive():
+                snapshot = _get_active_inference_snapshot()
+                active_process = snapshot.get("process")
+                if active_process and active_process.is_alive():
                     logging.info("Ollama Worker: Waiting for active inference to complete before next prompt.")
-                    current_inference_process.join()
+                    active_process.join()
                     logging.info("Ollama Worker: Previous inference completed.")
+                    _clear_active_inference(expected_process=active_process)
 
                 # Start a new inference process for the new prompt
                 logging.info("Ollama Worker: Starting new inference process.")
@@ -1077,6 +1217,7 @@ else:
                     args=(user_message, inference_queue)
                 )
                 current_inference_process.start()
+                _set_active_inference(current_inference_process, request_id=request_id, model_name=current_model)
                 _emit_pipeline_event(
                     "llm",
                     "processing",
@@ -1091,6 +1232,7 @@ else:
                         pass
                 current_inference_process.join()
                 exit_code = int(current_inference_process.exitcode or 0)
+                _clear_active_inference(expected_process=current_inference_process)
                 if exit_code != 0:
                     _emit_pipeline_event(
                         "llm",
@@ -1378,6 +1520,15 @@ else:
         server_socket.close()
         logging.info("Receiver Thread: Server socket closed.")
 
+    def config_watcher_thread(interval_seconds=CONFIG_WATCH_INTERVAL_SECONDS):
+        sleep_for = max(0.25, float(interval_seconds or CONFIG_WATCH_INTERVAL_SECONDS))
+        while True:
+            try:
+                _reload_config_if_updated()
+            except Exception as exc:
+                logging.debug(f"Config watcher error: {exc}")
+            time.sleep(sleep_for)
+
     def handle_client(client_sock, addr):
         """
         Handle individual client connections.
@@ -1624,6 +1775,14 @@ else:
         start_tts_thread()
         logging.info("Starting Ollama Worker...")
         start_ollama_thread()
+        watcher = threading.Thread(
+            target=config_watcher_thread,
+            args=(CONFIG_WATCH_INTERVAL_SECONDS,),
+            daemon=True,
+            name="ConfigWatcher",
+        )
+        watcher.start()
+        logging.info("Config Watcher: Started.")
 
         # Start Inference to TTS Handler thread
         # Already started earlier

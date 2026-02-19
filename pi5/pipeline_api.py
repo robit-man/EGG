@@ -1863,7 +1863,7 @@ def llm_config():
             "config": config_view,
             "auto_pull_missing": bool(auto_pull_missing),
             "auto_pull": pull_result,
-            "note": "If llm_bridge does not hot-reload config, restart the LLM Bridge service to apply immediately.",
+            "note": "llm_bridge hot-reloads config. Model changes cancel active inference and apply to the next ASR prompt.",
         }
     )
 

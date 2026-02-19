@@ -20,6 +20,9 @@ DEFAULT_RAW_AUDIO_PORT = 6353
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 3.0
 DEFAULT_MAX_CONNECT_ATTEMPTS = 4
 DEFAULT_RETRY_DELAY_SECONDS = 0.7
+DEFAULT_STARTUP_ANNOUNCEMENT_ENABLED = True
+DEFAULT_STARTUP_ANNOUNCEMENT_TEXT = "hello there, egg is online"
+DEFAULT_STARTUP_ANNOUNCEMENT_TIMEOUT_SECONDS = 45.0
 VERBOSE_CONNECTION_LOGS = str(os.environ.get("VOICE_SERVER_VERBOSE_CONNECTION_LOGS", "0")).strip().lower() in (
     "1",
     "true",
@@ -71,6 +74,14 @@ def _as_float(value, default, minimum=None, maximum=None):
     return parsed
 
 
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _load_runtime_settings():
     cfg_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), CONFIG_PATH)
     payload = {}
@@ -120,6 +131,32 @@ def _load_runtime_settings():
             DEFAULT_RETRY_DELAY_SECONDS,
             minimum=0.1,
             maximum=10.0,
+        ),
+        "startup_announcement_enable": _as_bool(
+            _get_nested(
+                payload,
+                "audio_router.audio.startup_announcement_enable",
+                DEFAULT_STARTUP_ANNOUNCEMENT_ENABLED,
+            ),
+            default=DEFAULT_STARTUP_ANNOUNCEMENT_ENABLED,
+        ),
+        "startup_announcement_text": str(
+            _get_nested(
+                payload,
+                "audio_router.audio.startup_announcement_text",
+                DEFAULT_STARTUP_ANNOUNCEMENT_TEXT,
+            )
+            or DEFAULT_STARTUP_ANNOUNCEMENT_TEXT
+        ).strip(),
+        "startup_announcement_timeout_seconds": _as_float(
+            _get_nested(
+                payload,
+                "audio_router.audio.startup_announcement_timeout_seconds",
+                DEFAULT_STARTUP_ANNOUNCEMENT_TIMEOUT_SECONDS,
+            ),
+            DEFAULT_STARTUP_ANNOUNCEMENT_TIMEOUT_SECONDS,
+            minimum=1.0,
+            maximum=300.0,
         ),
     }
 
@@ -198,6 +235,41 @@ def tts_worker(queue: Queue):
             queue.task_done()
 
 
+def _wait_for_audio_sink(settings: dict, timeout_seconds: float) -> bool:
+    host = str(settings.get("raw_audio_host") or DEFAULT_RAW_AUDIO_HOST)
+    port = int(settings.get("raw_audio_port") or DEFAULT_RAW_AUDIO_PORT)
+    connect_timeout = float(settings.get("connect_timeout_seconds") or DEFAULT_CONNECT_TIMEOUT_SECONDS)
+    deadline = time.time() + max(1.0, float(timeout_seconds))
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=max(0.2, connect_timeout)):
+                return True
+        except Exception:
+            time.sleep(1.0)
+    return False
+
+
+def _startup_announcement_worker(queue: Queue):
+    settings = _load_runtime_settings()
+    enabled = bool(settings.get("startup_announcement_enable", DEFAULT_STARTUP_ANNOUNCEMENT_ENABLED))
+    text = str(settings.get("startup_announcement_text") or "").strip()
+    timeout_seconds = float(
+        settings.get("startup_announcement_timeout_seconds", DEFAULT_STARTUP_ANNOUNCEMENT_TIMEOUT_SECONDS)
+        or DEFAULT_STARTUP_ANNOUNCEMENT_TIMEOUT_SECONDS
+    )
+
+    if not enabled or not text:
+        return
+
+    sink_ready = _wait_for_audio_sink(settings, timeout_seconds=timeout_seconds)
+    if not sink_ready:
+        _log("Startup announcement skipped: audio output sink unavailable.")
+        return
+
+    queue.put(text)
+    _log("Startup announcement queued.")
+
+
 def handle_client_connection(client_socket: socket.socket, queue: Queue):
     try:
         while True:
@@ -221,6 +293,7 @@ def main():
     tts_queue: Queue = Queue()
     worker_thread = threading.Thread(target=tts_worker, args=(tts_queue,), daemon=True)
     worker_thread.start()
+    threading.Thread(target=_startup_announcement_worker, args=(tts_queue,), daemon=True).start()
 
     text_server = None
     try:

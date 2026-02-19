@@ -1271,7 +1271,7 @@ def _llm_dashboard_html(session_key: str) -> str:
           <button id="startPull">Pull Model</button>
           <button id="refreshPull" class="secondary">Refresh Pull Status</button>
         </div>
-        <div id="pullSummary" class="status" style="margin-top: 8px;"></div>
+        <div id="pullSummary" class="status" style="overflow: auto; margin-top: 8px;"></div>
       </div>
     </div>
 

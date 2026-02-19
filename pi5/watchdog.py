@@ -111,6 +111,8 @@ DIRECT_LAUNCH_SERVICE_IDS = (
     "asr_stream",
     "ollama",
 )
+OLLAMA_HARD_STOP_TERM_WAIT_SECONDS = 0.8
+OLLAMA_HARD_STOP_KILL_WAIT_SECONDS = 1.2
 
 
 def _get_nested(data: dict, path: str, default=None):
@@ -1642,6 +1644,123 @@ class WatchdogManager:
         except Exception:
             return ""
 
+    def _list_ollama_related_pids(self) -> List[int]:
+        pids = set()
+        for pid in self._list_listening_pids_for_port(11434):
+            try:
+                parsed = int(pid)
+            except Exception:
+                continue
+            if parsed > 0 and parsed != os.getpid():
+                pids.add(parsed)
+
+        ollama_runtime = self.runtime_by_id.get("ollama")
+        if ollama_runtime and ollama_runtime.pid:
+            try:
+                parsed = int(ollama_runtime.pid)
+            except Exception:
+                parsed = 0
+            if parsed > 0 and parsed != os.getpid():
+                pids.add(parsed)
+
+        if self._os_name == "windows":
+            return sorted(pids)
+
+        if not shutil.which("ps"):
+            return sorted(pids)
+
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,args="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=2.5,
+            )
+            for raw in (result.stdout or "").splitlines():
+                line = str(raw or "").strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except Exception:
+                    continue
+                cmd = str(parts[1] or "").strip().lower()
+                if not cmd:
+                    continue
+                if "ollama serve" in cmd or "ollama runner" in cmd:
+                    if pid > 0 and pid != os.getpid():
+                        pids.add(pid)
+        except Exception:
+            pass
+
+        return sorted(pids)
+
+    def _force_stop_ollama_processes(self, reason: str) -> int:
+        targets = self._list_ollama_related_pids()
+        if not targets:
+            return 0
+
+        why = str(reason or "").strip() or "requested by user"
+        self._log(
+            f"[FORCE] Stopping Ollama process(es) ({why}): "
+            f"{','.join(str(pid) for pid in targets)}"
+        )
+
+        for pid in targets:
+            self._send_signal(int(pid), signal.SIGTERM)
+
+        term_deadline = time.time() + max(0.1, float(OLLAMA_HARD_STOP_TERM_WAIT_SECONDS))
+        while time.time() < term_deadline:
+            remaining = [pid for pid in targets if self._is_pid_running(int(pid))]
+            if not remaining:
+                break
+            time.sleep(0.08)
+
+        remaining = [pid for pid in targets if self._is_pid_running(int(pid))]
+        for pid in remaining:
+            self._send_signal(int(pid), signal.SIGKILL)
+
+        kill_deadline = time.time() + max(0.1, float(OLLAMA_HARD_STOP_KILL_WAIT_SECONDS))
+        while time.time() < kill_deadline:
+            survivors = [pid for pid in targets if self._is_pid_running(int(pid))]
+            if not survivors:
+                break
+            time.sleep(0.08)
+
+        survivors = [pid for pid in targets if self._is_pid_running(int(pid))]
+        stopped = len(targets) - len(survivors)
+        if survivors:
+            self._log(
+                f"[WARN] Ollama process(es) still alive after forced stop: "
+                f"{','.join(str(pid) for pid in survivors)}"
+            )
+        else:
+            self._log("[FORCE] Ollama process stop complete")
+
+        ollama_runtime = self.runtime_by_id.get("ollama")
+        if ollama_runtime and ollama_runtime.pid and int(ollama_runtime.pid) in targets:
+            if not self._is_pid_running(int(ollama_runtime.pid)):
+                ollama_runtime.pid = None
+                if ollama_runtime.terminal_process and not self._is_process_handle_running(
+                    ollama_runtime.terminal_process
+                ):
+                    ollama_runtime.terminal_process = None
+                ollama_runtime.process_stable_since = 0.0
+                ollama_runtime.stop_stage = 0
+                ollama_runtime.stop_requested_at = 0.0
+                ollama_runtime.resolved_health_port = 0
+
+        # Refresh the resource rows right away so the UI reflects the CPU drop.
+        self._last_resource_sample_at = 0.0
+        self._update_resource_usage(time.time())
+
+        return int(max(0, stopped))
+
     def _pid_likely_owned_by_service(self, pid: int, svc: ServiceSpec) -> bool:
         if not pid or pid <= 0:
             return False
@@ -2907,16 +3026,35 @@ class WatchdogManager:
         runtime = self.runtime_by_id[svc.service_id]
         if runtime.state == "missing":
             return
+        now = time.time()
+        sid = str(svc.service_id or "").strip().lower()
         if runtime.desired_enabled:
             runtime.desired_enabled = False
             runtime.restart_after_stop = False
             runtime.last_event = "Disabled by user"
             self._log(f"[USER] Disabled {svc.label}")
+            if sid == "llm_bridge":
+                ollama_runtime = self.runtime_by_id.get("ollama")
+                if ollama_runtime and ollama_runtime.state != "missing":
+                    ollama_runtime.desired_enabled = False
+                    ollama_runtime.restart_after_stop = False
+                    ollama_runtime.last_event = "Disabled with LLM Bridge"
+                    self._log("[USER] Disabled Ollama (linked with LLM Bridge)")
+            if sid in ("llm_bridge", "ollama"):
+                self._force_stop_ollama_processes(f"{svc.label} disabled")
         else:
             runtime.desired_enabled = True
-            runtime.next_restart_at = time.time()
+            runtime.next_restart_at = now
             runtime.last_event = "Enabled by user"
             self._log(f"[USER] Enabled {svc.label}")
+            if sid == "llm_bridge":
+                ollama_runtime = self.runtime_by_id.get("ollama")
+                if ollama_runtime and ollama_runtime.state != "missing":
+                    if not ollama_runtime.desired_enabled:
+                        ollama_runtime.desired_enabled = True
+                        ollama_runtime.next_restart_at = now
+                        ollama_runtime.last_event = "Enabled with LLM Bridge"
+                        self._log("[USER] Enabled Ollama (required by LLM Bridge)")
         self._save_desired_state()
 
     def restart_selected(self):

@@ -3171,10 +3171,10 @@ class WatchdogManager:
             text_short = text if len(text) <= 160 else (text[:157] + "...")
             detail_short = detail if len(detail) <= 120 else (detail[:117] + "...")
             message = f"[PIPELINE] {stage}:{step_state} ({source})"
-            if text_short:
-                message += f" | text=\"{text_short}\""
             if detail_short:
                 message += f" | {detail_short}"
+            if text_short:
+                message += f" | text=\"{text_short}\""
             self._log(message)
             try:
                 seq_val = int(evt.get("seq") or 0)

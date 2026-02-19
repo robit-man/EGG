@@ -619,6 +619,34 @@ else:
             requests.post(event_url, json=payload, timeout=0.45)
         except Exception:
             pass
+
+    _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+    _PUNCT_BOUNDARY_RE = re.compile(r"[.!?,;:…\n\r\u3002\uff01\uff1f\uff0c\uff1b\uff1a]+")
+    _LLM_STREAM_EVENT_INTERVAL_SECONDS = 0.22
+
+    def _estimate_token_count(text: str) -> int:
+        raw = str(text or "")
+        if not raw:
+            return 0
+        return len(_TOKEN_RE.findall(raw))
+
+    def _extract_tts_chunks(buffer_text: str):
+        """
+        Split buffered model output on punctuation so TTS can start playback quickly.
+        Returns (ready_chunks, remaining_tail_without_terminal_punctuation).
+        """
+        text = str(buffer_text or "")
+        if not text:
+            return [], ""
+        chunks = []
+        last = 0
+        for match in _PUNCT_BOUNDARY_RE.finditer(text):
+            end = match.end()
+            candidate = text[last:end].strip()
+            if candidate:
+                chunks.append(candidate)
+            last = end
+        return chunks, text[last:]
     
     #############################################
     # Step 6: Load Optional Configurations       #
@@ -822,7 +850,14 @@ else:
                         logging.info("Ollama Worker: Ongoing inference process terminated.")
                     break
                 logging.info(f"Ollama Worker: Received new prompt: {user_message}")
-                _emit_pipeline_event("llm", "queued", text=user_message, detail=f"request_id={request_id}")
+                current_model = str(CONFIG.get("model", "")).strip() or "unknown"
+                thinking_state = "on" if _as_bool(CONFIG.get("thinking_enabled", False), False) else "off"
+                _emit_pipeline_event(
+                    "llm",
+                    "queued",
+                    text=user_message,
+                    detail=f"model={current_model} thinking={thinking_state} request_id={request_id}",
+                )
 
                 response_queue = None
                 with response_dict_lock:
@@ -841,7 +876,12 @@ else:
                     args=(user_message, inference_queue)
                 )
                 current_inference_process.start()
-                _emit_pipeline_event("llm", "processing", text=user_message, detail=f"pid={current_inference_process.pid}")
+                _emit_pipeline_event(
+                    "llm",
+                    "processing",
+                    text=user_message,
+                    detail=f"model={current_model} thinking={thinking_state} pid={current_inference_process.pid}",
+                )
                 logging.info(f"Ollama Worker: Inference process started with PID {current_inference_process.pid}.")
                 if response_queue is not None:
                     try:
@@ -849,7 +889,14 @@ else:
                     except Exception:
                         pass
                 current_inference_process.join()
-                _emit_pipeline_event("llm", "completed", detail=f"request_id={request_id}")
+                exit_code = int(current_inference_process.exitcode or 0)
+                if exit_code != 0:
+                    _emit_pipeline_event(
+                        "llm",
+                        "error",
+                        detail=f"model={current_model} request_id={request_id} exit={exit_code}",
+                        level="error",
+                    )
                 logging.info("Ollama Worker: Inference process finished.")
 
             except Empty:
@@ -863,10 +910,23 @@ else:
         Function to handle inference in a separate process.
         Sends sentences to the output_queue for TTS.
         """
+        model_name = str(CONFIG.get("model", "")).strip() or "unknown"
+        stream_mode = _as_bool(CONFIG.get("stream", True), True)
+        request_started_at = time.time()
         try:
             ollama_chat_url = str(CONFIG.get("ollama_url", OLLAMA_CHAT_URL)).strip() or OLLAMA_CHAT_URL
             payload = build_payload(user_message)
-            if CONFIG["stream"]:
+            model_name = str(payload.get("model") or model_name).strip() or "unknown"
+            stream_mode = _as_bool(payload.get("stream", stream_mode), stream_mode)
+            thinking_state = "on" if _as_bool(payload.get("think", False), False) else "off"
+            _emit_pipeline_event(
+                "llm",
+                "processing",
+                text=user_message,
+                detail=f"model={model_name} thinking={thinking_state} stream={'on' if stream_mode else 'off'}",
+            )
+
+            if stream_mode:
                 # Streaming response
                 with requests.post(
                     ollama_chat_url,
@@ -876,37 +936,66 @@ else:
                 ) as r:
                     r.raise_for_status()
                     buffer = ""
-                    sentence_endings = re.compile(r'[.?!]+')
+                    full_response = ""
+                    stream_started_at = 0.0
+                    last_stream_event_at = 0.0
                     for line in r.iter_lines():
-                        if line:
-                            try:
-                                obj = json.loads(line.decode('utf-8'))
-                                msg = obj.get("message", {})
-                                content = msg.get("content", "")
-                                # Remove colons and asterisks
-                                content = content.replace(':', '').replace('*', '')
-                                done = obj.get("done", False)
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line.decode('utf-8'))
+                            if not isinstance(obj, dict):
+                                continue
+                            msg = obj.get("message", {})
+                            content = str(msg.get("content", "") if isinstance(msg, dict) else "")
+                            # Remove markdown emphasis markers that produce awkward speech.
+                            content = content.replace('*', '')
+                            done = bool(obj.get("done", False))
+
+                            if content:
+                                full_response += content
                                 buffer += content
-                                # Split into sentences
-                                while True:
-                                    match = sentence_endings.search(buffer)
-                                    if not match:
-                                        break
-                                    end_index = match.end()
-                                    sentence = buffer[:end_index].strip()
-                                    buffer = buffer[end_index:].strip()
-                                    if sentence:
-                                        output_queue.put(sentence)
-                                        logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
-                                if done:
-                                    if buffer:
-                                        output_queue.put(buffer.strip())
-                                        logging.debug(f"Inference Process: Enqueued final sentence to TTS: {buffer.strip()}")
-                                    break
-                            except json.JSONDecodeError as e:
-                                logging.error(f"Inference Process: Invalid JSON received: {e}")
-                            except Exception as e:
-                                logging.error(f"Inference Process: Error processing stream: {e}")
+                                if stream_started_at <= 0.0:
+                                    stream_started_at = time.time()
+
+                                now = time.time()
+                                token_count = _estimate_token_count(full_response)
+                                elapsed = max(0.001, now - stream_started_at)
+                                tps = float(token_count) / elapsed
+                                preview = content.strip()
+                                if preview and ((now - last_stream_event_at) >= _LLM_STREAM_EVENT_INTERVAL_SECONDS):
+                                    _emit_pipeline_event(
+                                        "llm",
+                                        "streaming",
+                                        text=preview,
+                                        detail=f"model={model_name} tok={token_count} tps={tps:.2f}",
+                                    )
+                                    last_stream_event_at = now
+
+                                ready_chunks, buffer = _extract_tts_chunks(buffer)
+                                for sentence in ready_chunks:
+                                    output_queue.put(sentence)
+                                    logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
+
+                            if done:
+                                leftover = buffer.strip()
+                                if leftover:
+                                    output_queue.put(leftover)
+                                    logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
+                                total_tokens = _estimate_token_count(full_response)
+                                total_elapsed = max(0.001, time.time() - request_started_at)
+                                total_tps = float(total_tokens) / total_elapsed
+                                _emit_pipeline_event(
+                                    "llm",
+                                    "completed",
+                                    text=full_response[-160:],
+                                    detail=f"model={model_name} tok={total_tokens} tps={total_tps:.2f} stream=on",
+                                )
+                                break
+                        except json.JSONDecodeError as e:
+                            logging.error(f"Inference Process: Invalid JSON received: {e}")
+                        except Exception as e:
+                            logging.error(f"Inference Process: Error processing stream: {e}")
             else:
                 # Non-streaming response
                 r = requests.post(
@@ -917,28 +1006,34 @@ else:
                 r.raise_for_status()
                 data = r.json()
                 response_content = data.get("message", {}).get("content", "")
-                # Remove colons and asterisks
-                response_content = response_content.replace(':', '').replace('*', '')
-                # Split into sentences
-                sentence_endings = re.compile(r'[.?!]+')
-                buffer = response_content
-                while True:
-                    match = sentence_endings.search(buffer)
-                    if not match:
-                        break
-                    end_index = match.end()
-                    sentence = buffer[:end_index].strip()
-                    buffer = buffer[end_index:].strip()
-                    if sentence:
-                        output_queue.put(sentence)
-                        logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
-                # Handle leftover
+                # Remove markdown emphasis markers that produce awkward speech.
+                response_content = str(response_content or "").replace('*', '')
+                ready_chunks, buffer = _extract_tts_chunks(response_content)
+                for sentence in ready_chunks:
+                    output_queue.put(sentence)
+                    logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
                 leftover = buffer.strip()
                 if leftover:
                     output_queue.put(leftover)
                     logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
+                total_tokens = _estimate_token_count(response_content)
+                total_elapsed = max(0.001, time.time() - request_started_at)
+                total_tps = float(total_tokens) / total_elapsed
+                _emit_pipeline_event(
+                    "llm",
+                    "completed",
+                    text=response_content[-160:],
+                    detail=f"model={model_name} tok={total_tokens} tps={total_tps:.2f} stream=off",
+                )
         except Exception as e:
             logging.error(f"Inference Process: Unexpected error: {e}")
+            _emit_pipeline_event(
+                "llm",
+                "error",
+                text=user_message,
+                detail=f"model={model_name} stream={'on' if stream_mode else 'off'} err={e}",
+                level="error",
+            )
         # Removed output_queue.put(None)
         # The inference_to_tts_handler will be shutdown separately
     
@@ -1122,10 +1217,16 @@ else:
             # Append user message to history
             update_history("user", user_message)
             current_model = str(CONFIG.get("model", "")).strip()
+            thinking_state = "on" if _as_bool(CONFIG.get("thinking_enabled", False), False) else "off"
             if current_model and not _ollama_model_installed(current_model):
                 _ensure_ollama_model_ready(current_model)
             _emit_processing_blip(frequency_hz=6000.0, duration_seconds=0.2)
-            _emit_pipeline_event("llm", "processing", text=user_message, detail="llm bridge accepted prompt")
+            _emit_pipeline_event(
+                "llm",
+                "processing",
+                text=user_message,
+                detail=f"model={current_model or 'unknown'} thinking={thinking_state} accepted",
+            )
 
             # Generate a unique request ID
             with request_id_lock:

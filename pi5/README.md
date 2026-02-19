@@ -35,12 +35,14 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
   - click `[copy]` in the service table (mouse-enabled terminals) to copy that row link
   - copied service links auto-include service session keys (`session_key=...`) when auth is enabled
   - watchdog pulls pipeline observability events and shows ASR/LLM/TTS progress + recognized text in log pane
+  - LLM streaming events include active model, streamed token chunks, estimated token count, and tokens/sec telemetry
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
 - `camera_router.py`: camera list/snapshot/video (+ `/mjpeg` and `/jpeg`) routes + terminal dashboard
 - `pipeline_api.py`: HTTP bridge for LLM prompt/TTS prompt + LLM model dashboard (`/llm/dashboard`) + terminal dashboard
   - includes `/pipeline/state` for live ASR -> LLM -> TTS stage/event observability
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
+  - `model_to_tts.py` chunks responses on punctuation for rapid TTS playback (instead of waiting for full sentences only)
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
 - `run_ollama_service.py`: Ollama service wrapper

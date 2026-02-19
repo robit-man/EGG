@@ -31,7 +31,10 @@ pi5/chat.json
 # Build artifacts
 build/
 dist/
+*.whl
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
 pi5/whisper/whispercpp/dist/
 pi5/whisper/whispercpp/build/
 pi5/whisper/whispercpp/.pytest_cache/

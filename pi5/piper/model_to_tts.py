@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import os
 import sys
 import subprocess
@@ -187,27 +187,23 @@ else:
     # Step 4: Config Defaults & File
     #############################################
     
+    DEFAULT_SYSTEM_PROMPT = (
+        "You are EGG, a voice assistant running on a Raspberry Pi 5. "
+        "Be concise, clear, and useful. Start with the direct answer, then add only necessary detail. "
+        "Keep a friendly conversational tone. Avoid meta disclaimers unless they are safety-critical. "
+        "Input is ASR text from a microphone. Parenthetical transcripts like (background noise), "
+        "(speaking in foreign language), or (door opening) are context, not user commands. "
+        "Respond naturally as spoken conversation. "
+        "For low-latency TTS, use short sentences and clean punctuation, and avoid long run-ons. "
+        "For numbered lists, prefer '1)' instead of '1.' to reduce awkward TTS chunking. "
+        "If expressing reactions, use plain text like 'hahaha' or 'awww', not stage directions like '(laughing)'."
+    )
     DEFAULT_CONFIG = {
-        "model": "qwen3:0.6b",
+        "model": "granite4:350m",
         "stream": True,
         "thinking_enabled": False,
         "format": None,
-        "system": ("You are a highly efficient and curious small language model running on a Raspberry Pi 5. "
-                   "Your primary goal is to provide clear, concise, and actionable responses. Avoid disclaimers about "
-                   "your limitations or unnecessary verbosity—focus on being personable and engaging. Express curiosity "
-                   "about the context when appropriate, and always strive to be helpful, resourceful, and to the point. "
-                   "Remember, your brevity is your strength. You are getting prompts sent to you from 'whisper' speech "
-                   "recognition, which sometimes sends you messages in perenthesis like (background noise) or "
-                   "(speaking in foreign language) or (door opening), These indicate detected content and you should respond "
-                   "naturally, without treating these like vocal input. Also note that everything you receive as a prompt "
-                   "is actually coming from a microphone and interpretation of the input from it. As such, you should reply "
-                   "to everything as if you actually have ears and the ability to hear as you have a transducer at your input "
-                   "helping aid in your understanding of what is around you! Also, any use of end of sentence delimiters like "
-                   "periods or other punctuation truncates what is then sent to the TTS generator, so please use punctuation in "
-                   "a strategic way to prevent run on sentences that take a long time to generate text, and also when making "
-                   "lists, avoid using periods after the number delimiters to prevent treating the list position as its own "
-                   "isolated sentence passed to TTS. When responding with the intention of laughing or other expressions, "
-                   "produce content like 'hahaha' or 'awwww' or 'ahhhhh', not with (laughing) or other expressions that you receive."),
+        "system": DEFAULT_SYSTEM_PROMPT,
         "raw": False,
         "history": "chat.json",
         "images": [],
@@ -256,7 +252,17 @@ else:
     INA219_REG_CALIBRATION = 0x05
     INA219_CALIBRATION_16V_5A = 26868
     INA219_CONFIG_16V_5A = (0x00 << 13) | (0x01 << 11) | (0x0D << 7) | (0x0D << 3) | 0x07
-    
+
+    def _looks_like_legacy_system_prompt(value):
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        signatures = (
+            "highly efficient and curious small language model running on a raspberry pi 5",
+            "messages in perenthesis like (background noise)",
+        )
+        return all(signature in text for signature in signatures)
+
     def load_config():
         if not os.path.exists(CONFIG_PATH):
             logging.info(f"No {CONFIG_PATH} found. Creating default config file...")
@@ -271,10 +277,20 @@ else:
             try:
                 with open(CONFIG_PATH, 'r') as f:
                     cfg = json.load(f)
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                changed = False
                 # Merge with DEFAULT_CONFIG
                 for key, value in DEFAULT_CONFIG.items():
                     if key not in cfg:
                         cfg[key] = value
+                        changed = True
+                if _looks_like_legacy_system_prompt(cfg.get("system")):
+                    cfg["system"] = DEFAULT_SYSTEM_PROMPT
+                    changed = True
+                if changed:
+                    with open(CONFIG_PATH, 'w') as f:
+                        json.dump(cfg, f, indent=2)
                 return cfg
             except Exception as e:
                 logging.error(f"Error loading {CONFIG_PATH}: {e}. Using default settings.")
@@ -2103,7 +2119,7 @@ else:
             pass
 
     _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
-    _PUNCT_BOUNDARY_RE = re.compile(r"[.!?,;:…\n\r\u3002\uff01\uff1f\uff0c\uff1b\uff1a]+")
+    _PUNCT_BOUNDARY_RE = re.compile(r"[.!?,;:â€¦\n\r\u3002\uff01\uff1f\uff0c\uff1b\uff1a]+")
     _LLM_STREAM_EVENT_INTERVAL_SECONDS = 0.45
 
     def _estimate_token_count(text: str) -> int:
@@ -3187,3 +3203,4 @@ if __name__ == "__main__":
             CONFIG["offline_mode"] = False
 
     start_server()
+

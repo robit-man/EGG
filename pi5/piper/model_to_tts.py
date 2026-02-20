@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 PSUTIL_AVAILABLE = False
 ALSAAUDIO_AVAILABLE = False
+SMBUS_AVAILABLE = False
 
 #############################################
 # Utility Functions
@@ -41,7 +42,7 @@ def is_connected(host="8.8.8.8", port=53, timeout=3):
 #############################################
 
 VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
-NEEDED_PACKAGES = ["requests", "num2words", "pyalsaaudio", "psutil"]
+NEEDED_PACKAGES = ["requests", "num2words", "pyalsaaudio", "psutil", "smbus2"]
 
 def in_venv():
     expected = os.path.normcase(os.path.abspath(VENV_DIR))
@@ -143,6 +144,13 @@ else:
         psutil = None
         PSUTIL_AVAILABLE = False
 
+    try:
+        from smbus2 import SMBus  # Optional I2C battery telemetry support
+        SMBUS_AVAILABLE = True
+    except ImportError:
+        SMBus = None
+        SMBUS_AVAILABLE = False
+
     #############################################
     # Step 1: Setup Logging
     #############################################
@@ -161,6 +169,8 @@ else:
         logging.warning("pyalsaaudio not available; continuing without direct ALSA hooks.")
     if not PSUTIL_AVAILABLE:
         logging.warning("psutil not available; CPU monitor will use a fallback value.")
+    if not SMBUS_AVAILABLE:
+        logging.warning("smbus2 not available; battery context telemetry disabled.")
     
     #############################################
     # Step 4: Config Defaults & File
@@ -205,7 +215,11 @@ else:
         "ollama_url": "http://localhost:11434/api/chat",
         "max_history_messages": 3,  # New Configuration Parameter
         "interrupt_on_new_prompt": False,
-        "offline_mode": False  # Default offline mode
+        "offline_mode": False,  # Default offline mode
+        "battery_context_enabled": True,
+        "battery_i2c_bus": 1,
+        "battery_i2c_addr": 67,  # 0x43 UPS HAT D default
+        "battery_refresh_seconds": 5.0,
     }
     CONFIG_PATH = "llm_bridge_config.json"
     AUDIO_ROUTER_CONFIG_PATH = "audio_router_config.json"
@@ -221,6 +235,11 @@ else:
     CPU_MAX_KHZ_MAX = 3000000
     OVER_VOLTAGE_DELTA_UV_MIN = -100000
     OVER_VOLTAGE_DELTA_UV_MAX = 100000
+    INA219_REG_CONFIG = 0x00
+    INA219_REG_BUSVOLTAGE = 0x02
+    INA219_REG_CALIBRATION = 0x05
+    INA219_CALIBRATION_16V_5A = 26868
+    INA219_CONFIG_16V_5A = (0x00 << 13) | (0x01 << 11) | (0x0D << 7) | (0x0D << 3) | 0x07
     
     def load_config():
         if not os.path.exists(CONFIG_PATH):
@@ -439,6 +458,183 @@ else:
             logging.error(f"Failed to persist {CONFIG_PATH}: {exc}")
             return False
 
+    def _coerce_int(value, default: int) -> int:
+        try:
+            if isinstance(value, str):
+                return int(value.strip(), 0)
+            return int(value)
+        except Exception:
+            return int(default)
+
+    class _Ina219BatteryReader:
+        def __init__(self, i2c_bus: int, addr: int):
+            if not SMBUS_AVAILABLE or SMBus is None:
+                raise RuntimeError("smbus2 unavailable")
+            self.i2c_bus = int(i2c_bus)
+            self.addr = int(addr)
+            self.bus = SMBus(self.i2c_bus)
+            self._configure()
+
+        def _write_word(self, register: int, value: int):
+            high = (int(value) >> 8) & 0xFF
+            low = int(value) & 0xFF
+            self.bus.write_i2c_block_data(self.addr, int(register), [high, low])
+
+        def _read_word(self, register: int) -> int:
+            data = self.bus.read_i2c_block_data(self.addr, int(register), 2)
+            if not isinstance(data, (list, tuple)) or len(data) < 2:
+                raise RuntimeError(f"unexpected INA219 read payload for register 0x{int(register):02x}")
+            return ((int(data[0]) & 0xFF) << 8) | (int(data[1]) & 0xFF)
+
+        def _configure(self):
+            self._write_word(INA219_REG_CALIBRATION, INA219_CALIBRATION_16V_5A)
+            self._write_word(INA219_REG_CONFIG, INA219_CONFIG_16V_5A)
+
+        def read_voltage_and_percent(self):
+            self._write_word(INA219_REG_CALIBRATION, INA219_CALIBRATION_16V_5A)
+            raw_bus = self._read_word(INA219_REG_BUSVOLTAGE)
+            voltage = (raw_bus >> 3) * 0.004
+            percent = ((float(voltage) - 3.0) / 1.2) * 100.0
+            percent = max(0.0, min(100.0, percent))
+            return float(voltage), float(percent)
+
+        def close(self):
+            try:
+                if self.bus is not None and hasattr(self.bus, "close"):
+                    self.bus.close()
+            except Exception:
+                pass
+
+    _battery_lock = threading.Lock()
+    _battery_reader = None
+    _battery_reader_key = None
+    _battery_cache = {
+        "timestamp": 0.0,
+        "status": "unknown",
+        "voltage_v": None,
+        "percent": None,
+        "error": "",
+        "enabled": True,
+    }
+
+    def _battery_config_snapshot():
+        with CONFIG_LOCK:
+            enabled = _as_bool(CONFIG.get("battery_context_enabled", True), True)
+            bus_index = _coerce_int(CONFIG.get("battery_i2c_bus", 1), 1)
+            address = _coerce_int(CONFIG.get("battery_i2c_addr", 67), 67)
+            refresh_seconds = CONFIG.get("battery_refresh_seconds", 5.0)
+        try:
+            refresh_seconds = float(refresh_seconds)
+        except Exception:
+            refresh_seconds = 5.0
+        refresh_seconds = max(0.25, min(60.0, refresh_seconds))
+        bus_index = max(0, min(32, int(bus_index)))
+        address = max(0x03, min(0x77, int(address)))
+        return {
+            "enabled": bool(enabled),
+            "bus": int(bus_index),
+            "addr": int(address),
+            "refresh_seconds": float(refresh_seconds),
+        }
+
+    def _close_battery_reader_locked():
+        global _battery_reader, _battery_reader_key
+        if _battery_reader is not None:
+            try:
+                _battery_reader.close()
+            except Exception:
+                pass
+        _battery_reader = None
+        _battery_reader_key = None
+
+    def _read_battery_snapshot(force=False):
+        global _battery_reader, _battery_reader_key, _battery_cache
+        settings = _battery_config_snapshot()
+        now = time.time()
+        with _battery_lock:
+            if not settings["enabled"]:
+                _battery_cache = {
+                    "timestamp": now,
+                    "status": "disabled",
+                    "voltage_v": None,
+                    "percent": None,
+                    "error": "",
+                    "enabled": False,
+                }
+                return dict(_battery_cache)
+
+            if (
+                not force
+                and _battery_cache.get("status") == "ok"
+                and (now - float(_battery_cache.get("timestamp") or 0.0)) < settings["refresh_seconds"]
+            ):
+                return dict(_battery_cache)
+
+            if not SMBUS_AVAILABLE or SMBus is None:
+                _battery_cache = {
+                    "timestamp": now,
+                    "status": "unavailable",
+                    "voltage_v": None,
+                    "percent": None,
+                    "error": "smbus2_unavailable",
+                    "enabled": True,
+                }
+                return dict(_battery_cache)
+
+            reader_key = (settings["bus"], settings["addr"])
+            if _battery_reader is None or _battery_reader_key != reader_key:
+                _close_battery_reader_locked()
+                try:
+                    _battery_reader = _Ina219BatteryReader(settings["bus"], settings["addr"])
+                    _battery_reader_key = reader_key
+                except Exception as exc:
+                    _battery_cache = {
+                        "timestamp": now,
+                        "status": "error",
+                        "voltage_v": None,
+                        "percent": None,
+                        "error": str(exc),
+                        "enabled": True,
+                    }
+                    return dict(_battery_cache)
+
+            try:
+                voltage_v, percent = _battery_reader.read_voltage_and_percent()
+                _battery_cache = {
+                    "timestamp": now,
+                    "status": "ok",
+                    "voltage_v": round(float(voltage_v), 3),
+                    "percent": round(float(percent), 1),
+                    "error": "",
+                    "enabled": True,
+                }
+            except Exception as exc:
+                _battery_cache = {
+                    "timestamp": now,
+                    "status": "error",
+                    "voltage_v": None,
+                    "percent": None,
+                    "error": str(exc),
+                    "enabled": True,
+                }
+                _close_battery_reader_locked()
+            return dict(_battery_cache)
+
+    def _build_battery_context_line():
+        snapshot = _read_battery_snapshot(force=False)
+        if not snapshot.get("enabled"):
+            return ""
+        if snapshot.get("status") != "ok":
+            return ""
+        voltage_v = snapshot.get("voltage_v")
+        percent = snapshot.get("percent")
+        if voltage_v is None or percent is None:
+            return ""
+        return (
+            f"Live battery telemetry from UPS HAT (INA219): "
+            f"battery voltage {float(voltage_v):.3f} volts and estimated charge {float(percent):.1f} percent."
+        )
+
     def _resolve_ollama_base_url(chat_url: str) -> str:
         raw = str(chat_url or "").strip() or "http://127.0.0.1:11434/api/chat"
         candidate = raw if "://" in raw else f"http://{raw.lstrip('/')}"
@@ -607,7 +803,9 @@ else:
                     )
             logging.info(
                 "Reloaded llm bridge config: "
-                f"model={CONFIG.get('model')} thinking={'on' if _as_bool(CONFIG.get('thinking_enabled'), False) else 'off'}"
+                f"model={CONFIG.get('model')} "
+                f"thinking={'on' if _as_bool(CONFIG.get('thinking_enabled'), False) else 'off'} "
+                f"battery_ctx={'on' if _as_bool(CONFIG.get('battery_context_enabled'), True) else 'off'}"
             )
         except Exception as exc:
             logging.warning(f"Config hot-reload failed: {exc}")
@@ -619,6 +817,18 @@ else:
             current = _as_bool(CONFIG.get("thinking_enabled", False), False)
             if current != target:
                 CONFIG["thinking_enabled"] = target
+                changed = True
+        if changed:
+            _persist_config()
+        return changed
+
+    def _set_battery_context_enabled(enabled: bool):
+        target = bool(enabled)
+        changed = False
+        with CONFIG_LOCK:
+            current = _as_bool(CONFIG.get("battery_context_enabled", True), True)
+            if current != target:
+                CONFIG["battery_context_enabled"] = target
                 changed = True
         if changed:
             _persist_config()
@@ -636,6 +846,25 @@ else:
         if re.search(r"\bthinking(?: mode)? on\b", cleaned):
             return True
         if re.search(r"\bthinking(?: mode)? off\b", cleaned):
+            return False
+        return None
+
+    def _parse_battery_context_toggle_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        if re.search(r"\bturn(?: the)? battery(?: context| status)?(?: inclusion)? on\b", cleaned):
+            return True
+        if re.search(r"\bturn(?: the)? battery(?: context| status)?(?: inclusion)? off\b", cleaned):
+            return False
+        if re.search(r"\bbattery(?: context| status)? on\b", cleaned):
+            return True
+        if re.search(r"\bbattery(?: context| status)? off\b", cleaned):
+            return False
+        if re.search(r"\benable battery(?: context| status)?\b", cleaned):
+            return True
+        if re.search(r"\bdisable battery(?: context| status)?\b", cleaned):
             return False
         return None
 
@@ -877,6 +1106,17 @@ else:
             state_text = "On" if thinking_toggle else "Off"
             response = f"Turned Thinking {state_text}" if changed else f"Thinking already {state_text}"
             return True, response, "thinking_toggle"
+
+        battery_toggle = _parse_battery_context_toggle_command(user_message)
+        if battery_toggle is not None:
+            changed = _set_battery_context_enabled(battery_toggle)
+            state_text = "On" if battery_toggle else "Off"
+            response = (
+                f"Turned Battery Context {state_text}"
+                if changed
+                else f"Battery Context already {state_text}"
+            )
+            return True, response, "battery_context_toggle"
 
         volume_cmd = _parse_tts_volume_command(user_message)
         if volume_cmd is not None:
@@ -1337,8 +1577,12 @@ else:
     
     def build_payload(user_message):
         messages = []
-        if CONFIG["system"]:
-            messages.append({"role": "system", "content": CONFIG["system"]})
+        system_prompt = str(CONFIG.get("system", "") or "").strip()
+        if system_prompt:
+            battery_line = _build_battery_context_line()
+            if battery_line:
+                system_prompt = f"{system_prompt}\n\n{battery_line}"
+            messages.append({"role": "system", "content": system_prompt})
         
         # Truncate history_messages based on max_history_messages
         if CONFIG.get("max_history_messages"):

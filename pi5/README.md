@@ -48,7 +48,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
   - `model_to_tts.py` chunks responses on punctuation for rapid TTS playback (instead of waiting for full sentences only)
-  - voice commands include a tool-command stack: thinking toggle, model switching, watchdog tuneables, and TTS volume control
+  - voice commands include a tool-command stack: thinking toggle, battery-context toggle, model switching, watchdog tuneables, and TTS volume control
   - dashboard model changes are hot-reloaded and preempt active inference; next ASR prompt runs on the new model
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
@@ -57,6 +57,9 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
   - ASR capture cue: short high blip when transcript is captured and forwarded
   - LLM processing cue: short mid blip when LLM prompt processing begins
   - `audio_router.audio.tts_tail_silence_ms` (default `90`) adds post-TTS silence padding to reduce clipped phrase endings
+- LLM runtime battery context:
+  - `model_to_tts.py` reads UPS HAT INA219 battery telemetry (I2C bus `1`, addr `0x43`) and appends live battery voltage + estimated percent to the active system message
+  - inclusion is toggleable at runtime via voice tool commands (default: enabled)
 
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
@@ -97,6 +100,7 @@ Voice tool toggle:
 
 Voice tool commands (LLM bridge):
 - `turn thinking on` / `turn thinking off`
+- `turn battery context on` / `turn battery context off`
 - `switch model ...` (with numbered follow-up confirmation)
 - `set cpu min to 1600000`
 - `set cpu max to 1800000`
@@ -110,6 +114,11 @@ Voice tool commands (LLM bridge):
 - `set tts volume to 7` (maps `1..10` to `10%..100%`)
 - `volume 1` through `volume 10`
 - watchdog tuneable commands update `.watchdog_runtime/service_state.json`; running watchdog applies them automatically
+- battery context defaults and settings live in `pi5/piper/llm_bridge_config.json`:
+  - `battery_context_enabled`
+  - `battery_i2c_bus` (default `1`)
+  - `battery_i2c_addr` (default `67`, i.e. `0x43`)
+  - `battery_refresh_seconds` (default `5.0`)
 
 ## Installation and Runtime
 

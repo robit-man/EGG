@@ -36,6 +36,8 @@ elif command -v x-terminal-emulator > /dev/null 2>&1; then
     TERMINAL_CMD="x-terminal-emulator"
 fi
 
+CAMERA_REBOOT_RECOMMENDED=0
+
 # --------------------------- Functions ---------------------------
 
 download_file() {
@@ -43,6 +45,18 @@ download_file() {
     local dest="$2"
     echo "[SETUP] Downloading $(basename "$dest")..."
     curl -sSL "$url" -o "$dest"
+}
+
+resolve_priv_prefix() {
+    if [ "$(id -u)" -eq 0 ]; then
+        echo ""
+        return 0
+    fi
+    if command -v sudo > /dev/null 2>&1; then
+        echo "sudo"
+        return 0
+    fi
+    return 1
 }
 
 ensure_repo() {
@@ -147,14 +161,11 @@ upgrade_system_and_install_prereqs() {
         return
     fi
 
-    local apt_prefix=""
-    if [ "$(id -u)" -ne 0 ]; then
-        if command -v sudo > /dev/null 2>&1; then
-            apt_prefix="sudo"
-        else
-            echo "[SETUP] sudo not found; skipping apt package steps."
-            return
-        fi
+    local apt_prefix
+    apt_prefix="$(resolve_priv_prefix || true)"
+    if [ "$(id -u)" -ne 0 ] && [ -z "$apt_prefix" ]; then
+        echo "[SETUP] sudo not found; skipping apt package steps."
+        return
     fi
 
     echo "[SETUP] Refreshing apt package index..."
@@ -187,6 +198,76 @@ upgrade_system_and_install_prereqs() {
 
     $apt_prefix apt-get install -y python3-picamera2 || \
         echo "[WARN] python3-picamera2 not available; camera service will use OpenCV fallback."
+    $apt_prefix apt-get install -y python3-libcamera || \
+        echo "[WARN] python3-libcamera not available; continuing."
+    $apt_prefix apt-get install -y rpicam-apps || \
+        $apt_prefix apt-get install -y libcamera-apps || \
+        echo "[WARN] rpicam/libcamera apps not available; camera preflight will be limited."
+}
+
+ensure_camera_host_prereqs() {
+    local apt_prefix
+    apt_prefix="$(resolve_priv_prefix || true)"
+    local run_user
+    run_user="${SUDO_USER:-$(whoami)}"
+
+    if [ -n "$run_user" ] && id "$run_user" > /dev/null 2>&1; then
+        if ! id -nG "$run_user" | tr ' ' '\n' | grep -qx "video"; then
+            if [ -n "$apt_prefix" ] || [ "$(id -u)" -eq 0 ]; then
+                echo "[SETUP] Adding '$run_user' to video group for camera access..."
+                $apt_prefix usermod -aG video "$run_user" || \
+                    echo "[WARN] Could not add '$run_user' to video group."
+                CAMERA_REBOOT_RECOMMENDED=1
+            else
+                echo "[WARN] Cannot add '$run_user' to video group (sudo missing)."
+            fi
+        fi
+    fi
+
+    local fw_cfg=""
+    if [ -f "/boot/firmware/config.txt" ]; then
+        fw_cfg="/boot/firmware/config.txt"
+    elif [ -f "/boot/config.txt" ]; then
+        fw_cfg="/boot/config.txt"
+    fi
+    if [ -n "$fw_cfg" ]; then
+        if grep -Eq '^[[:space:]]*camera_auto_detect[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$fw_cfg"; then
+            echo "[SETUP] Enabling camera auto-detect in $fw_cfg..."
+            $apt_prefix sed -i -E \
+                's/^[[:space:]]*camera_auto_detect[[:space:]]*=[[:space:]]*0[[:space:]]*$/camera_auto_detect=1/' \
+                "$fw_cfg" || echo "[WARN] Could not update camera_auto_detect in $fw_cfg."
+            CAMERA_REBOOT_RECOMMENDED=1
+        elif ! grep -Eq '^[[:space:]]*camera_auto_detect[[:space:]]*=[[:space:]]*1[[:space:]]*$' "$fw_cfg"; then
+            echo "[SETUP] Setting camera_auto_detect=1 in $fw_cfg..."
+            echo "camera_auto_detect=1" | $apt_prefix tee -a "$fw_cfg" > /dev/null || \
+                echo "[WARN] Could not append camera_auto_detect to $fw_cfg."
+            CAMERA_REBOOT_RECOMMENDED=1
+        fi
+    else
+        echo "[WARN] Could not find /boot/firmware/config.txt or /boot/config.txt for camera checks."
+    fi
+
+    if command -v rpicam-hello > /dev/null 2>&1; then
+        if rpicam-hello --list-cameras > /tmp/egg_camera_probe.log 2>&1; then
+            echo "[SETUP] Camera probe OK (rpicam-hello)."
+        else
+            echo "[WARN] Camera probe failed. See /tmp/egg_camera_probe.log"
+        fi
+    elif command -v libcamera-hello > /dev/null 2>&1; then
+        if libcamera-hello --list-cameras > /tmp/egg_camera_probe.log 2>&1; then
+            echo "[SETUP] Camera probe OK (libcamera-hello)."
+        else
+            echo "[WARN] Camera probe failed. See /tmp/egg_camera_probe.log"
+        fi
+    else
+        echo "[WARN] No camera hello tool found (rpicam-hello/libcamera-hello)."
+    fi
+
+    if ls /dev/video* > /dev/null 2>&1; then
+        echo "[SETUP] Video device nodes detected: $(ls /dev/video* 2>/dev/null | tr '\n' ' ')"
+    else
+        echo "[WARN] No /dev/video* nodes detected yet."
+    fi
 }
 
 create_watchdog_launcher() {
@@ -406,11 +487,17 @@ upgrade_system_and_install_prereqs
 ensure_repo
 sync_runtime_files
 ensure_bind_hosts
+ensure_camera_host_prereqs
 ensure_models
 ensure_whisper_venv
 build_docker_image
 create_watchdog_launcher
 add_to_autostart
 launch_watchdog_now
+
+if [ "$CAMERA_REBOOT_RECOMMENDED" = "1" ]; then
+    echo "[SETUP] Camera host settings changed (video group and/or firmware config)."
+    echo "[SETUP] Reboot is recommended before camera streaming tests."
+fi
 
 echo "[SETUP] Setup completed."

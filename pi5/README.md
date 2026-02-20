@@ -16,6 +16,10 @@ The setup script now:
 - upgrades packages (unless `EGG_SKIP_APT_UPGRADE=1`)
 - syncs runtime scripts from `EGG_repo` to `/home/<user>/voice`
 - installs watchdog + router + camera/pipeline services
+- applies Pi camera host preflight:
+  - ensures camera user has `video` group access
+  - ensures `camera_auto_detect=1` in firmware config when needed
+  - probes camera availability with `rpicam-hello --list-cameras` when available
 - creates `~/.config/autostart/mini_egg_watchdog.desktop`
 - enables watchdog auto-update from `https://github.com/robit-man/EGG.git`
 
@@ -63,7 +67,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
-- `8080` camera router (`/auth`, `/list`, `/snapshot/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`)
+- `8080` camera router (`/auth`, `/dashboard`, `/list`, `/camera/config`, `/camera/recover`, `/snapshot/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`)
 - `6590` pipeline API (`/auth`, `/list`, `/health`, `/pipeline/state`, `/llm/prompt`, `/llm/dashboard`, `/llm/models`, `/llm/config`, `/llm/pull`, `/llm/pull/status`, `/tts/speak`)
 - `8090` audio router (`/auth`, `/list`, `/devices`, `/devices/select`, `/llm/prompt`, `/tts/speak`, `/webrtc/offer`)
 - `6545` model bridge (`model_to_tts.py`)
@@ -280,6 +284,17 @@ sudo update-rc.d cpufreq_settings.sh defaults
 ```
 
 For Camera Info, [Check out this page](https://www.raspberrypi.com/documentation/accessories/camera.html#libcamera-and-libcamera-apps)
+
+Pi5 camera quick verify after setup:
+```bash
+rpicam-hello --list-cameras || libcamera-hello --list-cameras
+ls -l /dev/video*
+```
+
+If camera routes still show offline after setup:
+1. Reboot once (needed if setup changed firmware camera config or group membership).
+2. Verify the ribbon cable orientation and camera seating.
+3. Re-run setup so camera packages and host checks are re-applied.
 
 
 For more information and support related to battery monitoring [visit the wiki here](https://www.waveshare.com/wiki/UPS_HAT_(D))

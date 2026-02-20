@@ -270,6 +270,7 @@ class CameraFeed:
         self.cfg = cfg
         self.jpeg_quality = max(30, min(95, int(jpeg_quality)))
         self.target_fps = max(1, min(60, int(target_fps)))
+        self.effective_fps = int(self.target_fps)
         self.use_picamera2 = bool(use_picamera2 and PICAMERA2_AVAILABLE)
 
         self._lock = threading.Lock()
@@ -282,14 +283,58 @@ class CameraFeed:
         self._picam = None
         self._cap = None
         self._backend_name = "unknown"
+        self._external_capture_tool = ""
         self._reopen_attempts = 0
         self._consecutive_failures = 0
         self._avg_jpeg_bytes = 0.0
         self._stream_clients = 0
         self._recover_requested = threading.Event()
 
+    @staticmethod
+    def _find_external_capture_tool() -> str:
+        for tool in ("rpicam-jpeg", "libcamera-jpeg", "rpicam-still", "libcamera-still"):
+            if shutil.which(tool):
+                return tool
+        return ""
+
+    def _capture_external_frame(self) -> np.ndarray:
+        tool = str(self._external_capture_tool or "").strip()
+        if not tool:
+            raise RuntimeError("external camera capture tool is not configured")
+        cmd = [
+            tool,
+            "-n",
+            "-t",
+            "1",
+            "--width",
+            str(int(self.cfg.width)),
+            "--height",
+            str(int(self.cfg.height)),
+        ]
+        if tool.endswith("-still"):
+            cmd += ["-e", "jpg"]
+        cmd += ["-o", "-"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=5.0)
+        except Exception as exc:
+            raise RuntimeError(f"{tool} capture failed to start: {exc}") from exc
+        if result.returncode != 0:
+            err = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+            if len(err) > 220:
+                err = err[:220] + "..."
+            raise RuntimeError(f"{tool} capture failed (rc={result.returncode}): {err or 'unknown error'}")
+        payload = bytes(result.stdout or b"")
+        if not payload:
+            raise RuntimeError(f"{tool} returned empty frame payload")
+        decoded = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if decoded is None:
+            raise RuntimeError(f"{tool} returned invalid JPEG payload")
+        return decoded
+
     def _open(self) -> None:
         self._close()
+        self.effective_fps = int(self.target_fps)
+        self._external_capture_tool = ""
 
         if self.use_picamera2:
             try:
@@ -322,12 +367,13 @@ class CameraFeed:
                 cap.set(cv2.CAP_PROP_FPS, self.target_fps)
 
                 warm_ok = False
-                for _ in range(8):
+                warm_start = time.time()
+                while time.time() - warm_start < 2.0:
                     ok, frame = cap.read()
                     if ok and frame is not None:
                         warm_ok = True
                         break
-                    time.sleep(0.03)
+                    time.sleep(0.05)
                 if not warm_ok:
                     raise RuntimeError("open succeeded but warmup read failed")
 
@@ -342,8 +388,21 @@ class CameraFeed:
                 except Exception:
                     pass
 
+        external_tool = self._find_external_capture_tool()
+        if external_tool:
+            self._external_capture_tool = external_tool
+            self._backend_name = f"{external_tool}-fallback"
+            self.effective_fps = int(max(1, min(5, self.target_fps)))
+            return
+
+        hints = []
+        if self.use_picamera2 and not PICAMERA2_AVAILABLE:
+            hints.append("Picamera2 unavailable")
+        if not os.path.exists("/dev/video0"):
+            hints.append("no /dev/video0")
+        hint_text = f" | hints: {', '.join(hints)}" if hints else ""
         raise RuntimeError(
-            f"OpenCV camera open failed (index={self.cfg.index}) [{'; '.join(open_errors)}]"
+            f"OpenCV camera open failed (index={self.cfg.index}) [{'; '.join(open_errors)}]{hint_text}"
         )
 
     def _close(self) -> None:
@@ -360,6 +419,7 @@ class CameraFeed:
         except Exception:
             pass
         self._cap = None
+        self._external_capture_tool = ""
 
     def _rotate(self, frame: np.ndarray) -> np.ndarray:
         rotation = self.cfg.rotation
@@ -378,6 +438,9 @@ class CameraFeed:
                 raise RuntimeError("Picamera2 returned no frame")
             return frame
 
+        if self._external_capture_tool:
+            return self._capture_external_frame()
+
         if self._cap is None:
             raise RuntimeError("OpenCV capture is not initialized")
         for _ in range(3):
@@ -394,7 +457,7 @@ class CameraFeed:
         self._open()
 
     def _run(self) -> None:
-        interval = 1.0 / float(self.target_fps)
+        interval = 1.0 / float(max(1, int(self.effective_fps)))
         while self._running.is_set():
             start = time.time()
             try:
@@ -509,7 +572,7 @@ class CameraFeed:
     def status(self) -> dict:
         with self._lock:
             age = time.time() - self._last_frame_at if self._last_frame_at > 0 else -1.0
-            fps = float(self.target_fps) if self._frame_jpeg else 0.0
+            fps = float(self.effective_fps) if self._frame_jpeg else 0.0
             kbps = float(self._avg_jpeg_bytes * max(1.0, fps) * 8.0 / 1000.0) if self._frame_jpeg else 0.0
             return {
                 "id": self.cfg.camera_id,
@@ -533,7 +596,7 @@ class CameraFeed:
                     "pixel_format": "MJPEG",
                     "width": int(self.cfg.width),
                     "height": int(self.cfg.height),
-                    "fps": float(self.target_fps),
+                    "fps": float(self.effective_fps),
                 },
                 "active_capture": {
                     "backend": self._backend_name,

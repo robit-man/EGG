@@ -1420,6 +1420,7 @@ else:
         "created_at": 0.0,
         "expires_at": 0.0,
         "expired_at": 0.0,
+        "timeout_feedback_at": 0.0,
     }
 
     def _set_pending_restart():
@@ -1429,6 +1430,7 @@ else:
             _pending_restart["created_at"] = now
             _pending_restart["expires_at"] = now + RESTART_CONFIRM_TIMEOUT_SECONDS
             _pending_restart["expired_at"] = 0.0
+            _pending_restart["timeout_feedback_at"] = 0.0
 
     def _clear_pending_restart():
         with _restart_lock:
@@ -1436,6 +1438,7 @@ else:
             _pending_restart["created_at"] = 0.0
             _pending_restart["expires_at"] = 0.0
             _pending_restart["expired_at"] = 0.0
+            _pending_restart["timeout_feedback_at"] = 0.0
 
     def _pending_restart_status():
         with _restart_lock:
@@ -1452,6 +1455,15 @@ else:
 
     def _pending_restart_active():
         return _pending_restart_status() == "active"
+
+    def _consume_restart_timeout_feedback(cooldown_seconds: float = 3.0):
+        now = time.time()
+        with _restart_lock:
+            last = float(_pending_restart.get("timeout_feedback_at") or 0.0)
+            if (now - last) < max(0.5, float(cooldown_seconds or 0.0)):
+                return False
+            _pending_restart["timeout_feedback_at"] = now
+            return True
 
     def _schedule_system_restart(delay_seconds: float = 1.5):
         def _runner():
@@ -1610,11 +1622,12 @@ else:
                 _clear_pending_restart()
                 return True, "Restart cancelled.", "restart_cancelled"
 
-            stray_decision = _parse_yes_no_value(user_message)
-            if stray_decision is not None:
-                if restart_status == "expired":
-                    return True, "Restart confirmation timed out. Say restart again.", "restart_timeout"
-                return True, "No restart is pending. Say restart if you want to reboot.", "restart_prompt"
+            if restart_status == "expired":
+                stray_decision = _parse_yes_no_value(user_message)
+                if stray_decision is not None:
+                    if _consume_restart_timeout_feedback():
+                        return True, "Restart confirmation timed out. Say restart again.", "restart_timeout"
+                    return True, "", "restart_timeout_suppressed"
 
         if _tool_visible("restart_system", True) and _parse_restart_request_command(user_message):
             _set_pending_restart()
@@ -2922,7 +2935,10 @@ else:
 
             tool_handled, tool_response, tool_detail = _handle_voice_tool_command(user_message)
             if tool_handled:
-                response_content = str(tool_response or "").strip() or "Done."
+                response_content = str(tool_response or "").strip()
+                if not response_content:
+                    logging.debug(f"ClientHandler: Tool response suppressed for '{user_message}' ({tool_detail}).")
+                    return
                 update_history("user", user_message)
                 update_history("assistant", response_content)
                 tts_queue.put(response_content)
@@ -3203,4 +3219,3 @@ if __name__ == "__main__":
             CONFIG["offline_mode"] = False
 
     start_server()
-

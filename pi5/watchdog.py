@@ -74,6 +74,16 @@ WATCHDOG_STATE_FILE_NAME = "service_state.json"
 WATCHDOG_LOCK_FILE_NAME = "watchdog.lock"
 WATCHDOG_SERVICE_LOG_DIR_NAME = "service_logs"
 CPUFREQ_GLOB = "/sys/devices/system/cpu/cpu*/cpufreq"
+DEFAULT_CPU_MIN_KHZ = 1600000
+DEFAULT_CPU_MAX_KHZ = 1800000
+DEFAULT_OVER_VOLTAGE_DELTA_UV = -25000
+MIN_OVER_VOLTAGE_DELTA_UV = -100000
+MAX_OVER_VOLTAGE_DELTA_UV = 100000
+OVER_VOLTAGE_DELTA_RE = re.compile(r"^\s*over_voltage_delta\s*=\s*([+-]?\d+)\s*(?:#.*)?$")
+FIRMWARE_CONFIG_CANDIDATES = (
+    "/boot/firmware/config.txt",
+    "/boot/config.txt",
+)
 MONITOR_INTERVAL_SECONDS = 0.25
 STOP_SIGINT_GRACE_SECONDS = 5.0
 STOP_SIGTERM_GRACE_SECONDS = 10.0
@@ -421,12 +431,15 @@ class WatchdogManager:
         self._cpu_current_governor = ""
         self._cpu_current_min_khz = 0
         self._cpu_current_max_khz = 0
+        self._cpu_current_over_voltage_delta_uv = 0
+        self._firmware_config_path = self._detect_firmware_config_path()
         self._cpu_throttle_supported = False
         self._cpu_throttle_last_apply = ""
         self._cpu_throttle = {
             "governor": "ondemand",
-            "min_khz": 800000,
-            "max_khz": 1800000,
+            "min_khz": DEFAULT_CPU_MIN_KHZ,
+            "max_khz": DEFAULT_CPU_MAX_KHZ,
+            "over_voltage_delta_uv": DEFAULT_OVER_VOLTAGE_DELTA_UV,
             "auto_apply": False,
             "asr_llm_throttle_enable": True,
             "asr_llm_throttle_percent": 65,
@@ -436,6 +449,7 @@ class WatchdogManager:
         self._asr_throttle_last_switch_at = 0.0
         self._asr_throttle_target_pid = 0
         self._refresh_cpu_throttle_support()
+        self._refresh_firmware_voltage_setting()
         self._terminal_emulator = self._detect_terminal_emulator()
         if (
             self._os_name not in ("windows", "darwin")
@@ -503,6 +517,13 @@ class WatchdogManager:
             )
         else:
             self._log("[WARN] CPU throttle control unavailable (cpufreq sysfs not detected)")
+        if self._firmware_config_path:
+            self._log(
+                f"[CPU] firmware voltage config={self._firmware_config_path} "
+                f"over_voltage_delta={self._cpu_current_over_voltage_delta_uv}uV"
+            )
+        else:
+            self._log("[WARN] Firmware voltage config unavailable (cannot tune over_voltage_delta)")
 
     @staticmethod
     def _read_text_file(path: pathlib.Path) -> str:
@@ -561,6 +582,141 @@ class WatchdogManager:
         except Exception:
             return int(default)
 
+    def _detect_firmware_config_path(self) -> Optional[pathlib.Path]:
+        if self._os_name in ("windows", "darwin"):
+            return None
+        env_path = str(os.environ.get("WATCHDOG_FIRMWARE_CONFIG", "")).strip()
+        candidates: List[pathlib.Path] = []
+        if env_path:
+            candidates.append(pathlib.Path(env_path).expanduser())
+        for raw in FIRMWARE_CONFIG_CANDIDATES:
+            candidates.append(pathlib.Path(str(raw)))
+
+        for path in candidates:
+            try:
+                expanded = path.expanduser()
+            except Exception:
+                expanded = path
+            if expanded.exists() and expanded.is_file():
+                return expanded.resolve()
+        for path in candidates:
+            try:
+                expanded = path.expanduser()
+            except Exception:
+                expanded = path
+            parent = expanded.parent
+            if parent.exists() and parent.is_dir():
+                try:
+                    return expanded.resolve()
+                except Exception:
+                    return expanded
+        return None
+
+    @staticmethod
+    def _extract_over_voltage_delta_uv(text: str) -> int:
+        value = 0
+        for raw in str(text or "").splitlines():
+            match = OVER_VOLTAGE_DELTA_RE.match(str(raw or ""))
+            if not match:
+                continue
+            try:
+                value = int(match.group(1))
+            except Exception:
+                continue
+        return int(value)
+
+    def _refresh_firmware_voltage_setting(self):
+        cfg = self._firmware_config_path
+        if cfg is None or not cfg.exists():
+            self._cpu_current_over_voltage_delta_uv = 0
+            return
+        try:
+            raw = cfg.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            self._cpu_current_over_voltage_delta_uv = 0
+            return
+        self._cpu_current_over_voltage_delta_uv = self._extract_over_voltage_delta_uv(raw)
+
+    @staticmethod
+    def _render_firmware_config_with_over_voltage_delta(raw_text: str, value_uv: int) -> str:
+        target = int(value_uv)
+        lines = str(raw_text or "").splitlines()
+        output: List[str] = []
+        seen = False
+        for raw in lines:
+            line = str(raw or "")
+            if OVER_VOLTAGE_DELTA_RE.match(line):
+                if not seen:
+                    leading = re.match(r"^\s*", line)
+                    prefix = leading.group(0) if leading else ""
+                    output.append(f"{prefix}over_voltage_delta={target}")
+                    seen = True
+                continue
+            output.append(line)
+        if not seen:
+            if output and output[-1].strip():
+                output.append("")
+            output.append(f"over_voltage_delta={target}")
+        return "\n".join(output).rstrip("\n") + "\n"
+
+    def _write_text_with_optional_sudo(self, path: pathlib.Path, content: str) -> Tuple[bool, str]:
+        try:
+            path.write_text(content, encoding="utf-8")
+            return True, ""
+        except PermissionError:
+            pass
+        except Exception as exc:
+            return False, str(exc)
+
+        if shutil.which("sudo") and self._os_name != "windows":
+            try:
+                result = subprocess.run(
+                    ["sudo", "-n", "tee", str(path)],
+                    input=str(content),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=8.0,
+                )
+                if result.returncode == 0:
+                    return True, ""
+                detail = (result.stderr or "").strip() or "sudo rejected"
+                return False, detail
+            except Exception as exc:
+                return False, str(exc)
+        return False, "permission denied (run watchdog as root or configure passwordless sudo)"
+
+    def _apply_over_voltage_delta_setting(self) -> Tuple[bool, str]:
+        cfg = self._firmware_config_path
+        if cfg is None:
+            return False, "firmware config path unavailable"
+
+        desired = int(self._cpu_throttle.get("over_voltage_delta_uv", DEFAULT_OVER_VOLTAGE_DELTA_UV) or 0)
+        desired = max(MIN_OVER_VOLTAGE_DELTA_UV, min(MAX_OVER_VOLTAGE_DELTA_UV, desired))
+        self._cpu_throttle["over_voltage_delta_uv"] = int(desired)
+
+        try:
+            if cfg.exists():
+                raw = cfg.read_text(encoding="utf-8", errors="ignore")
+            else:
+                raw = ""
+        except Exception as exc:
+            return False, str(exc)
+
+        current = self._extract_over_voltage_delta_uv(raw)
+        if int(current) == int(desired):
+            self._cpu_current_over_voltage_delta_uv = int(current)
+            return True, f"over_voltage_delta={desired} (already set)"
+
+        rendered = self._render_firmware_config_with_over_voltage_delta(raw, desired)
+        ok, detail = self._write_text_with_optional_sudo(cfg, rendered)
+        if not ok:
+            return False, detail
+
+        self._cpu_current_over_voltage_delta_uv = int(desired)
+        return True, f"over_voltage_delta={desired} updated in {cfg} (reboot required)"
+
     def _refresh_cpu_throttle_support(self):
         cpufreq_paths = []
         for path in sorted(pathlib.Path("/").glob(CPUFREQ_GLOB.lstrip("/"))):
@@ -591,9 +747,15 @@ class WatchdogManager:
         if not str(self._cpu_throttle.get("governor", "")).strip():
             self._cpu_throttle["governor"] = self._cpu_current_governor or "ondemand"
         if not int(self._cpu_throttle.get("min_khz", 0) or 0):
-            self._cpu_throttle["min_khz"] = self._cpu_current_min_khz or self._cpu_hw_min_khz or 800000
+            self._cpu_throttle["min_khz"] = (
+                self._cpu_current_min_khz or self._cpu_hw_min_khz or DEFAULT_CPU_MIN_KHZ
+            )
         if not int(self._cpu_throttle.get("max_khz", 0) or 0):
-            self._cpu_throttle["max_khz"] = self._cpu_current_max_khz or self._cpu_hw_max_khz or 1800000
+            self._cpu_throttle["max_khz"] = (
+                self._cpu_current_max_khz or self._cpu_hw_max_khz or DEFAULT_CPU_MAX_KHZ
+            )
+        if "over_voltage_delta_uv" not in self._cpu_throttle:
+            self._cpu_throttle["over_voltage_delta_uv"] = DEFAULT_OVER_VOLTAGE_DELTA_UV
         self._normalize_cpu_throttle_settings()
 
     def _normalize_cpu_throttle_settings(self):
@@ -608,8 +770,14 @@ class WatchdogManager:
             governor = self._cpu_current_governor or "ondemand"
         self._cpu_throttle["governor"] = governor
 
-        min_khz = self._parse_int(self._cpu_throttle.get("min_khz"), self._cpu_current_min_khz or 800000)
-        max_khz = self._parse_int(self._cpu_throttle.get("max_khz"), self._cpu_current_max_khz or 1800000)
+        min_khz = self._parse_int(
+            self._cpu_throttle.get("min_khz"),
+            self._cpu_current_min_khz or DEFAULT_CPU_MIN_KHZ,
+        )
+        max_khz = self._parse_int(
+            self._cpu_throttle.get("max_khz"),
+            self._cpu_current_max_khz or DEFAULT_CPU_MAX_KHZ,
+        )
 
         if self._cpu_hw_min_khz > 0:
             min_khz = max(self._cpu_hw_min_khz, min_khz)
@@ -621,6 +789,13 @@ class WatchdogManager:
             min_khz, max_khz = max_khz, min_khz
         self._cpu_throttle["min_khz"] = int(max(100000, min_khz))
         self._cpu_throttle["max_khz"] = int(max(100000, max_khz))
+        over_voltage_delta_uv = self._parse_int(
+            self._cpu_throttle.get("over_voltage_delta_uv"),
+            DEFAULT_OVER_VOLTAGE_DELTA_UV,
+        )
+        self._cpu_throttle["over_voltage_delta_uv"] = int(
+            max(MIN_OVER_VOLTAGE_DELTA_UV, min(MAX_OVER_VOLTAGE_DELTA_UV, over_voltage_delta_uv))
+        )
         self._cpu_throttle["auto_apply"] = bool(self._cpu_throttle.get("auto_apply", False))
         self._cpu_throttle["asr_llm_throttle_enable"] = bool(
             self._cpu_throttle.get("asr_llm_throttle_enable", True)
@@ -637,6 +812,7 @@ class WatchdogManager:
             "governor",
             "min_khz",
             "max_khz",
+            "over_voltage_delta_uv",
             "auto_apply",
             "asr_llm_throttle_enable",
             "asr_llm_throttle_percent",
@@ -648,66 +824,97 @@ class WatchdogManager:
 
     def _apply_cpu_throttle_settings(self) -> Tuple[bool, str]:
         self._normalize_cpu_throttle_settings()
-        if not self._cpu_throttle_supported:
-            return False, "cpufreq unsupported on this host"
-        if not self._cpu_cpufreq_paths:
-            return False, "no cpufreq cpu paths found"
+        details: List[str] = []
+        failures: List[str] = []
+        applicable_count = 0
 
         governor = str(self._cpu_throttle.get("governor", "")).strip()
         min_khz = int(self._cpu_throttle.get("min_khz", 0) or 0)
         max_khz = int(self._cpu_throttle.get("max_khz", 0) or 0)
-        if min_khz <= 0 or max_khz <= 0:
-            return False, "invalid min/max frequencies"
         if min_khz > max_khz:
             min_khz, max_khz = max_khz, min_khz
             self._cpu_throttle["min_khz"] = min_khz
             self._cpu_throttle["max_khz"] = max_khz
 
-        def _write_all():
-            for cpufreq_dir in self._cpu_cpufreq_paths:
-                if governor:
-                    (cpufreq_dir / "scaling_governor").write_text(governor, encoding="utf-8")
-                # set max first to avoid kernel rejecting new min > old max
-                (cpufreq_dir / "scaling_max_freq").write_text(str(max_khz), encoding="utf-8")
-                (cpufreq_dir / "scaling_min_freq").write_text(str(min_khz), encoding="utf-8")
+        cpufreq_applicable = bool(self._cpu_throttle_supported and self._cpu_cpufreq_paths)
+        if cpufreq_applicable:
+            applicable_count += 1
+            if min_khz <= 0 or max_khz <= 0:
+                failures.append("cpufreq invalid min/max frequencies")
+            else:
+                def _write_all():
+                    for cpufreq_dir in self._cpu_cpufreq_paths:
+                        if governor:
+                            (cpufreq_dir / "scaling_governor").write_text(governor, encoding="utf-8")
+                        # set max first to avoid kernel rejecting new min > old max
+                        (cpufreq_dir / "scaling_max_freq").write_text(str(max_khz), encoding="utf-8")
+                        (cpufreq_dir / "scaling_min_freq").write_text(str(min_khz), encoding="utf-8")
 
-        try:
-            _write_all()
-            self._refresh_cpu_throttle_support()
-            return True, f"governor={governor} min={min_khz} max={max_khz}"
-        except PermissionError:
-            pass
-        except Exception as exc:
-            return False, str(exc)
+                applied = False
+                try:
+                    _write_all()
+                    applied = True
+                except PermissionError:
+                    applied = False
+                except Exception as exc:
+                    failures.append(f"cpufreq {exc}")
+                    applied = False
 
-        # Fallback through passwordless sudo when available.
-        if shutil.which("sudo") and self._os_name != "windows":
-            script = (
-                "set -euo pipefail; "
-                "for d in /sys/devices/system/cpu/cpu*/cpufreq; do "
-                f"if [ -f \"$d/scaling_governor\" ] && [ -n \"{governor}\" ]; then echo \"{governor}\" > \"$d/scaling_governor\"; fi; "
-                f"if [ -f \"$d/scaling_max_freq\" ]; then echo \"{max_khz}\" > \"$d/scaling_max_freq\"; fi; "
-                f"if [ -f \"$d/scaling_min_freq\" ]; then echo \"{min_khz}\" > \"$d/scaling_min_freq\"; fi; "
-                "done"
-            )
-            try:
-                result = subprocess.run(
-                    ["sudo", "-n", "bash", "-lc", script],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                    timeout=8.0,
-                )
-                if result.returncode == 0:
+                if not applied and not failures:
+                    # Fallback through passwordless sudo when available.
+                    if shutil.which("sudo") and self._os_name != "windows":
+                        script = (
+                            "set -euo pipefail; "
+                            "for d in /sys/devices/system/cpu/cpu*/cpufreq; do "
+                            f"if [ -f \"$d/scaling_governor\" ] && [ -n \"{governor}\" ]; then echo \"{governor}\" > \"$d/scaling_governor\"; fi; "
+                            f"if [ -f \"$d/scaling_max_freq\" ]; then echo \"{max_khz}\" > \"$d/scaling_max_freq\"; fi; "
+                            f"if [ -f \"$d/scaling_min_freq\" ]; then echo \"{min_khz}\" > \"$d/scaling_min_freq\"; fi; "
+                            "done"
+                        )
+                        try:
+                            result = subprocess.run(
+                                ["sudo", "-n", "bash", "-lc", script],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True,
+                                check=False,
+                                timeout=8.0,
+                            )
+                            if result.returncode == 0:
+                                applied = True
+                            else:
+                                detail = (result.stderr or result.stdout or "").strip() or "sudo rejected"
+                                failures.append(f"cpufreq {detail}")
+                        except Exception as exc:
+                            failures.append(f"cpufreq {exc}")
+                    else:
+                        failures.append(
+                            "cpufreq permission denied (run watchdog as root or configure passwordless sudo)"
+                        )
+
+                if applied:
                     self._refresh_cpu_throttle_support()
-                    return True, f"governor={governor} min={min_khz} max={max_khz}"
-                detail = (result.stderr or result.stdout or "").strip() or "sudo rejected"
-                return False, detail
-            except Exception as exc:
-                return False, str(exc)
+                    details.append(f"governor={governor} min={min_khz} max={max_khz}")
+        else:
+            details.append("cpufreq not available")
 
-        return False, "permission denied (run watchdog as root or configure passwordless sudo)"
+        undervolt_applicable = bool(self._firmware_config_path)
+        if undervolt_applicable:
+            applicable_count += 1
+            uv_ok, uv_detail = self._apply_over_voltage_delta_setting()
+            if uv_ok:
+                details.append(uv_detail)
+            else:
+                failures.append(f"undervolt {uv_detail}")
+        else:
+            details.append("undervolt config unavailable")
+
+        summary = "; ".join(item for item in (details + failures) if item).strip()
+        if not summary:
+            summary = "no changes"
+        if applicable_count <= 0:
+            return False, "cpufreq/undervolt controls unavailable on this host"
+        return len(failures) == 0, summary
 
     def _load_desired_state(self) -> Dict[str, bool]:
         if not self.state_file.exists():
@@ -744,6 +951,10 @@ class WatchdogManager:
                 "governor": str(self._cpu_throttle.get("governor", "")).strip(),
                 "min_khz": int(self._cpu_throttle.get("min_khz", 0) or 0),
                 "max_khz": int(self._cpu_throttle.get("max_khz", 0) or 0),
+                "over_voltage_delta_uv": int(
+                    self._cpu_throttle.get("over_voltage_delta_uv", DEFAULT_OVER_VOLTAGE_DELTA_UV)
+                    or DEFAULT_OVER_VOLTAGE_DELTA_UV
+                ),
                 "auto_apply": bool(self._cpu_throttle.get("auto_apply", False)),
                 "asr_llm_throttle_enable": bool(self._cpu_throttle.get("asr_llm_throttle_enable", True)),
                 "asr_llm_throttle_percent": int(self._cpu_throttle.get("asr_llm_throttle_percent", 65) or 65),
@@ -3948,6 +4159,8 @@ class WatchdogManager:
             current_governor = str(self._cpu_current_governor or "")
             current_min = int(self._cpu_current_min_khz or 0)
             current_max = int(self._cpu_current_max_khz or 0)
+            current_undervolt = int(self._cpu_current_over_voltage_delta_uv or 0)
+            firmware_cfg_path = str(self._firmware_config_path or "")
             last_apply = str(self._cpu_throttle_last_apply or "")
 
         if not available_governors:
@@ -3957,6 +4170,7 @@ class WatchdogManager:
             "Governor",
             "Min Frequency (kHz)",
             "Max Frequency (kHz)",
+            "CPU Undervolt Delta (uV)",
             "Auto Apply On Start",
             "ASR Throttle On LLM",
             "ASR Throttle Percent",
@@ -3969,7 +4183,7 @@ class WatchdogManager:
         while True:
             stdscr.erase()
             max_y, max_x = stdscr.getmaxyx()
-            if max_y < 12 or max_x < 70:
+            if max_y < 14 or max_x < 70:
                 self._safe_addnstr(
                     stdscr,
                     0,
@@ -4005,12 +4219,21 @@ class WatchdogManager:
                 f"hardware limits: min={hw_min or '-'} max={hw_max or '-'}",
                 max_x - 1,
             )
+            self._safe_addnstr(
+                stdscr,
+                5,
+                0,
+                f"firmware config: {firmware_cfg_path or '-'} | "
+                f"current over_voltage_delta={current_undervolt}uV",
+                max_x - 1,
+            )
 
-            row = 6
+            row = 7
             values = [
                 str(local_cfg.get("governor", "")),
                 str(local_cfg.get("min_khz", "")),
                 str(local_cfg.get("max_khz", "")),
+                str(local_cfg.get("over_voltage_delta_uv", DEFAULT_OVER_VOLTAGE_DELTA_UV)),
                 "ON" if bool(local_cfg.get("auto_apply", False)) else "OFF",
                 "ON" if bool(local_cfg.get("asr_llm_throttle_enable", True)) else "OFF",
                 str(local_cfg.get("asr_llm_throttle_percent", 65)),
@@ -4033,6 +4256,7 @@ class WatchdogManager:
                 0,
                 f"Desired summary: governor={local_cfg.get('governor')} "
                 f"min={local_cfg.get('min_khz')} max={local_cfg.get('max_khz')} "
+                f"ov={local_cfg.get('over_voltage_delta_uv')}uV "
                 f"auto={'on' if local_cfg.get('auto_apply') else 'off'}",
                 max_x - 1,
             )
@@ -4057,6 +4281,7 @@ class WatchdogManager:
                         f"gov={self._cpu_throttle['governor']} "
                         f"min={self._cpu_throttle['min_khz']} "
                         f"max={self._cpu_throttle['max_khz']} "
+                        f"ov={self._cpu_throttle['over_voltage_delta_uv']}uV "
                         f"auto={'on' if self._cpu_throttle['auto_apply'] else 'off'}"
                     )
                 return
@@ -4088,10 +4313,25 @@ class WatchdogManager:
                     parsed = self._parse_int(typed, int(local_cfg.get("max_khz", 0) or 0))
                     local_cfg["max_khz"] = max(100000, parsed)
             elif selected == 3:
-                local_cfg["auto_apply"] = not bool(local_cfg.get("auto_apply", False))
+                typed = self._prompt_text_input(
+                    stdscr,
+                    f"Undervolt delta uV ({MIN_OVER_VOLTAGE_DELTA_UV}..{MAX_OVER_VOLTAGE_DELTA_UV}): ",
+                    str(local_cfg.get("over_voltage_delta_uv", DEFAULT_OVER_VOLTAGE_DELTA_UV)),
+                )
+                if typed:
+                    parsed = self._parse_int(
+                        typed,
+                        int(local_cfg.get("over_voltage_delta_uv", DEFAULT_OVER_VOLTAGE_DELTA_UV)),
+                    )
+                    local_cfg["over_voltage_delta_uv"] = max(
+                        MIN_OVER_VOLTAGE_DELTA_UV,
+                        min(MAX_OVER_VOLTAGE_DELTA_UV, parsed),
+                    )
             elif selected == 4:
-                local_cfg["asr_llm_throttle_enable"] = not bool(local_cfg.get("asr_llm_throttle_enable", True))
+                local_cfg["auto_apply"] = not bool(local_cfg.get("auto_apply", False))
             elif selected == 5:
+                local_cfg["asr_llm_throttle_enable"] = not bool(local_cfg.get("asr_llm_throttle_enable", True))
+            elif selected == 6:
                 typed = self._prompt_text_input(
                     stdscr,
                     "ASR throttle percent (0-95): ",
@@ -4100,7 +4340,7 @@ class WatchdogManager:
                 if typed:
                     parsed = self._parse_int(typed, int(local_cfg.get("asr_llm_throttle_percent", 65) or 65))
                     local_cfg["asr_llm_throttle_percent"] = max(0, min(95, parsed))
-            elif selected == 6:
+            elif selected == 7:
                 typed = self._prompt_text_input(
                     stdscr,
                     "ASR throttle cycle ms (80-2000): ",
@@ -4109,7 +4349,7 @@ class WatchdogManager:
                 if typed:
                     parsed = self._parse_int(typed, int(local_cfg.get("asr_llm_throttle_cycle_ms", 320) or 320))
                     local_cfg["asr_llm_throttle_cycle_ms"] = max(80, min(2000, parsed))
-            elif selected == 7:
+            elif selected == 8:
                 with self._lock:
                     self._cpu_throttle.update(local_cfg)
                     self._normalize_cpu_throttle_settings()
@@ -4124,10 +4364,12 @@ class WatchdogManager:
                     current_governor = str(self._cpu_current_governor or "")
                     current_min = int(self._cpu_current_min_khz or 0)
                     current_max = int(self._cpu_current_max_khz or 0)
+                    current_undervolt = int(self._cpu_current_over_voltage_delta_uv or 0)
+                    firmware_cfg_path = str(self._firmware_config_path or "")
                     throttle_supported = bool(self._cpu_throttle_supported)
                     hw_min = int(self._cpu_hw_min_khz or 0)
                     hw_max = int(self._cpu_hw_max_khz or 0)
-            elif selected == 8:
+            elif selected == 9:
                 with self._lock:
                     self._cpu_throttle.update(local_cfg)
                     self._normalize_cpu_throttle_settings()
@@ -4137,10 +4379,11 @@ class WatchdogManager:
                         f"gov={self._cpu_throttle['governor']} "
                         f"min={self._cpu_throttle['min_khz']} "
                         f"max={self._cpu_throttle['max_khz']} "
+                        f"ov={self._cpu_throttle['over_voltage_delta_uv']}uV "
                         f"auto={'on' if self._cpu_throttle['auto_apply'] else 'off'}"
                     )
                 return
-            elif selected == 9:
+            elif selected == 10:
                 return
 
             if int(local_cfg.get("min_khz", 0) or 0) > int(local_cfg.get("max_khz", 0) or 0):
@@ -4148,6 +4391,13 @@ class WatchdogManager:
                 b = int(local_cfg.get("max_khz", 0) or 0)
                 local_cfg["min_khz"] = min(a, b)
                 local_cfg["max_khz"] = max(a, b)
+            local_cfg["over_voltage_delta_uv"] = max(
+                MIN_OVER_VOLTAGE_DELTA_UV,
+                min(
+                    MAX_OVER_VOLTAGE_DELTA_UV,
+                    int(local_cfg.get("over_voltage_delta_uv", DEFAULT_OVER_VOLTAGE_DELTA_UV) or 0),
+                ),
+            )
 
     def _build_exit_report(self, interrupted: bool = False) -> str:
         now = time.time()

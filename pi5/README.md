@@ -30,7 +30,9 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `watchdog.py`: toggles services and keeps them alive
   - live per-service CPU and RAM usage in the service table
   - top-line heaviest/peak resource summary
-  - `S` opens CPU throttle settings (governor/min/max/auto-apply + apply-now)
+  - `S` opens CPU throttle settings (governor/min/max/`over_voltage_delta`/auto-apply + apply-now)
+  - default watchdog CPU targets are `min=1600000` and `max=1800000` kHz
+  - default watchdog undervolt target is `over_voltage_delta=-25000` uV (firmware setting, reboot required after apply)
   - `S` also includes ASR-vs-LLM throttle controls (enable, percent, cycle-ms) to reduce ASR CPU during LLM generation
   - left/right arrows switch lower-pane tabs: `Logs` and `Resources`
   - `Resources` tab renders live side-by-side CPU% and RAM% history graphs plus a top-by-CPU service table
@@ -219,7 +221,15 @@ Append the file with the following content
 
 echo "ondemand" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 echo 1800000 | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq
-echo 800000 | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq
+echo 1600000 | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq
+```
+
+And apply a conservative undervolt in firmware config:
+```
+sudo nano /boot/firmware/config.txt
+```
+```
+over_voltage_delta=-25000
 ```
 
 Make the script executable

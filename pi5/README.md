@@ -125,6 +125,8 @@ Voice tool commands (LLM bridge):
   - `tool_fallback_enabled` (LLM may emit `<tool>{...}</tool>` fallback calls; tool markup is filtered from TTS playback)
   - `tool_visibility` (per-tool enable/disable map shown in LLM dashboard)
   - `asr_leading_bracket_gate_enabled` (default `true`; drops ASR prompts starting with `[` before LLM inference)
+  - `asr_tool_dedupe_enabled` (default `true`; suppresses duplicate loopback ASR tool/control commands)
+  - `asr_tool_dedupe_window_seconds` (default `4.0`; duplicate window for suppression)
   - `battery_context_enabled`
   - `battery_i2c_bus` (default `1`)
   - `battery_i2c_addr` (default `67`, i.e. `0x43`)

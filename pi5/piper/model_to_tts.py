@@ -230,6 +230,8 @@ else:
         "tool_fallback_enabled": True,
         "tool_visibility": dict(DEFAULT_VISIBLE_TOOLS),
         "asr_leading_bracket_gate_enabled": True,
+        "asr_tool_dedupe_enabled": True,
+        "asr_tool_dedupe_window_seconds": 4.0,
         "battery_context_enabled": True,
         "battery_i2c_bus": 1,
         "battery_i2c_addr": 67,  # 0x43 UPS HAT D default
@@ -952,6 +954,84 @@ else:
 
     def _watchdog_state_abs():
         return os.path.join(_runtime_base_dir(), WATCHDOG_RUNTIME_DIR_NAME, WATCHDOG_STATE_FILE_NAME)
+
+    _recent_asr_tool_lock = threading.Lock()
+    _recent_asr_tool = {
+        "key": "",
+        "timestamp": 0.0,
+        "count": 0,
+    }
+
+    def _normalize_command_key(text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        return cleaned
+
+    def _is_loopback_source(host: str) -> bool:
+        value = str(host or "").strip().lower()
+        if not value:
+            return False
+        if value in ("127.0.0.1", "::1"):
+            return True
+        if value.startswith("::ffff:127."):
+            return True
+        return False
+
+    def _looks_like_tool_or_control_command(text: str) -> bool:
+        if _parse_tts_volume_command(text) is not None:
+            return True
+        if _parse_thinking_toggle_command(text) is not None:
+            return True
+        if _parse_battery_context_toggle_command(text) is not None:
+            return True
+        if _parse_asr_bracket_gate_toggle_command(text) is not None:
+            return True
+        if _parse_watchdog_tuneable_command(text) is not None:
+            return True
+        if _parse_battery_query_command(text):
+            return True
+        if _parse_network_ssid_command(text):
+            return True
+        if _parse_restart_request_command(text):
+            return True
+        if _parse_model_switch_request(text) is not None:
+            return True
+        pending = _get_pending_model_switch()
+        if pending:
+            options = list(pending.get("options") or [])
+            if _parse_model_choice_index(text, len(options)) is not None:
+                return True
+        if _pending_restart_active() and _parse_yes_no_value(text) is not None:
+            return True
+        return False
+
+    def _should_drop_duplicate_asr_tool_command(text: str, source_host: str) -> bool:
+        if not _as_bool(CONFIG.get("asr_tool_dedupe_enabled", True), True):
+            return False
+        if not _is_loopback_source(source_host):
+            return False
+        if not _looks_like_tool_or_control_command(text):
+            return False
+        key = _normalize_command_key(text)
+        if len(key) < 2:
+            return False
+        try:
+            window = float(CONFIG.get("asr_tool_dedupe_window_seconds", 4.0))
+        except Exception:
+            window = 4.0
+        window = max(0.25, min(30.0, float(window)))
+        now = time.time()
+        with _recent_asr_tool_lock:
+            last_key = str(_recent_asr_tool.get("key") or "")
+            last_ts = float(_recent_asr_tool.get("timestamp") or 0.0)
+            if key == last_key and (now - last_ts) <= window:
+                _recent_asr_tool["timestamp"] = now
+                _recent_asr_tool["count"] = int(_recent_asr_tool.get("count") or 1) + 1
+                return True
+            _recent_asr_tool["key"] = key
+            _recent_asr_tool["timestamp"] = now
+            _recent_asr_tool["count"] = 1
+            return False
 
     def _load_json_object(path: str, default):
         try:
@@ -2776,6 +2856,25 @@ else:
                     except Exception:
                         pass
                     return
+            source_host = ""
+            try:
+                source_host = str(addr[0] or "")
+            except Exception:
+                source_host = ""
+            if _should_drop_duplicate_asr_tool_command(user_message, source_host):
+                logging.info(f"ClientHandler: Dropped duplicate ASR tool command from {addr}: {user_message}")
+                _emit_pipeline_event(
+                    "llm",
+                    "ignored",
+                    text=user_message,
+                    detail="duplicate_asr_tool_command",
+                    level="warn",
+                )
+                try:
+                    client_sock.sendall("Duplicate command ignored.".encode("utf-8"))
+                except Exception:
+                    pass
+                return
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
             _emit_pipeline_event("asr", "captured", text=user_message, detail=f"source={addr[0]}")
 

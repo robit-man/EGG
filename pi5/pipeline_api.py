@@ -1141,16 +1141,18 @@ def _llm_dashboard_html(session_key: str) -> str:
       --text: #f4f7ff;
       --muted: #9aa9c0;
       --line: #333;
-      --accent: #2f7ef5;
-      --ok: #00d08a;
+      --accent: #ffae00;
+      --ok: #ffae00;
       --err: #ff6666;
-      --warn: #ffcc66;
+      --warn: #ffae00;
       --subpanel: #161616;
     }
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+      font-family: Consolas, "Courier New", monospace;
+    }
     body {
       margin: 0;
-      font-family: monospace;
       color: var(--text);
       background: var(--bg);
     }
@@ -1178,8 +1180,12 @@ def _llm_dashboard_html(session_key: str) -> str:
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
+    }
+    .grid > .card:only-child,
+    .grid > .card:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
     }
     .row {
       display: flex;
@@ -1213,15 +1219,19 @@ def _llm_dashboard_html(session_key: str) -> str:
     }
     button {
       background: var(--accent);
-      color: #fff;
+      color: #121212;
       border-color: var(--accent);
       font-weight: 600;
       cursor: pointer;
     }
     button.secondary {
-      background: #222;
-      color: var(--text);
-      border-color: var(--line);
+      background: #1f1a0e;
+      color: var(--accent);
+      border-color: rgba(255, 174, 0, 0.45);
+    }
+    input:focus, select:focus, textarea:focus, button:focus {
+      outline: 1px solid var(--accent);
+      box-shadow: 0 0 0 1px rgba(255, 174, 0, 0.35);
     }
     button:disabled {
       opacity: 0.5;
@@ -1316,6 +1326,14 @@ def _llm_dashboard_html(session_key: str) -> str:
       color: var(--muted);
       font-size: 0.77rem;
       line-height: 1.25;
+    }
+    @media (max-width: 960px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .grid > .card:last-child:nth-child(odd) {
+        grid-column: auto;
+      }
     }
   </style>
 </head>

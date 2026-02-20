@@ -48,7 +48,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
   - `model_to_tts.py` chunks responses on punctuation for rapid TTS playback (instead of waiting for full sentences only)
-  - voice commands include a tool-command stack: thinking toggle, battery-context toggle, model switching, watchdog tuneables, and TTS volume control
+  - voice commands include a tool-command stack: thinking toggle, battery-context toggle, model switching, watchdog tuneables, TTS volume control, battery/SSID queries, and restart confirmation
   - dashboard model changes are hot-reloaded and preempt active inference; next ASR prompt runs on the new model
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
@@ -101,6 +101,9 @@ Voice tool toggle:
 Voice tool commands (LLM bridge):
 - `turn thinking on` / `turn thinking off`
 - `turn battery context on` / `turn battery context off`
+- `what is the battery state` / `battery voltage` / `battery percent`
+- `what is the current ssid` / `what network am i on`
+- `restart` (asks for confirmation) then `yes` or `no`
 - `switch model ...` (with numbered follow-up confirmation)
 - `set cpu min to 1600000`
 - `set cpu max to 1800000`
@@ -113,8 +116,10 @@ Voice tool commands (LLM bridge):
 - `set tts volume to 70 percent`
 - `set tts volume to 7` (maps `1..10` to `10%..100%`)
 - `volume 1` through `volume 10`
+- spoken number forms are supported (examples: `volume one`, `volume ten percent`)
 - watchdog tuneable commands update `.watchdog_runtime/service_state.json`; running watchdog applies them automatically
 - battery context defaults and settings live in `pi5/piper/llm_bridge_config.json`:
+  - `tool_fallback_enabled` (LLM may emit `<tool>{...}</tool>` fallback calls; tool markup is filtered from TTS playback)
   - `battery_context_enabled`
   - `battery_i2c_bus` (default `1`)
   - `battery_i2c_addr` (default `67`, i.e. `0x43`)

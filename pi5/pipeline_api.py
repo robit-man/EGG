@@ -26,7 +26,7 @@ PIPELINE_VENV_DIR_NAME = "pipeline_api_venv"
 CONFIG_PATH = "pipeline_api_config.json"
 LLM_BRIDGE_CONFIG_PATH = "llm_bridge_config.json"
 DEFAULT_LLM_BRIDGE_CONFIG = {
-    "model": "qwen3:0.6b",
+    "model": "granite4:350m",
     "stream": True,
     "thinking_enabled": False,
     "max_history_messages": 3,

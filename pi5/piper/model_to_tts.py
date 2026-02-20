@@ -216,6 +216,7 @@ else:
         "max_history_messages": 3,  # New Configuration Parameter
         "interrupt_on_new_prompt": False,
         "offline_mode": False,  # Default offline mode
+        "tool_fallback_enabled": True,
         "battery_context_enabled": True,
         "battery_i2c_bus": 1,
         "battery_i2c_addr": 67,  # 0x43 UPS HAT D default
@@ -547,12 +548,12 @@ else:
         _battery_reader = None
         _battery_reader_key = None
 
-    def _read_battery_snapshot(force=False):
+    def _read_battery_snapshot(force=False, include_when_disabled=False):
         global _battery_reader, _battery_reader_key, _battery_cache
         settings = _battery_config_snapshot()
         now = time.time()
         with _battery_lock:
-            if not settings["enabled"]:
+            if not settings["enabled"] and not include_when_disabled:
                 _battery_cache = {
                     "timestamp": now,
                     "status": "disabled",
@@ -907,6 +908,118 @@ else:
             logging.error(f"Failed writing JSON file {path}: {exc}")
             return False
 
+    _NUMBER_WORDS_UNITS = {
+        "zero": 0,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+    }
+    _NUMBER_WORDS_TENS = {
+        "twenty": 20,
+        "thirty": 30,
+        "forty": 40,
+        "fifty": 50,
+        "sixty": 60,
+        "seventy": 70,
+        "eighty": 80,
+        "ninety": 90,
+    }
+
+    def _parse_spoken_integer(text: str, min_value: int = 0, max_value: int = 100):
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return None
+        digit_match = re.search(r"([+-]?\d{1,4})", raw)
+        if digit_match:
+            try:
+                value = int(digit_match.group(1))
+            except Exception:
+                value = None
+            if value is not None and min_value <= value <= max_value:
+                return value
+        normalized = raw.replace("-", " ")
+        tokens = [token for token in re.split(r"[^a-z]+", normalized) if token]
+        if not tokens:
+            return None
+        digit_words = {
+            "zero": "0",
+            "oh": "0",
+            "one": "1",
+            "two": "2",
+            "three": "3",
+            "four": "4",
+            "five": "5",
+            "six": "6",
+            "seven": "7",
+            "eight": "8",
+            "nine": "9",
+        }
+        if len(tokens) >= 2 and all(token in digit_words for token in tokens):
+            try:
+                number = int("".join(digit_words[token] for token in tokens))
+            except Exception:
+                number = None
+            if number is not None and min_value <= number <= max_value:
+                return number
+        total = 0
+        current = 0
+        consumed = False
+        for token in tokens:
+            if token in ("and",):
+                continue
+            if token in _NUMBER_WORDS_UNITS:
+                current += int(_NUMBER_WORDS_UNITS[token])
+                consumed = True
+                continue
+            if token in _NUMBER_WORDS_TENS:
+                current += int(_NUMBER_WORDS_TENS[token])
+                consumed = True
+                continue
+            if token == "hundred":
+                if current <= 0:
+                    current = 1
+                current *= 100
+                consumed = True
+                continue
+            return None
+        total += current
+        if consumed and min_value <= total <= max_value:
+            return int(total)
+        return None
+
+    def _parse_volume_value(phrase: str):
+        text = str(phrase or "").strip().lower()
+        if not text:
+            return None
+        text = re.sub(r"[.!?]+$", "", text).strip()
+        has_percent = bool(re.search(r"(?:%|\bpercent(?:age)?\b|\bper\s+cent\b)", text))
+        text_no_percent = re.sub(r"(?:%|\bpercent(?:age)?\b|\bper\s+cent\b)", " ", text)
+        text_no_percent = re.sub(r"\s+", " ", text_no_percent).strip()
+        value = _parse_spoken_integer(text_no_percent, min_value=0, max_value=100)
+        if value is None:
+            return None
+        if has_percent:
+            return {"percent": int(max(TTS_VOLUME_MIN_PERCENT, min(TTS_VOLUME_MAX_PERCENT, value))), "source": "percent"}
+        if 1 <= int(value) <= 10:
+            return {"percent": int(value * 10), "source": "scale_1_10"}
+        return {"percent": int(max(TTS_VOLUME_MIN_PERCENT, min(TTS_VOLUME_MAX_PERCENT, value))), "source": "percent"}
+
     def _parse_tts_volume_command(text: str):
         cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
         if not cleaned:
@@ -916,32 +1029,62 @@ else:
         if re.search(r"\b(?:mute|volume off)\b", cleaned):
             return {"percent": 0, "source": "mute"}
 
-        percent_pattern = re.compile(
-            r"^(?:set|change|adjust)\s+(?:the\s+)?(?:tts\s+)?volume(?:\s*(?:to|at|is))?\s*(\d{1,3})\s*(?:%|percent|percentage)\s*$"
+        simple_pattern = re.compile(
+            r"^(?:(?:set|change|adjust)\s+)?(?:the\s+)?(?:tts\s+)?volume(?:\s*(?:to|at|is|level))?\s*(.+?)\s*$"
         )
-        match = percent_pattern.match(cleaned)
+        match = simple_pattern.match(cleaned)
         if match:
-            try:
-                percent = int(match.group(1))
-            except Exception:
-                return None
-            return {"percent": max(TTS_VOLUME_MIN_PERCENT, min(TTS_VOLUME_MAX_PERCENT, percent)), "source": "percent"}
+            parsed = _parse_volume_value(str(match.group(1) or "").strip())
+            if parsed is not None:
+                return parsed
+        return None
 
-        scale_pattern = re.compile(
-            r"^(?:set|change|adjust)\s+(?:the\s+)?(?:tts\s+)?volume(?:\s*(?:to|at|level))?\s*(\d{1,2})\s*$"
-        )
-        match = scale_pattern.match(cleaned)
-        if not match:
-            match = re.match(r"^(?:tts\s+)?volume\s+(\d{1,2})\s*$", cleaned)
-        if match:
-            try:
-                value = int(match.group(1))
-            except Exception:
-                return None
-            if 1 <= value <= 10:
-                return {"percent": int(value * 10), "source": "scale_1_10"}
-            if 0 <= value <= 100:
-                return {"percent": int(value), "source": "percent"}
+    def _parse_battery_query_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return False
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        if re.search(r"\b(battery|charge|voltage)\b", cleaned):
+            if re.search(r"\b(status|state|level|percent|percentage|voltage|how much|what|tell me|current)\b", cleaned):
+                return True
+        return bool(re.match(r"^(?:what(?:'s| is)?\s+)?battery\s*$", cleaned))
+
+    def _parse_network_ssid_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return False
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        if re.search(r"\bssid\b", cleaned):
+            return True
+        if re.search(r"\b(?:wifi|wi fi|wireless|network)\b", cleaned) and re.search(
+            r"\b(?:name|ssid|connected|current|what|which)\b",
+            cleaned,
+        ):
+            return True
+        return False
+
+    def _parse_restart_request_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return False
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        if re.search(r"\b(?:restart|reboot)\b", cleaned):
+            if re.search(r"\b(?:service|watchdog|llm|camera|asr|tts)\b", cleaned):
+                return False
+            return True
+        return False
+
+    def _parse_yes_no_value(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        yes_match = re.match(r"^(?:yes|yeah|yep|confirm|do it|restart now|go ahead|sure|ok|okay)\b", cleaned)
+        if yes_match:
+            return True
+        no_match = re.match(r"^(?:no|nope|cancel|stop|don't|do not|never mind|nevermind)\b", cleaned)
+        if no_match:
+            return False
         return None
 
     def _set_tts_volume_percent(percent_value: int):
@@ -1099,7 +1242,177 @@ else:
         )
         return True, summary
 
+    RESTART_CONFIRM_TIMEOUT_SECONDS = 30.0
+    _restart_lock = threading.Lock()
+    _pending_restart = {
+        "active": False,
+        "created_at": 0.0,
+        "expires_at": 0.0,
+    }
+
+    def _set_pending_restart():
+        now = time.time()
+        with _restart_lock:
+            _pending_restart["active"] = True
+            _pending_restart["created_at"] = now
+            _pending_restart["expires_at"] = now + RESTART_CONFIRM_TIMEOUT_SECONDS
+
+    def _clear_pending_restart():
+        with _restart_lock:
+            _pending_restart["active"] = False
+            _pending_restart["created_at"] = 0.0
+            _pending_restart["expires_at"] = 0.0
+
+    def _pending_restart_active():
+        with _restart_lock:
+            if not bool(_pending_restart.get("active")):
+                return False
+            if float(_pending_restart.get("expires_at") or 0.0) <= time.time():
+                _pending_restart["active"] = False
+                _pending_restart["created_at"] = 0.0
+                _pending_restart["expires_at"] = 0.0
+                return False
+            return True
+
+    def _schedule_system_restart(delay_seconds: float = 1.5):
+        def _runner():
+            sleep_for = max(0.0, float(delay_seconds or 0.0))
+            time.sleep(sleep_for)
+            commands = (
+                ["sudo", "systemctl", "reboot"],
+                ["sudo", "reboot"],
+            )
+            for command in commands:
+                try:
+                    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    logging.warning(f"System restart requested via: {' '.join(command)}")
+                    return
+                except Exception as exc:
+                    logging.warning(f"Restart command failed ({' '.join(command)}): {exc}")
+            logging.error("Unable to launch any system restart command.")
+
+        thread = threading.Thread(target=_runner, daemon=True, name="RestartScheduler")
+        thread.start()
+
+    def _is_main_process():
+        try:
+            return str(multiprocessing.current_process().name) == "MainProcess"
+        except Exception:
+            return True
+
+    def _describe_battery_state(force_refresh: bool = False):
+        snapshot = _read_battery_snapshot(force=bool(force_refresh), include_when_disabled=True)
+        status = str(snapshot.get("status") or "unknown")
+        if status != "ok":
+            return "Battery telemetry is unavailable right now."
+        voltage = snapshot.get("voltage_v")
+        percent = snapshot.get("percent")
+        if voltage is None or percent is None:
+            return "Battery telemetry is unavailable right now."
+        return f"Battery is {float(percent):.1f} percent at {float(voltage):.3f} volts."
+
+    def _read_current_ssid():
+        commands = (
+            ["iwgetid", "-r"],
+            ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+        )
+        for command in commands:
+            try:
+                output = subprocess.check_output(command, stderr=subprocess.DEVNULL, timeout=3).decode("utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+            if not output:
+                continue
+            if command[0] == "nmcli":
+                for line in output.splitlines():
+                    line = str(line or "").strip()
+                    if not line:
+                        continue
+                    if line.startswith("yes:"):
+                        candidate = line.split(":", 1)[1].strip()
+                        if candidate:
+                            return candidate
+                continue
+            return output
+        return ""
+
+    def _execute_named_tool_call(tool_name: str, args: dict, source: str = "tool"):
+        tool = str(tool_name or "").strip().lower()
+        payload = args if isinstance(args, dict) else {}
+
+        if tool in ("set_tts_volume", "tts_volume"):
+            percent = payload.get("percent")
+            if percent is None:
+                percent = payload.get("value")
+            parsed = _parse_spoken_integer(str(percent), min_value=0, max_value=100) if percent is not None else None
+            level = payload.get("level")
+            if parsed is None and level is not None:
+                parsed = _parse_spoken_integer(str(level), min_value=0, max_value=10)
+                if parsed is not None and 1 <= parsed <= 10:
+                    parsed = int(parsed * 10)
+            if parsed is None:
+                return False, "I need a volume percent from zero to one hundred.", "tts_volume_error"
+            ok, response = _set_tts_volume_percent(int(parsed))
+            return ok, response, "tts_volume_set" if ok else "tts_volume_error"
+
+        if tool in ("set_thinking", "thinking"):
+            enabled = _as_bool(payload.get("enabled", False), False)
+            changed = _set_thinking_enabled(bool(enabled))
+            state_text = "On" if enabled else "Off"
+            response = f"Turned Thinking {state_text}" if changed else f"Thinking already {state_text}"
+            return True, response, "thinking_toggle"
+
+        if tool in ("set_battery_context", "battery_context"):
+            enabled = _as_bool(payload.get("enabled", True), True)
+            changed = _set_battery_context_enabled(bool(enabled))
+            state_text = "On" if enabled else "Off"
+            response = f"Turned Battery Context {state_text}" if changed else f"Battery Context already {state_text}"
+            return True, response, "battery_context_toggle"
+
+        if tool in ("get_battery_state", "battery_state", "battery_voltage"):
+            return True, _describe_battery_state(force_refresh=True), "battery_state"
+
+        if tool in ("get_network_ssid", "network_ssid", "ssid"):
+            ssid = _read_current_ssid()
+            if ssid:
+                return True, f"Connected WiFi SSID is {ssid}.", "network_ssid"
+            return True, "I cannot determine the current WiFi SSID right now.", "network_ssid"
+
+        if tool in ("restart_request", "restart_system"):
+            if not _is_main_process():
+                return True, "Please say restart to confirm system reboot.", "restart_prompt"
+            _set_pending_restart()
+            return True, "Do you want to restart now? Please say yes or no.", "restart_prompt"
+
+        if tool in ("restart_confirm",):
+            if not _is_main_process():
+                return True, "Please say restart to confirm system reboot.", "restart_prompt"
+            confirm = _as_bool(payload.get("confirm", False), False)
+            if confirm:
+                _clear_pending_restart()
+                _schedule_system_restart()
+                return True, "Restarting now.", "restart_confirmed"
+            _clear_pending_restart()
+            return True, "Restart cancelled.", "restart_cancelled"
+
+        return False, f"Unknown tool {tool}.", "tool_unknown"
+
     def _handle_voice_tool_command(user_message: str):
+        if _pending_restart_active():
+            decision = _parse_yes_no_value(user_message)
+            if decision is None:
+                return True, "Please say yes or no. Restart is pending.", "restart_prompt"
+            if decision:
+                _clear_pending_restart()
+                _schedule_system_restart()
+                return True, "Restarting now.", "restart_confirmed"
+            _clear_pending_restart()
+            return True, "Restart cancelled.", "restart_cancelled"
+
+        if _parse_restart_request_command(user_message):
+            _set_pending_restart()
+            return True, "Do you want to restart now? Please say yes or no.", "restart_prompt"
+
         thinking_toggle = _parse_thinking_toggle_command(user_message)
         if thinking_toggle is not None:
             changed = _set_thinking_enabled(thinking_toggle)
@@ -1118,6 +1431,15 @@ else:
             )
             return True, response, "battery_context_toggle"
 
+        if _parse_battery_query_command(user_message):
+            return True, _describe_battery_state(force_refresh=True), "battery_state"
+
+        if _parse_network_ssid_command(user_message):
+            ssid = _read_current_ssid()
+            if ssid:
+                return True, f"Connected WiFi SSID is {ssid}.", "network_ssid"
+            return True, "I cannot determine the current WiFi SSID right now.", "network_ssid"
+
         volume_cmd = _parse_tts_volume_command(user_message)
         if volume_cmd is not None:
             ok, response = _set_tts_volume_percent(int(volume_cmd.get("percent", TTS_VOLUME_DEFAULT_PERCENT)))
@@ -1131,6 +1453,105 @@ else:
             return True, response, detail
 
         return False, "", ""
+
+    _LLM_TOOL_TAG_RE = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", flags=re.IGNORECASE | re.DOTALL)
+    _LLM_TOOL_BRACKET_RE = re.compile(r"\[tool\s*:\s*(\{.*?\})\s*\]", flags=re.IGNORECASE | re.DOTALL)
+
+    def _tool_fallback_enabled():
+        with CONFIG_LOCK:
+            return _as_bool(CONFIG.get("tool_fallback_enabled", True), True)
+
+    def _decode_llm_tool_payload(raw_json: str):
+        try:
+            payload = json.loads(str(raw_json or "").strip())
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        tool_name = str(payload.get("tool") or payload.get("name") or "").strip()
+        if not tool_name:
+            return None
+        args = payload.get("args")
+        if not isinstance(args, dict):
+            args = payload.get("arguments")
+        if not isinstance(args, dict):
+            args = {}
+        for key, value in payload.items():
+            if key in ("tool", "name", "args", "arguments"):
+                continue
+            if key not in args:
+                args[key] = value
+        return {"tool": tool_name, "args": args}
+
+    def _extract_llm_tool_calls(text: str):
+        raw = str(text or "")
+        cleaned = raw
+        calls = []
+
+        for pattern in (_LLM_TOOL_TAG_RE, _LLM_TOOL_BRACKET_RE):
+            matches = list(pattern.finditer(cleaned))
+            if not matches:
+                continue
+            for match in matches:
+                decoded = _decode_llm_tool_payload(match.group(1))
+                if decoded is not None:
+                    calls.append(decoded)
+            cleaned = pattern.sub(" ", cleaned)
+
+        stripped = cleaned.strip()
+        if not calls and stripped.startswith("{") and stripped.endswith("}") and '"tool"' in stripped.lower():
+            decoded = _decode_llm_tool_payload(stripped)
+            if decoded is not None:
+                calls.append(decoded)
+                cleaned = ""
+
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return calls, cleaned
+
+    def _apply_llm_tool_fallback(text: str):
+        if not _tool_fallback_enabled():
+            return str(text or "").strip(), False
+        calls, cleaned_text = _extract_llm_tool_calls(text)
+        if not calls:
+            return cleaned_text, False
+        responses = []
+        for idx, call in enumerate(calls):
+            if idx >= 2:
+                break
+            ok, response, detail = _execute_named_tool_call(
+                call.get("tool", ""),
+                call.get("args", {}),
+                source="llm_fallback",
+            )
+            _emit_pipeline_event(
+                "llm",
+                "tool",
+                detail=f"llm_fallback {detail} ok={'yes' if ok else 'no'}",
+            )
+            response_text = str(response or "").strip()
+            if response_text:
+                responses.append(response_text)
+        combined = cleaned_text
+        if responses:
+            combined = " ".join(responses + ([cleaned_text] if cleaned_text else []))
+        combined = str(combined or "").strip()
+        if not combined:
+            combined = "Done."
+        return combined, True
+
+    def _maybe_llm_tool_mode_prefix(full_response_text: str):
+        sample = str(full_response_text or "").lstrip()
+        if not sample:
+            return None
+        if sample.startswith("<tool>") or sample.lower().startswith("[tool:"):
+            return True
+        if sample.startswith("{"):
+            if '"tool"' in sample.lower():
+                return True
+            if len(sample) > 80:
+                return False
+            return None
+        return False
 
     MODEL_SWITCH_TIMEOUT_SECONDS = 45.0
     CONFIG_WATCH_INTERVAL_SECONDS = 0.75
@@ -1582,6 +2003,14 @@ else:
             battery_line = _build_battery_context_line()
             if battery_line:
                 system_prompt = f"{system_prompt}\n\n{battery_line}"
+            if _as_bool(CONFIG.get("tool_fallback_enabled", True), True):
+                system_prompt = (
+                    f"{system_prompt}\n\n"
+                    "Tool fallback format: if a direct control action is requested, respond with "
+                    "<tool>{\"tool\":\"set_tts_volume\",\"args\":{\"percent\":70}}</tool> "
+                    "and optional short plain text. Tools: set_tts_volume, set_thinking, "
+                    "set_battery_context, get_battery_state, get_network_ssid, restart_request."
+                )
             messages.append({"role": "system", "content": system_prompt})
         
         # Truncate history_messages based on max_history_messages
@@ -1892,6 +2321,7 @@ else:
                     stream_started_at = 0.0
                     last_stream_event_at = 0.0
                     token_count = 0
+                    tool_mode = None
                     for line in r.iter_lines():
                         if not line:
                             continue
@@ -1925,18 +2355,34 @@ else:
                                     )
                                     last_stream_event_at = now
 
-                                ready_chunks, buffer = _extract_tts_chunks(buffer)
-                                for sentence in ready_chunks:
-                                    output_queue.put(sentence)
-                                    logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
+                                if tool_mode is None:
+                                    tool_mode = _maybe_llm_tool_mode_prefix(full_response)
+                                if tool_mode is not True:
+                                    ready_chunks, buffer = _extract_tts_chunks(buffer)
+                                    for sentence in ready_chunks:
+                                        output_queue.put(sentence)
+                                        logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
 
                             if done:
-                                leftover = buffer.strip()
-                                if leftover:
-                                    output_queue.put(leftover)
-                                    logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
-                                if full_response.strip():
-                                    output_queue.put({"kind": "assistant_final", "text": full_response.strip()})
+                                final_assistant_text = str(full_response or "").strip()
+                                if tool_mode is True:
+                                    spoken_text, _ = _apply_llm_tool_fallback(final_assistant_text)
+                                    ready_chunks, remaining = _extract_tts_chunks(spoken_text)
+                                    for sentence in ready_chunks:
+                                        output_queue.put(sentence)
+                                        logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
+                                    leftover = str(remaining or "").strip()
+                                    if leftover:
+                                        output_queue.put(leftover)
+                                        logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
+                                    final_assistant_text = str(spoken_text or "").strip()
+                                else:
+                                    leftover = buffer.strip()
+                                    if leftover:
+                                        output_queue.put(leftover)
+                                        logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
+                                if final_assistant_text:
+                                    output_queue.put({"kind": "assistant_final", "text": final_assistant_text})
                                 total_tokens = _estimate_token_count(full_response)
                                 total_elapsed = max(0.001, time.time() - request_started_at)
                                 total_tps = float(total_tokens) / total_elapsed
@@ -1955,7 +2401,7 @@ else:
                                 _emit_pipeline_event(
                                     "llm",
                                     "completed",
-                                    text=full_response[-160:],
+                                    text=final_assistant_text[-160:] if final_assistant_text else full_response[-160:],
                                     detail=detail_text,
                                 )
                                 break
@@ -1975,7 +2421,8 @@ else:
                 response_content = data.get("message", {}).get("content", "")
                 # Remove markdown emphasis markers that produce awkward speech.
                 response_content = str(response_content or "").replace('*', '')
-                ready_chunks, buffer = _extract_tts_chunks(response_content)
+                spoken_response, _ = _apply_llm_tool_fallback(response_content)
+                ready_chunks, buffer = _extract_tts_chunks(spoken_response)
                 for sentence in ready_chunks:
                     output_queue.put(sentence)
                     logging.debug(f"Inference Process: Enqueued sentence to TTS: {sentence}")
@@ -1983,9 +2430,9 @@ else:
                 if leftover:
                     output_queue.put(leftover)
                     logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
-                if response_content.strip():
-                    output_queue.put({"kind": "assistant_final", "text": response_content.strip()})
-                total_tokens = _estimate_token_count(response_content)
+                if spoken_response.strip():
+                    output_queue.put({"kind": "assistant_final", "text": spoken_response.strip()})
+                total_tokens = _estimate_token_count(spoken_response)
                 total_elapsed = max(0.001, time.time() - request_started_at)
                 total_tps = float(total_tokens) / total_elapsed
                 ollama_eval_count = int(data.get("eval_count") or 0)
@@ -2003,7 +2450,7 @@ else:
                 _emit_pipeline_event(
                     "llm",
                     "completed",
-                    text=response_content[-160:],
+                    text=spoken_response[-160:],
                     detail=detail_text,
                 )
         except Exception as e:

@@ -7,7 +7,7 @@ import re
 import json
 import argparse
 import threading
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 import shutil
 import time
 import logging
@@ -390,6 +390,8 @@ else:
     CONFIG = merge_config_and_args(CONFIG, args)
     CONFIG = apply_audio_router_overrides(CONFIG)
     CONFIG = apply_pipeline_api_overrides(CONFIG)
+    if not isinstance(CONFIG.get("options"), dict):
+        CONFIG["options"] = {}
     CONFIG_LOCK = threading.Lock()
     CONFIG_FILE_ABS = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_PATH)
     _config_mtime = 0.0
@@ -484,12 +486,45 @@ else:
         if not model:
             return False
         if _ollama_model_installed(model):
+            _set_model_ready_cache(model, True)
             return True
         logging.warning(f"Configured model '{model}' is missing; auto-pull requested.")
         ok = _pull_ollama_model(model)
         if not ok:
+            _set_model_ready_cache(model, False)
             return False
-        return _ollama_model_installed(model)
+        final_ready = _ollama_model_installed(model)
+        _set_model_ready_cache(model, final_ready)
+        return final_ready
+
+    _MODEL_READY_CACHE_TTL_SECONDS = 30.0
+    _model_ready_cache_lock = threading.Lock()
+    _model_ready_cache = {
+        "model": "",
+        "ready": False,
+        "checked_at": 0.0,
+    }
+
+    def _set_model_ready_cache(model_name: str, ready: bool):
+        with _model_ready_cache_lock:
+            _model_ready_cache["model"] = str(model_name or "").strip()
+            _model_ready_cache["ready"] = bool(ready)
+            _model_ready_cache["checked_at"] = time.time()
+
+    def _is_model_ready_cached(model_name: str) -> bool:
+        model = str(model_name or "").strip()
+        if not model:
+            return False
+        now = time.time()
+        with _model_ready_cache_lock:
+            cached_model = str(_model_ready_cache.get("model") or "")
+            cached_ready = bool(_model_ready_cache.get("ready"))
+            checked_at = float(_model_ready_cache.get("checked_at") or 0.0)
+        if model == cached_model and checked_at > 0.0 and (now - checked_at) <= _MODEL_READY_CACHE_TTL_SECONDS:
+            return cached_ready
+        ready = _ollama_model_installed(model)
+        _set_model_ready_cache(model, ready)
+        return ready
 
     def _reload_config_if_updated():
         global _config_mtime
@@ -503,6 +538,8 @@ else:
             loaded = load_config()
             loaded = apply_audio_router_overrides(loaded)
             loaded = apply_pipeline_api_overrides(loaded)
+            if not isinstance(loaded.get("options"), dict):
+                loaded["options"] = {}
             previous_model = str(CONFIG.get("model", "")).strip()
             with CONFIG_LOCK:
                 CONFIG.clear()
@@ -841,6 +878,46 @@ else:
             # Cue tone is best-effort only; never block request handling.
             pass
 
+    _PIPELINE_EVENT_TIMEOUT_SECONDS = 0.12
+    _PIPELINE_EVENT_QUEUE_MAX = 256
+    _pipeline_event_queue = Queue(maxsize=_PIPELINE_EVENT_QUEUE_MAX)
+
+    def _pipeline_event_worker():
+        while True:
+            try:
+                item = _pipeline_event_queue.get()
+            except Exception:
+                continue
+            if item is None:
+                break
+            try:
+                event_url, payload = item
+                requests.post(str(event_url), json=payload, timeout=_PIPELINE_EVENT_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+
+    def _enqueue_pipeline_event(event_url: str, payload: dict):
+        try:
+            _pipeline_event_queue.put_nowait((str(event_url), dict(payload)))
+        except Full:
+            try:
+                _pipeline_event_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                _pipeline_event_queue.put_nowait((str(event_url), dict(payload)))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    _pipeline_event_thread = threading.Thread(
+        target=_pipeline_event_worker,
+        daemon=True,
+        name="PipelineEventWorker",
+    )
+    _pipeline_event_thread.start()
+
     def _emit_pipeline_event(
         stage: str,
         state: str,
@@ -861,13 +938,13 @@ else:
                 "detail": str(detail or "")[:240],
                 "level": str(level or "info").strip().lower() or "info",
             }
-            requests.post(event_url, json=payload, timeout=0.45)
+            _enqueue_pipeline_event(event_url, payload)
         except Exception:
             pass
 
     _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
     _PUNCT_BOUNDARY_RE = re.compile(r"[.!?,;:…\n\r\u3002\uff01\uff1f\uff0c\uff1b\uff1a]+")
-    _LLM_STREAM_EVENT_INTERVAL_SECONDS = 0.22
+    _LLM_STREAM_EVENT_INTERVAL_SECONDS = 0.45
 
     def _estimate_token_count(text: str) -> int:
         raw = str(text or "")
@@ -1145,13 +1222,22 @@ else:
     def inference_to_tts_handler():
         while True:
             try:
-                sentence = inference_queue.get()
-                if sentence == "__SHUTDOWN__":
+                item = inference_queue.get()
+                if item == "__SHUTDOWN__":
                     logging.info("Inference to TTS Handler: Received shutdown signal.")
                     break  # Sentinel to stop the thread
-                # Append assistant sentence to history
-                update_history("assistant", sentence)
-                # Enqueue sentence to TTS queue
+
+                if isinstance(item, dict):
+                    kind = str(item.get("kind", "")).strip().lower()
+                    if kind == "assistant_final":
+                        text = str(item.get("text", "")).strip()
+                        if text:
+                            update_history("assistant", text)
+                        continue
+
+                sentence = str(item or "").strip()
+                if not sentence:
+                    continue
                 tts_queue.put(sentence)
                 _emit_pipeline_event("tts", "queued", text=sentence, detail="inference sentence enqueued")
                 logging.debug(f"Inference to TTS Handler: Enqueued sentence to TTS: {sentence}")
@@ -1282,6 +1368,7 @@ else:
                     full_response = ""
                     stream_started_at = 0.0
                     last_stream_event_at = 0.0
+                    token_count = 0
                     for line in r.iter_lines():
                         if not line:
                             continue
@@ -1298,11 +1385,11 @@ else:
                             if content:
                                 full_response += content
                                 buffer += content
+                                token_count += _estimate_token_count(content)
                                 if stream_started_at <= 0.0:
                                     stream_started_at = time.time()
 
                                 now = time.time()
-                                token_count = _estimate_token_count(full_response)
                                 elapsed = max(0.001, now - stream_started_at)
                                 tps = float(token_count) / elapsed
                                 preview = content.strip()
@@ -1311,7 +1398,7 @@ else:
                                         "llm",
                                         "streaming",
                                         text=preview,
-                                        detail=f"model={model_name} tok={token_count} tps={tps:.2f}",
+                                        detail=f"model={model_name} tok~={token_count} tps~={tps:.2f}",
                                     )
                                     last_stream_event_at = now
 
@@ -1325,14 +1412,28 @@ else:
                                 if leftover:
                                     output_queue.put(leftover)
                                     logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
+                                if full_response.strip():
+                                    output_queue.put({"kind": "assistant_final", "text": full_response.strip()})
                                 total_tokens = _estimate_token_count(full_response)
                                 total_elapsed = max(0.001, time.time() - request_started_at)
                                 total_tps = float(total_tokens) / total_elapsed
+                                ollama_eval_count = int(obj.get("eval_count") or 0)
+                                ollama_eval_duration_ns = int(obj.get("eval_duration") or 0)
+                                ollama_tps = 0.0
+                                if ollama_eval_count > 0 and ollama_eval_duration_ns > 0:
+                                    ollama_tps = float(ollama_eval_count) / (float(ollama_eval_duration_ns) / 1_000_000_000.0)
+                                if ollama_tps > 0.0:
+                                    detail_text = (
+                                        f"model={model_name} tok~={total_tokens} tps~={total_tps:.2f} "
+                                        f"otok={ollama_eval_count} otps={ollama_tps:.2f} stream=on"
+                                    )
+                                else:
+                                    detail_text = f"model={model_name} tok~={total_tokens} tps~={total_tps:.2f} stream=on"
                                 _emit_pipeline_event(
                                     "llm",
                                     "completed",
                                     text=full_response[-160:],
-                                    detail=f"model={model_name} tok={total_tokens} tps={total_tps:.2f} stream=on",
+                                    detail=detail_text,
                                 )
                                 break
                         except json.JSONDecodeError as e:
@@ -1359,14 +1460,28 @@ else:
                 if leftover:
                     output_queue.put(leftover)
                     logging.debug(f"Inference Process: Enqueued final sentence to TTS: {leftover}")
+                if response_content.strip():
+                    output_queue.put({"kind": "assistant_final", "text": response_content.strip()})
                 total_tokens = _estimate_token_count(response_content)
                 total_elapsed = max(0.001, time.time() - request_started_at)
                 total_tps = float(total_tokens) / total_elapsed
+                ollama_eval_count = int(data.get("eval_count") or 0)
+                ollama_eval_duration_ns = int(data.get("eval_duration") or 0)
+                ollama_tps = 0.0
+                if ollama_eval_count > 0 and ollama_eval_duration_ns > 0:
+                    ollama_tps = float(ollama_eval_count) / (float(ollama_eval_duration_ns) / 1_000_000_000.0)
+                if ollama_tps > 0.0:
+                    detail_text = (
+                        f"model={model_name} tok~={total_tokens} tps~={total_tps:.2f} "
+                        f"otok={ollama_eval_count} otps={ollama_tps:.2f} stream=off"
+                    )
+                else:
+                    detail_text = f"model={model_name} tok~={total_tokens} tps~={total_tps:.2f} stream=off"
                 _emit_pipeline_event(
                     "llm",
                     "completed",
                     text=response_content[-160:],
-                    detail=f"model={model_name} tok={total_tokens} tps={total_tps:.2f} stream=off",
+                    detail=detail_text,
                 )
         except Exception as e:
             logging.error(f"Inference Process: Unexpected error: {e}")
@@ -1449,6 +1564,7 @@ else:
         Append a single message to the chat history.
         Only appends if the role is 'user' or 'assistant' and content is provided.
         """
+        global history_messages
         if not role or not content:
             return
         with history_lock:
@@ -1457,6 +1573,7 @@ else:
             try:
                 with open(history_path, 'w') as f:
                     json.dump(current_history, f, indent=2)
+                history_messages = list(current_history)
                 logging.info(f"History updated in '{history_path}' with {role} message.")
             except Exception as e:
                 logging.warning(f"Could not write to history file {history_path}: {e}")
@@ -1716,7 +1833,7 @@ else:
             update_history("user", user_message)
             current_model = str(CONFIG.get("model", "")).strip()
             thinking_state = "on" if _as_bool(CONFIG.get("thinking_enabled", False), False) else "off"
-            if current_model and not _ollama_model_installed(current_model):
+            if current_model and not _is_model_ready_cached(current_model):
                 _ensure_ollama_model_ready(current_model)
             _emit_processing_blip(frequency_hz=6000.0, duration_seconds=0.2)
             _emit_pipeline_event(

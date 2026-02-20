@@ -210,6 +210,17 @@ else:
     CONFIG_PATH = "llm_bridge_config.json"
     AUDIO_ROUTER_CONFIG_PATH = "audio_router_config.json"
     PIPELINE_API_CONFIG_PATH = "pipeline_api_config.json"
+    WATCHDOG_RUNTIME_DIR_NAME = ".watchdog_runtime"
+    WATCHDOG_STATE_FILE_NAME = "service_state.json"
+    TTS_VOLUME_DEFAULT_PERCENT = 20
+    TTS_VOLUME_MIN_PERCENT = 0
+    TTS_VOLUME_MAX_PERCENT = 100
+    CPU_MIN_KHZ_MIN = 100000
+    CPU_MIN_KHZ_MAX = 3000000
+    CPU_MAX_KHZ_MIN = 100000
+    CPU_MAX_KHZ_MAX = 3000000
+    OVER_VOLTAGE_DELTA_UV_MIN = -100000
+    OVER_VOLTAGE_DELTA_UV_MAX = 100000
     
     def load_config():
         if not os.path.exists(CONFIG_PATH):
@@ -317,6 +328,21 @@ else:
             else:
                 return default
         return current
+
+    def _set_nested(data, path, value):
+        if not isinstance(data, dict):
+            return
+        parts = [segment for segment in str(path or "").split(".") if segment]
+        if not parts:
+            return
+        current = data
+        for key in parts[:-1]:
+            next_val = current.get(key)
+            if not isinstance(next_val, dict):
+                next_val = {}
+                current[key] = next_val
+            current = next_val
+        current[parts[-1]] = value
 
     def apply_audio_router_overrides(config):
         try:
@@ -612,6 +638,259 @@ else:
         if re.search(r"\bthinking(?: mode)? off\b", cleaned):
             return False
         return None
+
+    def _runtime_base_dir():
+        return os.path.abspath(os.path.dirname(__file__))
+
+    def _audio_router_config_abs():
+        return os.path.join(_runtime_base_dir(), AUDIO_ROUTER_CONFIG_PATH)
+
+    def _watchdog_state_abs():
+        return os.path.join(_runtime_base_dir(), WATCHDOG_RUNTIME_DIR_NAME, WATCHDOG_STATE_FILE_NAME)
+
+    def _load_json_object(path: str, default):
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+            if isinstance(default, dict):
+                return payload if isinstance(payload, dict) else dict(default)
+            if isinstance(default, list):
+                return payload if isinstance(payload, list) else list(default)
+            return payload
+        except Exception:
+            if isinstance(default, dict):
+                return dict(default)
+            if isinstance(default, list):
+                return list(default)
+            return default
+
+    def _write_json_object(path: str, payload) -> bool:
+        try:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fp:
+                json.dump(payload, fp, indent=2)
+            os.replace(tmp_path, path)
+            return True
+        except Exception as exc:
+            logging.error(f"Failed writing JSON file {path}: {exc}")
+            return False
+
+    def _parse_tts_volume_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+
+        if re.search(r"\b(?:mute|volume off)\b", cleaned):
+            return {"percent": 0, "source": "mute"}
+
+        percent_pattern = re.compile(
+            r"^(?:set|change|adjust)\s+(?:the\s+)?(?:tts\s+)?volume(?:\s*(?:to|at|is))?\s*(\d{1,3})\s*(?:%|percent|percentage)\s*$"
+        )
+        match = percent_pattern.match(cleaned)
+        if match:
+            try:
+                percent = int(match.group(1))
+            except Exception:
+                return None
+            return {"percent": max(TTS_VOLUME_MIN_PERCENT, min(TTS_VOLUME_MAX_PERCENT, percent)), "source": "percent"}
+
+        scale_pattern = re.compile(
+            r"^(?:set|change|adjust)\s+(?:the\s+)?(?:tts\s+)?volume(?:\s*(?:to|at|level))?\s*(\d{1,2})\s*$"
+        )
+        match = scale_pattern.match(cleaned)
+        if not match:
+            match = re.match(r"^(?:tts\s+)?volume\s+(\d{1,2})\s*$", cleaned)
+        if match:
+            try:
+                value = int(match.group(1))
+            except Exception:
+                return None
+            if 1 <= value <= 10:
+                return {"percent": int(value * 10), "source": "scale_1_10"}
+            if 0 <= value <= 100:
+                return {"percent": int(value), "source": "percent"}
+        return None
+
+    def _set_tts_volume_percent(percent_value: int):
+        percent = int(percent_value)
+        percent = max(TTS_VOLUME_MIN_PERCENT, min(TTS_VOLUME_MAX_PERCENT, percent))
+        multiplier = round(float(percent) / 100.0, 3)
+
+        cfg_path = _audio_router_config_abs()
+        payload = _load_json_object(cfg_path, {})
+        if not isinstance(payload, dict):
+            payload = {}
+
+        _set_nested(payload, "audio_router.audio.output_volume", float(multiplier))
+        _set_nested(payload, "audio_router.audio.output_volume_percent", int(percent))
+        saved = _write_json_object(cfg_path, payload)
+        if not saved:
+            return False, "I could not save TTS volume."
+        return True, f"TTS volume set to {percent} percent."
+
+    def _parse_watchdog_tuneable_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+
+        range_match = re.match(
+            r"^(?:set|change|adjust)\s+cpu\s+(?:range|limits?)\s*(?:to|at)?\s*(\d{3,7})\s*(?:to|-)\s*(\d{3,7})\s*(?:khz)?\s*$",
+            cleaned,
+        )
+        if range_match:
+            a = int(range_match.group(1))
+            b = int(range_match.group(2))
+            return {"min_khz": min(a, b), "max_khz": max(a, b)}
+
+        min_match = re.match(
+            r"^(?:set|change|adjust)\s+cpu\s+min(?:imum)?(?:\s*(?:to|at|=))?\s*(\d{3,7})\s*(?:khz)?\s*$",
+            cleaned,
+        )
+        if min_match:
+            return {"min_khz": int(min_match.group(1))}
+
+        max_match = re.match(
+            r"^(?:set|change|adjust)\s+cpu\s+max(?:imum)?(?:\s*(?:to|at|=))?\s*(\d{3,7})\s*(?:khz)?\s*$",
+            cleaned,
+        )
+        if max_match:
+            return {"max_khz": int(max_match.group(1))}
+
+        uv_match = re.match(
+            r"^(?:set|change|adjust)\s+(?:cpu\s+)?(?:undervolt|under\s*volt|over[_ ]?voltage(?:[_ ]?delta)?)"
+            r"(?:\s*(?:to|at|=))?\s*([+-]?\d+)\s*(?:uv|microvolts?)?\s*$",
+            cleaned,
+        )
+        if uv_match:
+            return {"over_voltage_delta_uv": int(uv_match.group(1))}
+
+        asr_enable_match = re.match(
+            r"^(?:turn|set)\s+(?:asr\s+)?throttle\s+(on|off|enable|disable|enabled|disabled)\s*$",
+            cleaned,
+        )
+        if asr_enable_match:
+            token = str(asr_enable_match.group(1) or "").strip().lower()
+            enabled = token in ("on", "enable", "enabled")
+            return {"asr_llm_throttle_enable": bool(enabled)}
+
+        asr_percent_match = re.match(
+            r"^(?:set|change|adjust)\s+(?:asr\s+)?throttle(?:\s+percent(?:age)?)?"
+            r"(?:\s*(?:to|at|=))?\s*(\d{1,3})\s*(?:%|percent|percentage)?\s*$",
+            cleaned,
+        )
+        if asr_percent_match:
+            return {"asr_llm_throttle_percent": int(asr_percent_match.group(1))}
+
+        asr_cycle_match = re.match(
+            r"^(?:set|change|adjust)\s+(?:asr\s+)?throttle\s+cycle(?:\s*(?:to|at|=))?"
+            r"\s*(\d{1,4})\s*(?:ms|millisecond|milliseconds)?\s*$",
+            cleaned,
+        )
+        if asr_cycle_match:
+            return {"asr_llm_throttle_cycle_ms": int(asr_cycle_match.group(1))}
+
+        return None
+
+    def _save_watchdog_cpu_tuneables(updates: dict):
+        if not isinstance(updates, dict) or not updates:
+            return False, "No tuneable updates provided."
+
+        state_path = _watchdog_state_abs()
+        state = _load_json_object(
+            state_path,
+            {
+                "version": 2,
+                "updated_at": "",
+                "services": {},
+                "cpu_throttle": {},
+            },
+        )
+        if not isinstance(state, dict):
+            state = {"version": 2, "updated_at": "", "services": {}, "cpu_throttle": {}}
+
+        cpu = state.get("cpu_throttle", {})
+        if not isinstance(cpu, dict):
+            cpu = {}
+        cpu_defaults = {
+            "governor": "ondemand",
+            "min_khz": 1600000,
+            "max_khz": 1800000,
+            "over_voltage_delta_uv": -25000,
+            "auto_apply": False,
+            "asr_llm_throttle_enable": True,
+            "asr_llm_throttle_percent": 65,
+            "asr_llm_throttle_cycle_ms": 320,
+        }
+        for key, value in cpu_defaults.items():
+            if key not in cpu:
+                cpu[key] = value
+        for key, value in updates.items():
+            cpu[key] = value
+
+        min_khz = max(CPU_MIN_KHZ_MIN, min(CPU_MIN_KHZ_MAX, int(cpu.get("min_khz", 1600000) or 1600000)))
+        max_khz = max(CPU_MAX_KHZ_MIN, min(CPU_MAX_KHZ_MAX, int(cpu.get("max_khz", 1800000) or 1800000)))
+        if min_khz > max_khz:
+            min_khz, max_khz = max_khz, min_khz
+        cpu["min_khz"] = int(min_khz)
+        cpu["max_khz"] = int(max_khz)
+
+        cpu["over_voltage_delta_uv"] = int(
+            max(
+                OVER_VOLTAGE_DELTA_UV_MIN,
+                min(
+                    OVER_VOLTAGE_DELTA_UV_MAX,
+                    int(cpu.get("over_voltage_delta_uv", -25000) or -25000),
+                ),
+            )
+        )
+        cpu["asr_llm_throttle_enable"] = bool(cpu.get("asr_llm_throttle_enable", True))
+        cpu["asr_llm_throttle_percent"] = int(
+            max(0, min(95, int(cpu.get("asr_llm_throttle_percent", 65) or 65)))
+        )
+        cpu["asr_llm_throttle_cycle_ms"] = int(
+            max(80, min(2000, int(cpu.get("asr_llm_throttle_cycle_ms", 320) or 320)))
+        )
+
+        state["cpu_throttle"] = cpu
+        state["version"] = int(state.get("version", 2) or 2)
+        state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        saved = _write_json_object(state_path, state)
+        if not saved:
+            return False, "I could not save watchdog tuneables."
+
+        summary = (
+            f"CPU tuneables saved. min {cpu['min_khz']} max {cpu['max_khz']} "
+            f"undervolt {cpu['over_voltage_delta_uv']}."
+        )
+        return True, summary
+
+    def _handle_voice_tool_command(user_message: str):
+        thinking_toggle = _parse_thinking_toggle_command(user_message)
+        if thinking_toggle is not None:
+            changed = _set_thinking_enabled(thinking_toggle)
+            state_text = "On" if thinking_toggle else "Off"
+            response = f"Turned Thinking {state_text}" if changed else f"Thinking already {state_text}"
+            return True, response, "thinking_toggle"
+
+        volume_cmd = _parse_tts_volume_command(user_message)
+        if volume_cmd is not None:
+            ok, response = _set_tts_volume_percent(int(volume_cmd.get("percent", TTS_VOLUME_DEFAULT_PERCENT)))
+            detail = "tts_volume_set" if ok else "tts_volume_error"
+            return True, response, detail
+
+        cpu_updates = _parse_watchdog_tuneable_command(user_message)
+        if cpu_updates is not None:
+            ok, response = _save_watchdog_cpu_tuneables(cpu_updates)
+            detail = "watchdog_tuneable_set" if ok else "watchdog_tuneable_error"
+            return True, response, detail
+
+        return False, "", ""
 
     MODEL_SWITCH_TIMEOUT_SECONDS = 45.0
     CONFIG_WATCH_INTERVAL_SECONDS = 0.75
@@ -1665,22 +1944,18 @@ else:
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
             _emit_pipeline_event("asr", "captured", text=user_message, detail=f"source={addr[0]}")
 
-            thinking_toggle = _parse_thinking_toggle_command(user_message)
-            if thinking_toggle is not None:
-                changed = _set_thinking_enabled(thinking_toggle)
-                state_text = "On" if thinking_toggle else "Off"
-                response_content = f"Turned Thinking {state_text}"
-                if not changed:
-                    response_content = f"Thinking already {state_text}"
+            tool_handled, tool_response, tool_detail = _handle_voice_tool_command(user_message)
+            if tool_handled:
+                response_content = str(tool_response or "").strip() or "Done."
                 update_history("user", user_message)
                 update_history("assistant", response_content)
                 tts_queue.put(response_content)
-                _emit_pipeline_event("llm", "toggle", text=user_message, detail=response_content)
-                _emit_pipeline_event("tts", "queued", text=response_content, detail="thinking toggle feedback")
+                _emit_pipeline_event("llm", "tool", text=user_message, detail=f"{tool_detail}: {response_content}")
+                _emit_pipeline_event("tts", "queued", text=response_content, detail=f"{tool_detail} feedback")
                 try:
                     client_sock.sendall(response_content.encode("utf-8"))
                 except Exception as send_exc:
-                    logging.error(f"ClientHandler: Failed to send thinking toggle response: {send_exc}")
+                    logging.error(f"ClientHandler: Failed to send tool response: {send_exc}")
                 return
 
             switch_request = _parse_model_switch_request(user_message)

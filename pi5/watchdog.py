@@ -114,6 +114,7 @@ SERVICE_LINK_REFRESH_SECONDS = 15.0
 SERVICE_LINK_HTTP_TIMEOUT_SECONDS = 1.2
 SERVICE_SESSION_REFRESH_SAFETY_SECONDS = 12.0
 PIPELINE_OBS_POLL_SECONDS = 1.2
+STATE_EXTERNAL_CPU_RELOAD_INTERVAL_SECONDS = 0.8
 DIRECT_LAUNCH_SERVICE_IDS = (
     "tts_output",
     "llm_bridge",
@@ -393,6 +394,8 @@ class WatchdogManager:
             float(os.environ.get("WATCHDOG_PIPELINE_OBS_POLL_SECONDS", PIPELINE_OBS_POLL_SECONDS)),
         )
         self._pipeline_stage_state: Dict[str, str] = {"asr": "idle", "llm": "idle", "tts": "idle"}
+        self._state_file_last_mtime = 0.0
+        self._state_file_external_last_poll_at = 0.0
         self._lan_ip = self._detect_lan_ip()
         self.repo_dir = pathlib.Path(
             os.environ.get("WATCHDOG_REPO_DIR", str((self.base_dir / "EGG_repo").resolve()))
@@ -918,12 +921,21 @@ class WatchdogManager:
 
     def _load_desired_state(self) -> Dict[str, bool]:
         if not self.state_file.exists():
+            self._state_file_last_mtime = 0.0
             return {}
         try:
             payload = json.loads(self.state_file.read_text(encoding="utf-8"))
         except Exception as exc:
             self._log(f"[WARN] Failed to read watchdog state: {exc}")
+            try:
+                self._state_file_last_mtime = float(self.state_file.stat().st_mtime)
+            except Exception:
+                self._state_file_last_mtime = 0.0
             return {}
+        try:
+            self._state_file_last_mtime = float(self.state_file.stat().st_mtime)
+        except Exception:
+            self._state_file_last_mtime = 0.0
 
         if isinstance(payload, dict):
             raw_services = payload.get("services", payload)
@@ -971,13 +983,62 @@ class WatchdogManager:
         try:
             tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             tmp_path.replace(self.state_file)
-        except Exception as exc:
-            self._log(f"[WARN] Failed to persist watchdog state: {exc}")
             try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
+                self._state_file_last_mtime = float(self.state_file.stat().st_mtime)
             except Exception:
                 pass
+        except Exception as exc:
+            self._log(f"[WARN] Failed to persist watchdog state: {exc}")
+
+    def _maybe_reload_external_cpu_throttle(self, now: float):
+        if (now - float(self._state_file_external_last_poll_at or 0.0)) < float(
+            STATE_EXTERNAL_CPU_RELOAD_INTERVAL_SECONDS
+        ):
+            return
+        self._state_file_external_last_poll_at = now
+
+        if not self.state_file.exists():
+            return
+        try:
+            mtime = float(self.state_file.stat().st_mtime)
+        except Exception:
+            return
+        if mtime <= float(self._state_file_last_mtime or 0.0):
+            return
+        self._state_file_last_mtime = mtime
+
+        try:
+            payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        cpu_payload = payload.get("cpu_throttle", None)
+        if not isinstance(cpu_payload, dict):
+            return
+
+        tracked_keys = (
+            "governor",
+            "min_khz",
+            "max_khz",
+            "over_voltage_delta_uv",
+            "auto_apply",
+            "asr_llm_throttle_enable",
+            "asr_llm_throttle_percent",
+            "asr_llm_throttle_cycle_ms",
+        )
+        previous = {key: self._cpu_throttle.get(key) for key in tracked_keys}
+        self._apply_loaded_cpu_throttle(cpu_payload)
+        current = {key: self._cpu_throttle.get(key) for key in tracked_keys}
+        if previous == current:
+            return
+
+        ok, detail = self._apply_cpu_throttle_settings()
+        self._cpu_throttle_last_apply = detail
+        if ok:
+            self._log(f"[CPU] External tuneables applied: {detail}")
+        else:
+            self._log(f"[WARN] External CPU tuneables apply failed: {detail}")
 
     # ------------------------------------------------------------------
     # Watchdog self-update helpers
@@ -3184,6 +3245,7 @@ class WatchdogManager:
                     runtime = self.runtime_by_id[svc.service_id]
                     self._sync_single_service(svc, runtime, now)
                 self._update_resource_usage(now)
+                self._maybe_reload_external_cpu_throttle(now)
                 self._apply_asr_llm_throttle(now)
             self._poll_pipeline_observability(now)
             self._poll_for_auto_update()

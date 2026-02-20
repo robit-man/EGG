@@ -48,7 +48,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
 - `output.py`, `model_to_tts.py`, `run_asr_stream.py`, `run_ollama_service.py`, `run_voice_server.py`: direct watchdog-managed background services
   - `model_to_tts.py` chunks responses on punctuation for rapid TTS playback (instead of waiting for full sentences only)
-  - voice commands: `turn thinking on/off`; `switch model ...` with numbered confirmation flow
+  - voice commands include a tool-command stack: thinking toggle, model switching, watchdog tuneables, and TTS volume control
   - dashboard model changes are hot-reloaded and preempt active inference; next ASR prompt runs on the new model
 - `run_asr_stream.py`: Whisper stream -> LLM bridge
 - `run_voice_server.py`: Docker voice server wrapper
@@ -94,6 +94,22 @@ From the dashboard you can:
 
 Voice tool toggle:
 - saying `turn thinking on` or `turn thinking off` to the LLM bridge flips mode and sends immediate TTS feedback (`Turned Thinking On/Off`).
+
+Voice tool commands (LLM bridge):
+- `turn thinking on` / `turn thinking off`
+- `switch model ...` (with numbered follow-up confirmation)
+- `set cpu min to 1600000`
+- `set cpu max to 1800000`
+- `set cpu range 1600000 to 1800000`
+- `set undervolt to -25000`
+- `set over voltage delta to -25000`
+- `turn asr throttle on` / `turn asr throttle off`
+- `set asr throttle percent to 65`
+- `set asr throttle cycle to 320 ms`
+- `set tts volume to 70 percent`
+- `set tts volume to 7` (maps `1..10` to `10%..100%`)
+- `volume 1` through `volume 10`
+- watchdog tuneable commands update `.watchdog_runtime/service_state.json`; running watchdog applies them automatically
 
 ## Installation and Runtime
 

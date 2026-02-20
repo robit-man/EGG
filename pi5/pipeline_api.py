@@ -25,12 +25,58 @@ from urllib.parse import urlsplit
 PIPELINE_VENV_DIR_NAME = "pipeline_api_venv"
 CONFIG_PATH = "pipeline_api_config.json"
 LLM_BRIDGE_CONFIG_PATH = "llm_bridge_config.json"
+LLM_TOOL_CATALOG = [
+    {
+        "key": "thinking_toggle",
+        "label": "Thinking Toggle",
+        "description": "Voice command: turn thinking on/off",
+    },
+    {
+        "key": "battery_context_toggle",
+        "label": "Battery Context Toggle",
+        "description": "Voice command: turn battery context on/off",
+    },
+    {
+        "key": "battery_state_query",
+        "label": "Battery State Query",
+        "description": "Voice command: battery voltage / battery percent",
+    },
+    {
+        "key": "network_ssid_query",
+        "label": "Network SSID Query",
+        "description": "Voice command: what is the current ssid",
+    },
+    {
+        "key": "restart_system",
+        "label": "Restart System",
+        "description": "Voice command: restart (with yes/no confirmation)",
+    },
+    {
+        "key": "tts_volume",
+        "label": "TTS Volume",
+        "description": "Voice command: volume one / volume ten percent",
+    },
+    {
+        "key": "watchdog_tuneables",
+        "label": "Watchdog Tuneables",
+        "description": "Voice command: set cpu/asr throttle tuneables",
+    },
+    {
+        "key": "model_switch",
+        "label": "Model Switch",
+        "description": "Voice command: switch model ...",
+    },
+]
+DEFAULT_LLM_TOOL_VISIBILITY = {entry["key"]: True for entry in LLM_TOOL_CATALOG}
 DEFAULT_LLM_BRIDGE_CONFIG = {
     "model": "granite4:350m",
     "stream": True,
     "thinking_enabled": False,
     "max_history_messages": 3,
     "ollama_url": "http://127.0.0.1:11434/api/chat",
+    "tool_fallback_enabled": True,
+    "tool_visibility": dict(DEFAULT_LLM_TOOL_VISIBILITY),
+    "asr_leading_bracket_gate_enabled": True,
 }
 
 
@@ -177,6 +223,27 @@ def _as_bool(value, default: bool = False) -> bool:
     if value is None:
         return bool(default)
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _normalize_llm_tool_visibility(value: Any) -> Dict[str, bool]:
+    merged = dict(DEFAULT_LLM_TOOL_VISIBILITY)
+    if isinstance(value, dict):
+        for key in list(merged.keys()):
+            if key in value:
+                merged[key] = _as_bool(value.get(key), default=bool(merged[key]))
+    return merged
+
+
+def _tool_catalog_payload() -> List[Dict[str, str]]:
+    return [
+        {
+            "key": str(item.get("key") or "").strip(),
+            "label": str(item.get("label") or "").strip(),
+            "description": str(item.get("description") or "").strip(),
+        }
+        for item in LLM_TOOL_CATALOG
+        if str(item.get("key") or "").strip()
+    ]
 
 
 def _as_int(value, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
@@ -353,6 +420,7 @@ def _load_llm_bridge_config() -> Dict[str, Any]:
     merged = json.loads(json.dumps(DEFAULT_LLM_BRIDGE_CONFIG))
     path = _llm_bridge_config_file()
     if not os.path.exists(path):
+        merged["tool_visibility"] = _normalize_llm_tool_visibility(merged.get("tool_visibility", {}))
         return merged
     try:
         with open(path, "r", encoding="utf-8") as fp:
@@ -361,6 +429,7 @@ def _load_llm_bridge_config() -> Dict[str, Any]:
             merged.update(loaded)
     except Exception:
         pass
+    merged["tool_visibility"] = _normalize_llm_tool_visibility(merged.get("tool_visibility", {}))
     return merged
 
 
@@ -590,6 +659,20 @@ def _llm_config_payload(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     ollama_url = str(llm_config.get("ollama_url", DEFAULT_LLM_BRIDGE_CONFIG["ollama_url"])).strip() or str(
         DEFAULT_LLM_BRIDGE_CONFIG["ollama_url"]
     )
+    system_message = str(llm_config.get("system", "") or "")
+    tool_fallback_enabled = _as_bool(
+        llm_config.get("tool_fallback_enabled", DEFAULT_LLM_BRIDGE_CONFIG.get("tool_fallback_enabled", True)),
+        default=bool(DEFAULT_LLM_BRIDGE_CONFIG.get("tool_fallback_enabled", True)),
+    )
+    asr_leading_bracket_gate_enabled = _as_bool(
+        llm_config.get(
+            "asr_leading_bracket_gate_enabled",
+            DEFAULT_LLM_BRIDGE_CONFIG.get("asr_leading_bracket_gate_enabled", True),
+        ),
+        default=bool(DEFAULT_LLM_BRIDGE_CONFIG.get("asr_leading_bracket_gate_enabled", True)),
+    )
+    tool_visibility = _normalize_llm_tool_visibility(llm_config.get("tool_visibility", {}))
+    visible_tools = [item["key"] for item in _tool_catalog_payload() if _as_bool(tool_visibility.get(item["key"]), True)]
     models, ollama_base_url, model_error = _fetch_ollama_models(llm_config)
     return {
         "model": model,
@@ -597,6 +680,12 @@ def _llm_config_payload(llm_config: Dict[str, Any]) -> Dict[str, Any]:
         "thinking_enabled": thinking_enabled,
         "max_history_messages": max_history_messages,
         "ollama_url": ollama_url,
+        "system": system_message,
+        "tool_fallback_enabled": tool_fallback_enabled,
+        "asr_leading_bracket_gate_enabled": asr_leading_bracket_gate_enabled,
+        "tool_catalog": _tool_catalog_payload(),
+        "tool_visibility": tool_visibility,
+        "visible_tools": visible_tools,
         "ollama_base_url": ollama_base_url,
         "available_models": models,
         "model_installed": model in set(models),
@@ -1105,16 +1194,22 @@ def _llm_dashboard_html(session_key: str) -> str:
       margin-bottom: 4px;
       font-weight: 600;
     }
-    input, select, button {
+    input, select, textarea, button {
       border-radius: 8px;
       border: 1px solid var(--line);
       padding: 9px 10px;
       font-size: 0.93rem;
     }
-    input, select {
+    input, select, textarea {
       width: 100%;
       background: var(--subpanel);
       color: var(--text);
+    }
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+      font-family: Consolas, "Courier New", monospace;
+      line-height: 1.28;
     }
     button {
       background: var(--accent);
@@ -1195,6 +1290,33 @@ def _llm_dashboard_html(session_key: str) -> str:
       color: var(--muted);
       font-size: 0.84rem;
     }
+    .tool-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .tool-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--subpanel);
+      padding: 8px;
+    }
+    .tool-item label {
+      margin: 0;
+      font-size: 0.84rem;
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .tool-item .desc {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.77rem;
+      line-height: 1.25;
+    }
   </style>
 </head>
 <body>
@@ -1230,6 +1352,10 @@ def _llm_dashboard_html(session_key: str) -> str:
           <div>Stream</div><div id="cfgStream">-</div>
           <div>Thinking</div><div id="cfgThinking">-</div>
           <div>Max History</div><div id="cfgHistory">-</div>
+          <div>ASR Bracket Gate</div><div id="cfgBracketGate">-</div>
+          <div>Tool Fallback</div><div id="cfgToolFallback">-</div>
+          <div>Visible Tools</div><div id="cfgVisibleTools">-</div>
+          <div>System Chars</div><div id="cfgSystemChars">-</div>
           <div>Ollama URL</div><div id="cfgOllama" class="mono">-</div>
           <div>Ollama Base</div><div id="cfgOllamaBase" class="mono">-</div>
         </div>
@@ -1273,6 +1399,30 @@ def _llm_dashboard_html(session_key: str) -> str:
         </div>
         <div id="pullSummary" class="status" style="overflow: auto; margin-top: 8px;"></div>
       </div>
+
+      <div class="card">
+        <h2>System Prompt + Tools</h2>
+        <label for="systemMessage">System Message</label>
+        <textarea id="systemMessage" class="mono" placeholder="LLM system prompt"></textarea>
+        <div class="row" style="margin-top: 8px;">
+          <div style="flex: 1 1 160px;">
+            <label for="toolFallbackFlag">Tool Fallback</label>
+            <select id="toolFallbackFlag">
+              <option value="true">on</option>
+              <option value="false">off</option>
+            </select>
+          </div>
+          <div style="flex: 1 1 180px;">
+            <label for="asrBracketGateFlag">ASR Leading [ Gate</label>
+            <select id="asrBracketGateFlag">
+              <option value="true">on</option>
+              <option value="false">off</option>
+            </select>
+          </div>
+        </div>
+        <label style="margin-top: 10px;">Visible Tools</label>
+        <div id="toolToggles" class="tool-grid"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -1305,6 +1455,7 @@ def _llm_dashboard_html(session_key: str) -> str:
     const initialSessionKey = __SESSION_KEY_JSON__;
     let sessionKey = initialSessionKey || localStorage.getItem("egg_session_key") || "";
     let refreshTimer = null;
+    let lastConfig = {};
 
     const els = {
       sessionKey: document.getElementById("sessionKey"),
@@ -1316,12 +1467,20 @@ def _llm_dashboard_html(session_key: str) -> str:
       cfgStream: document.getElementById("cfgStream"),
       cfgThinking: document.getElementById("cfgThinking"),
       cfgHistory: document.getElementById("cfgHistory"),
+      cfgBracketGate: document.getElementById("cfgBracketGate"),
+      cfgToolFallback: document.getElementById("cfgToolFallback"),
+      cfgVisibleTools: document.getElementById("cfgVisibleTools"),
+      cfgSystemChars: document.getElementById("cfgSystemChars"),
       cfgOllama: document.getElementById("cfgOllama"),
       cfgOllamaBase: document.getElementById("cfgOllamaBase"),
       modelSelect: document.getElementById("modelSelect"),
       streamFlag: document.getElementById("streamFlag"),
       thinkingFlag: document.getElementById("thinkingFlag"),
       maxHistory: document.getElementById("maxHistory"),
+      systemMessage: document.getElementById("systemMessage"),
+      toolFallbackFlag: document.getElementById("toolFallbackFlag"),
+      asrBracketGateFlag: document.getElementById("asrBracketGateFlag"),
+      toolToggles: document.getElementById("toolToggles"),
       saveConfig: document.getElementById("saveConfig"),
       reloadModels: document.getElementById("reloadModels"),
       pullName: document.getElementById("pullName"),
@@ -1397,6 +1556,55 @@ def _llm_dashboard_html(session_key: str) -> str:
       }
     }
 
+    function renderToolToggles(catalog, visibility) {
+      const list = Array.isArray(catalog) ? catalog : [];
+      const map = (visibility && typeof visibility === "object") ? visibility : {};
+      els.toolToggles.innerHTML = "";
+      if (!list.length) {
+        const div = document.createElement("div");
+        div.className = "muted";
+        div.textContent = "No tool catalog available.";
+        els.toolToggles.appendChild(div);
+        return;
+      }
+      for (const item of list) {
+        const key = String((item && item.key) || "").trim();
+        if (!key) continue;
+        const labelText = String((item && item.label) || key).trim();
+        const description = String((item && item.description) || "").trim();
+        const wrapper = document.createElement("div");
+        wrapper.className = "tool-item";
+        const label = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !!map[key];
+        cb.dataset.toolKey = key;
+        label.appendChild(cb);
+        const textNode = document.createElement("span");
+        textNode.textContent = labelText;
+        label.appendChild(textNode);
+        wrapper.appendChild(label);
+        if (description) {
+          const desc = document.createElement("div");
+          desc.className = "desc";
+          desc.textContent = description;
+          wrapper.appendChild(desc);
+        }
+        els.toolToggles.appendChild(wrapper);
+      }
+    }
+
+    function collectToolVisibility() {
+      const map = {};
+      const boxes = els.toolToggles.querySelectorAll("input[type='checkbox'][data-tool-key]");
+      boxes.forEach((box) => {
+        const key = String(box.dataset.toolKey || "").trim();
+        if (!key) return;
+        map[key] = !!box.checked;
+      });
+      return map;
+    }
+
     function renderPullStatus(data) {
       const state = data || {};
       const status = String(state.status || "idle");
@@ -1428,15 +1636,26 @@ def _llm_dashboard_html(session_key: str) -> str:
     async function loadConfig() {
       const payload = await fetchJson("/llm/config");
       const cfg = payload.config || {};
+      lastConfig = cfg;
       els.cfgModel.textContent = cfg.model || "-";
       els.cfgStream.textContent = String(cfg.stream);
       els.cfgThinking.textContent = cfg.thinking_enabled ? "on" : "off";
       els.cfgHistory.textContent = String(cfg.max_history_messages);
+      els.cfgBracketGate.textContent = cfg.asr_leading_bracket_gate_enabled ? "on" : "off";
+      els.cfgToolFallback.textContent = cfg.tool_fallback_enabled ? "on" : "off";
+      const visibleTools = Array.isArray(cfg.visible_tools) ? cfg.visible_tools : [];
+      els.cfgVisibleTools.textContent = visibleTools.length ? visibleTools.join(", ") : "(none)";
+      const systemText = String(cfg.system || "");
+      els.cfgSystemChars.textContent = String(systemText.length);
       els.cfgOllama.textContent = cfg.ollama_url || "-";
       els.cfgOllamaBase.textContent = cfg.ollama_base_url || "-";
       els.streamFlag.value = String(!!cfg.stream);
       els.thinkingFlag.value = String(!!cfg.thinking_enabled);
       els.maxHistory.value = String(cfg.max_history_messages ?? 0);
+      els.systemMessage.value = systemText;
+      els.toolFallbackFlag.value = String(!!cfg.tool_fallback_enabled);
+      els.asrBracketGateFlag.value = String(!!cfg.asr_leading_bracket_gate_enabled);
+      renderToolToggles(cfg.tool_catalog || [], cfg.tool_visibility || {});
       if (cfg.model && !els.pullName.value) {
         els.pullName.value = cfg.model;
       }
@@ -1545,12 +1764,17 @@ def _llm_dashboard_html(session_key: str) -> str:
     });
 
     els.saveConfig.addEventListener("click", async () => {
-      const model = String(els.modelSelect.value || "").trim();
+      const model = String(els.modelSelect.value || lastConfig.model || "").trim();
       const stream = String(els.streamFlag.value || "true").toLowerCase() === "true";
       const thinkingEnabled = String(els.thinkingFlag.value || "false").toLowerCase() === "true";
-      const maxHistory = Number(els.maxHistory.value || 0);
+      const maxHistoryRaw = Number(els.maxHistory.value || 0);
+      const maxHistory = Number.isFinite(maxHistoryRaw) ? maxHistoryRaw : Number(lastConfig.max_history_messages || 0);
+      const system = String(els.systemMessage.value || "");
+      const toolFallbackEnabled = String(els.toolFallbackFlag.value || "true").toLowerCase() === "true";
+      const asrBracketGateEnabled = String(els.asrBracketGateFlag.value || "true").toLowerCase() === "true";
+      const toolVisibility = collectToolVisibility();
       if (!model) {
-        setTopStatus("Select a model before saving.", "error");
+        setTopStatus("Model is required before saving.", "error");
         return;
       }
       try {
@@ -1562,6 +1786,10 @@ def _llm_dashboard_html(session_key: str) -> str:
             stream,
             thinking_enabled: thinkingEnabled,
             max_history_messages: maxHistory,
+            system,
+            tool_fallback_enabled: toolFallbackEnabled,
+            asr_leading_bracket_gate_enabled: asrBracketGateEnabled,
+            tool_visibility: toolVisibility,
             auto_pull_missing: true,
           },
         });
@@ -1834,6 +2062,35 @@ def llm_config():
         if not ollama_url_value:
             return jsonify({"status": "error", "message": "ollama_url cannot be empty"}), 400
         updates["ollama_url"] = ollama_url_value
+
+    if "system" in data:
+        system_value = str(data.get("system", ""))
+        if len(system_value) > 32000:
+            return jsonify({"status": "error", "message": "system is too large"}), 400
+        updates["system"] = system_value
+
+    if "tool_fallback_enabled" in data:
+        updates["tool_fallback_enabled"] = _as_bool(
+            data.get("tool_fallback_enabled"),
+            default=bool(loaded.get("tool_fallback_enabled", DEFAULT_LLM_BRIDGE_CONFIG.get("tool_fallback_enabled", True))),
+        )
+
+    if "asr_leading_bracket_gate_enabled" in data:
+        updates["asr_leading_bracket_gate_enabled"] = _as_bool(
+            data.get("asr_leading_bracket_gate_enabled"),
+            default=bool(
+                loaded.get(
+                    "asr_leading_bracket_gate_enabled",
+                    DEFAULT_LLM_BRIDGE_CONFIG.get("asr_leading_bracket_gate_enabled", True),
+                )
+            ),
+        )
+
+    if "tool_visibility" in data:
+        raw_visibility = data.get("tool_visibility")
+        if raw_visibility is not None and not isinstance(raw_visibility, dict):
+            return jsonify({"status": "error", "message": "tool_visibility must be an object"}), 400
+        updates["tool_visibility"] = _normalize_llm_tool_visibility(raw_visibility or {})
 
     if not updates:
         return jsonify({"status": "error", "message": "No supported config fields provided"}), 400

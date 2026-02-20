@@ -20,6 +20,17 @@ PSUTIL_AVAILABLE = False
 ALSAAUDIO_AVAILABLE = False
 SMBUS_AVAILABLE = False
 
+DEFAULT_VISIBLE_TOOLS = {
+    "thinking_toggle": True,
+    "battery_context_toggle": True,
+    "battery_state_query": True,
+    "network_ssid_query": True,
+    "restart_system": True,
+    "tts_volume": True,
+    "watchdog_tuneables": True,
+    "model_switch": True,
+}
+
 #############################################
 # Utility Functions
 #############################################
@@ -217,6 +228,8 @@ else:
         "interrupt_on_new_prompt": False,
         "offline_mode": False,  # Default offline mode
         "tool_fallback_enabled": True,
+        "tool_visibility": dict(DEFAULT_VISIBLE_TOOLS),
+        "asr_leading_bracket_gate_enabled": True,
         "battery_context_enabled": True,
         "battery_i2c_bus": 1,
         "battery_i2c_addr": 67,  # 0x43 UPS HAT D default
@@ -364,6 +377,28 @@ else:
             current = next_val
         current[parts[-1]] = value
 
+    def _normalize_tool_visibility(value):
+        def _to_bool(raw, default_val):
+            if isinstance(raw, bool):
+                return raw
+            if raw is None:
+                return bool(default_val)
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+        base = dict(DEFAULT_VISIBLE_TOOLS)
+        if isinstance(value, dict):
+            for key in list(base.keys()):
+                if key in value:
+                    base[key] = _to_bool(value.get(key), bool(base[key]))
+        return base
+
+    def _tool_visible(tool_key: str, default: bool = True) -> bool:
+        visibility = _normalize_tool_visibility(CONFIG.get("tool_visibility", {}))
+        key = str(tool_key or "").strip()
+        if not key:
+            return bool(default)
+        return _as_bool(visibility.get(key, default), default=default)
+
     def apply_audio_router_overrides(config):
         try:
             with open(AUDIO_ROUTER_CONFIG_PATH, "r", encoding="utf-8") as fp:
@@ -438,6 +473,7 @@ else:
     CONFIG = apply_pipeline_api_overrides(CONFIG)
     if not isinstance(CONFIG.get("options"), dict):
         CONFIG["options"] = {}
+    CONFIG["tool_visibility"] = _normalize_tool_visibility(CONFIG.get("tool_visibility", {}))
     CONFIG_LOCK = threading.Lock()
     CONFIG_FILE_ABS = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_PATH)
     _config_mtime = 0.0
@@ -763,6 +799,7 @@ else:
             loaded = apply_pipeline_api_overrides(loaded)
             if not isinstance(loaded.get("options"), dict):
                 loaded["options"] = {}
+            loaded["tool_visibility"] = _normalize_tool_visibility(loaded.get("tool_visibility", {}))
             previous_model = str(CONFIG.get("model", "")).strip()
             with CONFIG_LOCK:
                 CONFIG.clear()
@@ -806,7 +843,8 @@ else:
                 "Reloaded llm bridge config: "
                 f"model={CONFIG.get('model')} "
                 f"thinking={'on' if _as_bool(CONFIG.get('thinking_enabled'), False) else 'off'} "
-                f"battery_ctx={'on' if _as_bool(CONFIG.get('battery_context_enabled'), True) else 'off'}"
+                f"battery_ctx={'on' if _as_bool(CONFIG.get('battery_context_enabled'), True) else 'off'} "
+                f"bracket_gate={'on' if _as_bool(CONFIG.get('asr_leading_bracket_gate_enabled'), True) else 'off'}"
             )
         except Exception as exc:
             logging.warning(f"Config hot-reload failed: {exc}")
@@ -830,6 +868,18 @@ else:
             current = _as_bool(CONFIG.get("battery_context_enabled", True), True)
             if current != target:
                 CONFIG["battery_context_enabled"] = target
+                changed = True
+        if changed:
+            _persist_config()
+        return changed
+
+    def _set_asr_bracket_gate_enabled(enabled: bool):
+        target = bool(enabled)
+        changed = False
+        with CONFIG_LOCK:
+            current = _as_bool(CONFIG.get("asr_leading_bracket_gate_enabled", True), True)
+            if current != target:
+                CONFIG["asr_leading_bracket_gate_enabled"] = target
                 changed = True
         if changed:
             _persist_config()
@@ -867,6 +917,31 @@ else:
             return True
         if re.search(r"\bdisable battery(?: context| status)?\b", cleaned):
             return False
+        return None
+
+    def _parse_asr_bracket_gate_toggle_command(text: str):
+        cleaned = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"[.!?]+$", "", cleaned).strip()
+        patterns_on = (
+            r"\bturn(?: the)? asr(?: bracket)? gate on\b",
+            r"\bturn(?: the)? bracket gate on\b",
+            r"\benable asr(?: bracket)? gate\b",
+            r"\benable bracket gate\b",
+        )
+        patterns_off = (
+            r"\bturn(?: the)? asr(?: bracket)? gate off\b",
+            r"\bturn(?: the)? bracket gate off\b",
+            r"\bdisable asr(?: bracket)? gate\b",
+            r"\bdisable bracket gate\b",
+        )
+        for pattern in patterns_on:
+            if re.search(pattern, cleaned):
+                return True
+        for pattern in patterns_off:
+            if re.search(pattern, cleaned):
+                return False
         return None
 
     def _runtime_base_dir():
@@ -1341,6 +1416,8 @@ else:
         payload = args if isinstance(args, dict) else {}
 
         if tool in ("set_tts_volume", "tts_volume"):
+            if not _tool_visible("tts_volume", True):
+                return True, "TTS volume tool is disabled.", "tts_volume_disabled"
             percent = payload.get("percent")
             if percent is None:
                 percent = payload.get("value")
@@ -1356,6 +1433,8 @@ else:
             return ok, response, "tts_volume_set" if ok else "tts_volume_error"
 
         if tool in ("set_thinking", "thinking"):
+            if not _tool_visible("thinking_toggle", True):
+                return True, "Thinking toggle tool is disabled.", "thinking_disabled"
             enabled = _as_bool(payload.get("enabled", False), False)
             changed = _set_thinking_enabled(bool(enabled))
             state_text = "On" if enabled else "Off"
@@ -1363,6 +1442,8 @@ else:
             return True, response, "thinking_toggle"
 
         if tool in ("set_battery_context", "battery_context"):
+            if not _tool_visible("battery_context_toggle", True):
+                return True, "Battery context toggle tool is disabled.", "battery_context_disabled"
             enabled = _as_bool(payload.get("enabled", True), True)
             changed = _set_battery_context_enabled(bool(enabled))
             state_text = "On" if enabled else "Off"
@@ -1370,21 +1451,29 @@ else:
             return True, response, "battery_context_toggle"
 
         if tool in ("get_battery_state", "battery_state", "battery_voltage"):
+            if not _tool_visible("battery_state_query", True):
+                return True, "Battery state tool is disabled.", "battery_state_disabled"
             return True, _describe_battery_state(force_refresh=True), "battery_state"
 
         if tool in ("get_network_ssid", "network_ssid", "ssid"):
+            if not _tool_visible("network_ssid_query", True):
+                return True, "Network SSID tool is disabled.", "network_ssid_disabled"
             ssid = _read_current_ssid()
             if ssid:
                 return True, f"Connected WiFi SSID is {ssid}.", "network_ssid"
             return True, "I cannot determine the current WiFi SSID right now.", "network_ssid"
 
         if tool in ("restart_request", "restart_system"):
+            if not _tool_visible("restart_system", True):
+                return True, "Restart tool is disabled.", "restart_disabled"
             if not _is_main_process():
                 return True, "Please say restart to confirm system reboot.", "restart_prompt"
             _set_pending_restart()
             return True, "Do you want to restart now? Please say yes or no.", "restart_prompt"
 
         if tool in ("restart_confirm",):
+            if not _tool_visible("restart_system", True):
+                return True, "Restart tool is disabled.", "restart_disabled"
             if not _is_main_process():
                 return True, "Please say restart to confirm system reboot.", "restart_prompt"
             confirm = _as_bool(payload.get("confirm", False), False)
@@ -1398,7 +1487,7 @@ else:
         return False, f"Unknown tool {tool}.", "tool_unknown"
 
     def _handle_voice_tool_command(user_message: str):
-        if _pending_restart_active():
+        if _tool_visible("restart_system", True) and _pending_restart_active():
             decision = _parse_yes_no_value(user_message)
             if decision is None:
                 return True, "Please say yes or no. Restart is pending.", "restart_prompt"
@@ -1409,18 +1498,21 @@ else:
             _clear_pending_restart()
             return True, "Restart cancelled.", "restart_cancelled"
 
-        if _parse_restart_request_command(user_message):
+        if _tool_visible("restart_system", True) and _parse_restart_request_command(user_message):
             _set_pending_restart()
             return True, "Do you want to restart now? Please say yes or no.", "restart_prompt"
 
-        thinking_toggle = _parse_thinking_toggle_command(user_message)
+        if _tool_visible("thinking_toggle", True):
+            thinking_toggle = _parse_thinking_toggle_command(user_message)
+        else:
+            thinking_toggle = None
         if thinking_toggle is not None:
             changed = _set_thinking_enabled(thinking_toggle)
             state_text = "On" if thinking_toggle else "Off"
             response = f"Turned Thinking {state_text}" if changed else f"Thinking already {state_text}"
             return True, response, "thinking_toggle"
 
-        battery_toggle = _parse_battery_context_toggle_command(user_message)
+        battery_toggle = _parse_battery_context_toggle_command(user_message) if _tool_visible("battery_context_toggle", True) else None
         if battery_toggle is not None:
             changed = _set_battery_context_enabled(battery_toggle)
             state_text = "On" if battery_toggle else "Off"
@@ -1431,22 +1523,29 @@ else:
             )
             return True, response, "battery_context_toggle"
 
-        if _parse_battery_query_command(user_message):
+        bracket_toggle = _parse_asr_bracket_gate_toggle_command(user_message)
+        if bracket_toggle is not None:
+            changed = _set_asr_bracket_gate_enabled(bracket_toggle)
+            state_text = "On" if bracket_toggle else "Off"
+            response = f"Turned ASR Bracket Gate {state_text}" if changed else f"ASR Bracket Gate already {state_text}"
+            return True, response, "asr_bracket_gate_toggle"
+
+        if _tool_visible("battery_state_query", True) and _parse_battery_query_command(user_message):
             return True, _describe_battery_state(force_refresh=True), "battery_state"
 
-        if _parse_network_ssid_command(user_message):
+        if _tool_visible("network_ssid_query", True) and _parse_network_ssid_command(user_message):
             ssid = _read_current_ssid()
             if ssid:
                 return True, f"Connected WiFi SSID is {ssid}.", "network_ssid"
             return True, "I cannot determine the current WiFi SSID right now.", "network_ssid"
 
-        volume_cmd = _parse_tts_volume_command(user_message)
+        volume_cmd = _parse_tts_volume_command(user_message) if _tool_visible("tts_volume", True) else None
         if volume_cmd is not None:
             ok, response = _set_tts_volume_percent(int(volume_cmd.get("percent", TTS_VOLUME_DEFAULT_PERCENT)))
             detail = "tts_volume_set" if ok else "tts_volume_error"
             return True, response, detail
 
-        cpu_updates = _parse_watchdog_tuneable_command(user_message)
+        cpu_updates = _parse_watchdog_tuneable_command(user_message) if _tool_visible("watchdog_tuneables", True) else None
         if cpu_updates is not None:
             ok, response = _save_watchdog_cpu_tuneables(cpu_updates)
             detail = "watchdog_tuneable_set" if ok else "watchdog_tuneable_error"
@@ -1460,6 +1559,21 @@ else:
     def _tool_fallback_enabled():
         with CONFIG_LOCK:
             return _as_bool(CONFIG.get("tool_fallback_enabled", True), True)
+
+    def _enabled_tool_fallback_names():
+        mapping = [
+            ("set_tts_volume", "tts_volume"),
+            ("set_thinking", "thinking_toggle"),
+            ("set_battery_context", "battery_context_toggle"),
+            ("get_battery_state", "battery_state_query"),
+            ("get_network_ssid", "network_ssid_query"),
+            ("restart_request", "restart_system"),
+        ]
+        enabled = []
+        for tool_name, key in mapping:
+            if _tool_visible(key, True):
+                enabled.append(tool_name)
+        return enabled
 
     def _decode_llm_tool_payload(raw_json: str):
         try:
@@ -2004,13 +2118,27 @@ else:
             if battery_line:
                 system_prompt = f"{system_prompt}\n\n{battery_line}"
             if _as_bool(CONFIG.get("tool_fallback_enabled", True), True):
-                system_prompt = (
-                    f"{system_prompt}\n\n"
-                    "Tool fallback format: if a direct control action is requested, respond with "
-                    "<tool>{\"tool\":\"set_tts_volume\",\"args\":{\"percent\":70}}</tool> "
-                    "and optional short plain text. Tools: set_tts_volume, set_thinking, "
-                    "set_battery_context, get_battery_state, get_network_ssid, restart_request."
-                )
+                enabled_tools = _enabled_tool_fallback_names()
+                if enabled_tools:
+                    tools_text = ", ".join(enabled_tools)
+                    sample_tool = enabled_tools[0]
+                    sample_args = {
+                        "set_tts_volume": {"percent": 70},
+                        "set_thinking": {"enabled": True},
+                        "set_battery_context": {"enabled": True},
+                        "get_battery_state": {},
+                        "get_network_ssid": {},
+                        "restart_request": {},
+                    }.get(sample_tool, {})
+                    sample_json = json.dumps({"tool": sample_tool, "args": sample_args}, separators=(",", ":"))
+                    fallback_line = (
+                        "Tool fallback format: if a direct control action is requested, respond with "
+                        f"<tool>{sample_json}</tool> and optional short plain text. "
+                        f"Enabled tools: {tools_text}."
+                    )
+                else:
+                    fallback_line = "Tool fallback is enabled, but no tools are currently visible."
+                system_prompt = f"{system_prompt}\n\n{fallback_line}"
             messages.append({"role": "system", "content": system_prompt})
         
         # Truncate history_messages based on max_history_messages
@@ -2632,6 +2760,22 @@ else:
                 logging.debug(f"ClientHandler: Empty prompt from {addr}, ignoring.")
                 client_sock.close()
                 return
+            if _as_bool(CONFIG.get("asr_leading_bracket_gate_enabled", True), True):
+                trimmed = str(user_message or "").lstrip()
+                if trimmed.startswith("["):
+                    logging.info(f"ClientHandler: Dropped bracket-gated ASR text from {addr}: {user_message}")
+                    _emit_pipeline_event(
+                        "asr",
+                        "ignored",
+                        text=user_message,
+                        detail="leading_bracket_gate",
+                        level="warn",
+                    )
+                    try:
+                        client_sock.sendall("ASR input ignored by bracket gate.".encode("utf-8"))
+                    except Exception:
+                        pass
+                    return
             logging.info(f"ClientHandler: Received prompt from {addr}: {user_message}")
             _emit_pipeline_event("asr", "captured", text=user_message, detail=f"source={addr[0]}")
 
@@ -2649,7 +2793,7 @@ else:
                     logging.error(f"ClientHandler: Failed to send tool response: {send_exc}")
                 return
 
-            switch_request = _parse_model_switch_request(user_message)
+            switch_request = _parse_model_switch_request(user_message) if _tool_visible("model_switch", True) else None
             if switch_request is not None:
                 available_models = _list_ollama_models()
                 if not available_models:
@@ -2735,7 +2879,12 @@ else:
                     logging.error(f"ClientHandler: Failed to send model switch response: {send_exc}")
                 return
 
-            pending_model_switch = _get_pending_model_switch()
+            if _tool_visible("model_switch", True):
+                pending_model_switch = _get_pending_model_switch()
+            else:
+                if _get_pending_model_switch() is not None:
+                    _clear_pending_model_switch()
+                pending_model_switch = None
             if pending_model_switch:
                 options = list(pending_model_switch.get("options") or [])
                 choice_index = _parse_model_choice_index(user_message, len(options))

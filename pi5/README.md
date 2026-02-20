@@ -93,6 +93,8 @@ From the dashboard you can:
 - view available Ollama models
 - set and save the default `llm_bridge_config.json` model (default: `qwen3:0.6b`)
 - toggle `thinking` on/off (default: off)
+- view and edit the active LLM `system` message
+- toggle tool fallback, toggle per-tool visibility, and toggle ASR leading-`[` gate
 - pull new Ollama models and watch pull status/logs
 
 Voice tool toggle:
@@ -117,9 +119,12 @@ Voice tool commands (LLM bridge):
 - `set tts volume to 7` (maps `1..10` to `10%..100%`)
 - `volume 1` through `volume 10`
 - spoken number forms are supported (examples: `volume one`, `volume ten percent`)
+- `turn asr bracket gate on` / `turn asr bracket gate off`
 - watchdog tuneable commands update `.watchdog_runtime/service_state.json`; running watchdog applies them automatically
 - battery context defaults and settings live in `pi5/piper/llm_bridge_config.json`:
   - `tool_fallback_enabled` (LLM may emit `<tool>{...}</tool>` fallback calls; tool markup is filtered from TTS playback)
+  - `tool_visibility` (per-tool enable/disable map shown in LLM dashboard)
+  - `asr_leading_bracket_gate_enabled` (default `true`; drops ASR prompts starting with `[` before LLM inference)
   - `battery_context_enabled`
   - `battery_i2c_bus` (default `1`)
   - `battery_i2c_addr` (default `67`, i.e. `0x43`)

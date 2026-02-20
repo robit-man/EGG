@@ -1397,12 +1397,13 @@ else:
         )
         return True, summary
 
-    RESTART_CONFIRM_TIMEOUT_SECONDS = 30.0
+    RESTART_CONFIRM_TIMEOUT_SECONDS = 60.0
     _restart_lock = threading.Lock()
     _pending_restart = {
         "active": False,
         "created_at": 0.0,
         "expires_at": 0.0,
+        "expired_at": 0.0,
     }
 
     def _set_pending_restart():
@@ -1411,23 +1412,30 @@ else:
             _pending_restart["active"] = True
             _pending_restart["created_at"] = now
             _pending_restart["expires_at"] = now + RESTART_CONFIRM_TIMEOUT_SECONDS
+            _pending_restart["expired_at"] = 0.0
 
     def _clear_pending_restart():
         with _restart_lock:
             _pending_restart["active"] = False
             _pending_restart["created_at"] = 0.0
             _pending_restart["expires_at"] = 0.0
+            _pending_restart["expired_at"] = 0.0
 
-    def _pending_restart_active():
+    def _pending_restart_status():
         with _restart_lock:
             if not bool(_pending_restart.get("active")):
-                return False
-            if float(_pending_restart.get("expires_at") or 0.0) <= time.time():
+                return "inactive"
+            now = time.time()
+            if float(_pending_restart.get("expires_at") or 0.0) <= now:
                 _pending_restart["active"] = False
                 _pending_restart["created_at"] = 0.0
                 _pending_restart["expires_at"] = 0.0
-                return False
-            return True
+                _pending_restart["expired_at"] = now
+                return "expired"
+            return "active"
+
+    def _pending_restart_active():
+        return _pending_restart_status() == "active"
 
     def _schedule_system_restart(delay_seconds: float = 1.5):
         def _runner():
@@ -1549,7 +1557,11 @@ else:
             if not _is_main_process():
                 return True, "Please say restart to confirm system reboot.", "restart_prompt"
             _set_pending_restart()
-            return True, "Do you want to restart now? Please say yes or no.", "restart_prompt"
+            return (
+                True,
+                f"Do you want to restart now? Please say yes or no within {int(RESTART_CONFIRM_TIMEOUT_SECONDS)} seconds.",
+                "restart_prompt",
+            )
 
         if tool in ("restart_confirm",):
             if not _tool_visible("restart_system", True):
@@ -1558,6 +1570,8 @@ else:
                 return True, "Please say restart to confirm system reboot.", "restart_prompt"
             confirm = _as_bool(payload.get("confirm", False), False)
             if confirm:
+                if not _pending_restart_active():
+                    return True, "No restart is pending. Say restart first.", "restart_prompt"
                 _clear_pending_restart()
                 _schedule_system_restart()
                 return True, "Restarting now.", "restart_confirmed"
@@ -1567,20 +1581,32 @@ else:
         return False, f"Unknown tool {tool}.", "tool_unknown"
 
     def _handle_voice_tool_command(user_message: str):
-        if _tool_visible("restart_system", True) and _pending_restart_active():
-            decision = _parse_yes_no_value(user_message)
-            if decision is None:
-                return True, "Please say yes or no. Restart is pending.", "restart_prompt"
-            if decision:
+        if _tool_visible("restart_system", True):
+            restart_status = _pending_restart_status()
+            if restart_status == "active":
+                decision = _parse_yes_no_value(user_message)
+                if decision is None:
+                    return True, "Please say yes or no. Restart is pending.", "restart_prompt"
+                if decision:
+                    _clear_pending_restart()
+                    _schedule_system_restart()
+                    return True, "Restarting now.", "restart_confirmed"
                 _clear_pending_restart()
-                _schedule_system_restart()
-                return True, "Restarting now.", "restart_confirmed"
-            _clear_pending_restart()
-            return True, "Restart cancelled.", "restart_cancelled"
+                return True, "Restart cancelled.", "restart_cancelled"
+
+            stray_decision = _parse_yes_no_value(user_message)
+            if stray_decision is not None:
+                if restart_status == "expired":
+                    return True, "Restart confirmation timed out. Say restart again.", "restart_timeout"
+                return True, "No restart is pending. Say restart if you want to reboot.", "restart_prompt"
 
         if _tool_visible("restart_system", True) and _parse_restart_request_command(user_message):
             _set_pending_restart()
-            return True, "Do you want to restart now? Please say yes or no.", "restart_prompt"
+            return (
+                True,
+                f"Do you want to restart now? Please say yes or no within {int(RESTART_CONFIRM_TIMEOUT_SECONDS)} seconds.",
+                "restart_prompt",
+            )
 
         if _tool_visible("thinking_toggle", True):
             thinking_toggle = _parse_thinking_toggle_command(user_message)

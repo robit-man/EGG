@@ -3398,7 +3398,7 @@ class WatchdogManager:
         if sid == "pipeline_api":
             return "/llm/dashboard"
         if sid == "camera_router":
-            return "/list"
+            return "/dashboard"
         if sid == "audio_router":
             return "/"
         if sid == "ollama":

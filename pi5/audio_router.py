@@ -2198,34 +2198,57 @@ def index():
         --line: #333;
         --text: #f4f7ff;
         --muted: #a8b6cc;
-        --ok: #00d08a;
-        --warn: #ffcc66;
+        --accent: #ffae00;
+        --ok: #ffae00;
+        --warn: #ffae00;
       }}
-      * {{ box-sizing: border-box; }}
-      body {{ font-family: monospace; background: var(--bg); color: var(--text); margin: 0; }}
+      * {{
+        box-sizing: border-box;
+        font-family: Consolas, "Courier New", monospace;
+      }}
+      body {{ background: var(--bg); color: var(--text); margin: 0; }}
       .wrap {{ max-width: 980px; margin: 0 auto; padding: 1rem; }}
+      .grid {{
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }}
+      .grid > .card:only-child,
+      .grid > .card:last-child:nth-child(odd) {{
+        grid-column: 1 / -1;
+      }}
       .card {{ border: 1px solid var(--line); border-radius: 12px; padding: 1rem; background: var(--panel); }}
       .ok {{ color: var(--ok); }}
       .warn {{ color: var(--warn); }}
       .muted {{ color: var(--muted); }}
-      code {{ color: var(--warn); }}
+      code {{ color: var(--accent); }}
       .chip {{
         display: inline-block;
-        border: 1px solid var(--line);
+        border: 1px solid rgba(255, 174, 0, 0.45);
         border-radius: 999px;
         padding: 2px 8px;
-        background: #222;
-        color: var(--muted);
+        background: #1f1a0e;
+        color: var(--accent);
+      }}
+      @media (max-width: 960px) {{
+        .grid {{
+          grid-template-columns: 1fr;
+        }}
+        .grid > .card:last-child:nth-child(odd) {{
+          grid-column: auto;
+        }}
       }}
     </style>
   </head>
   <body>
     <div class=\"wrap\">
-      <div class=\"card\">
-        <h2 style=\"margin-top:0\">Audio Router</h2>
-        <p class=\"muted\">Service is running.</p>
-        <p>Use <code>/auth</code> then <code>/list</code>, <code>/llm/prompt</code>, <code>/tts/speak</code>, and <code>/webrtc/offer</code>.</p>
-        <p class=\"warn\">WebRTC: <span class=\"chip\">{'enabled' if WEBRTC_AVAILABLE else 'disabled'}</span> | Audio backend: <span class=\"chip\">{'enabled' if AUDIO_BACKEND_AVAILABLE else 'disabled'}</span></p>
+      <div class=\"grid\">
+        <div class=\"card\">
+          <h2 style=\"margin-top:0\">Audio Router</h2>
+          <p class=\"muted\">Service is running.</p>
+          <p>Use <code>/auth</code> then <code>/list</code>, <code>/llm/prompt</code>, <code>/tts/speak</code>, and <code>/webrtc/offer</code>.</p>
+          <p class=\"warn\">WebRTC: <span class=\"chip\">{'enabled' if WEBRTC_AVAILABLE else 'disabled'}</span> | Audio backend: <span class=\"chip\">{'enabled' if AUDIO_BACKEND_AVAILABLE else 'disabled'}</span></p>
+        </div>
       </div>
     </div>
   </body>
@@ -2612,20 +2635,33 @@ def webrtc_player():
         --line: #333;
         --text: #f4f7ff;
         --muted: #a8b6cc;
-        --ok: #00d08a;
+        --accent: #ffae00;
+        --ok: #ffae00;
         --err: #ff6666;
       }
-      * { box-sizing: border-box; }
-      body { margin: 0; background: var(--bg); color: var(--text); font-family: monospace; }
+      * {
+        box-sizing: border-box;
+        font-family: Consolas, "Courier New", monospace;
+      }
+      body { margin: 0; background: var(--bg); color: var(--text); }
       .wrap { max-width: 900px; margin: 0 auto; padding: 1rem; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .grid > .panel:only-child,
+      .grid > .panel:last-child:nth-child(odd) {
+        grid-column: 1 / -1;
+      }
       .panel { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 1rem; }
       .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
       button {
         padding: 0.5rem 0.8rem;
-        border: 1px solid var(--line);
+        border: 1px solid var(--accent);
         border-radius: 8px;
-        background: #222;
-        color: var(--text);
+        background: var(--accent);
+        color: #121212;
       }
       audio {
         width: 100%;
@@ -2635,19 +2671,29 @@ def webrtc_player():
         background: #161616;
       }
       .meta { color: var(--muted); }
+      @media (max-width: 960px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .grid > .panel:last-child:nth-child(odd) {
+          grid-column: auto;
+        }
+      }
     </style>
   </head>
   <body>
     <div class=\"wrap\">
-      <div class=\"panel\">
-        <h2 style=\"margin-top:0\">Audio Router WebRTC</h2>
-        <p class=\"meta\">Click Start, allow microphone access, and keep this page open.</p>
-        <div class=\"row\">
-          <button id=\"startBtn\" type=\"button\">Start</button>
-          <button id=\"stopBtn\" type=\"button\">Stop</button>
+      <div class=\"grid\">
+        <div class=\"panel\">
+          <h2 style=\"margin-top:0\">Audio Router WebRTC</h2>
+          <p class=\"meta\">Click Start, allow microphone access, and keep this page open.</p>
+          <div class=\"row\">
+            <button id=\"startBtn\" type=\"button\">Start</button>
+            <button id=\"stopBtn\" type=\"button\">Stop</button>
+          </div>
+          <audio id=\"remoteAudio\" autoplay controls playsinline></audio>
+          <p id=\"status\" class=\"meta\">Idle</p>
         </div>
-        <audio id=\"remoteAudio\" autoplay controls playsinline></audio>
-        <p id=\"status\" class=\"meta\">Idle</p>
       </div>
     </div>
     <script>
@@ -2660,7 +2706,7 @@ def webrtc_player():
 
       function setStatus(msg, isError = false) {
         statusEl.textContent = String(msg || "");
-        statusEl.style.color = isError ? "#ff6666" : "#ffffff";
+        statusEl.style.color = isError ? "#ff6666" : "#ffae00";
       }
 
       async function stopBridge() {

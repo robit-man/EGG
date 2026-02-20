@@ -1914,16 +1914,19 @@ ROUTER_DASHBOARD_HTML = """
         --text: #f4f7ff;
         --muted: #9aa9c0;
         --line: #333;
-        --ok: #00d08a;
-        --warn: #ffcc66;
+        --accent: #ffae00;
+        --ok: #ffae00;
+        --warn: #ffae00;
         --err: #ff6666;
       }
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+        font-family: Consolas, "Courier New", monospace;
+      }
       body {
         margin: 0;
         background: var(--bg);
         color: var(--text);
-        font-family: monospace;
       }
       .wrap {
         max-width: 1280px;
@@ -1952,7 +1955,7 @@ ROUTER_DASHBOARD_HTML = """
       .ok { color: var(--ok); }
       .warn { color: var(--warn); }
       .bad { color: var(--err); }
-      code { color: var(--warn); }
+      code { color: var(--accent); }
       .addr {
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -1966,9 +1969,9 @@ ROUTER_DASHBOARD_HTML = """
         cursor: pointer;
       }
       button {
-        background: #222;
-        color: var(--text);
-        border: 1px solid var(--line);
+        background: var(--accent);
+        color: #121212;
+        border: 1px solid var(--accent);
         border-radius: 8px;
         padding: 0.5rem;
         cursor: pointer;
@@ -1998,8 +2001,12 @@ ROUTER_DASHBOARD_HTML = """
       }
       .cards {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 0.75rem;
+      }
+      .cards > .card:only-child,
+      .cards > .card:last-child:nth-child(odd) {
+        grid-column: 1 / -1;
       }
       .card {
         background: var(--panel);
@@ -2060,6 +2067,8 @@ ROUTER_DASHBOARD_HTML = """
       .log-row:last-child { border-bottom: 0; }
       @media (max-width: 980px) {
         .split { grid-template-columns: 1fr; }
+        .cards { grid-template-columns: 1fr; }
+        .cards > .card:last-child:nth-child(odd) { grid-column: auto; }
       }
     </style>
   </head>
@@ -2104,7 +2113,7 @@ ROUTER_DASHBOARD_HTML = """
       <div class="panel">
         <div class="row" style="justify-content:space-between">
           <h3 style="margin:0">Utilization</h3>
-          <span class="small muted">Inbound: <span style="color:#00d08a">green</span> | Outbound: <span style="color:#5ca8ff">blue</span></span>
+          <span class="small muted">Inbound: <span style="color:#ffae00">amber</span> | Outbound: <span style="color:#ffd27a">amber light</span></span>
         </div>
         <canvas id="rateChart" width="1200" height="220"></canvas>
       </div>
@@ -2292,8 +2301,8 @@ ROUTER_DASHBOARD_HTML = """
           ctx.stroke();
         }
 
-        drawSeries("#00d08a", "inbound_bps");
-        drawSeries("#5ca8ff", "outbound_bps");
+        drawSeries("#ffae00", "inbound_bps");
+        drawSeries("#ffd27a", "outbound_bps");
 
         ctx.fillStyle = "#d0d0d0";
         ctx.font = "12px monospace";

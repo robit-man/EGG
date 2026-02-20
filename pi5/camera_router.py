@@ -677,6 +677,92 @@ def _find_feed(camera_id: str) -> Optional[CameraFeed]:
         return feeds.get(camera_id)
 
 
+def _persist_camera_enabled(camera_id: str, enabled: bool) -> bool:
+    global config
+    camera_key = str(camera_id or "").strip()
+    if not camera_key:
+        return False
+    rows = _get_nested(config, "camera_router.cameras", [])
+    if not isinstance(rows, list):
+        rows = []
+    found = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id", "")).strip() != camera_key:
+            continue
+        row["enabled"] = bool(enabled)
+        found = True
+        break
+    if not found:
+        return False
+    _set_nested(config, "camera_router.cameras", rows)
+    try:
+        save_config(config)
+    except Exception:
+        return False
+    return True
+
+
+def _set_camera_enabled(camera_id: str, enabled: bool) -> Tuple[bool, str, Optional[dict]]:
+    camera_key = str(camera_id or "").strip()
+    if not camera_key:
+        return False, "camera_id is required", None
+    with service_lock:
+        feed = feeds.get(camera_key)
+        if feed is None:
+            return False, f"Camera '{camera_key}' not found", None
+        feed.cfg.enabled = bool(enabled)
+        if enabled:
+            if not feed.is_running():
+                try:
+                    feed.start()
+                except Exception as exc:
+                    with feed._lock:
+                        feed._last_error = f"Enable failed: {exc}"
+                    return False, str(exc), feed.status()
+            row = feed.status()
+        else:
+            try:
+                feed.stop()
+            except Exception as exc:
+                with feed._lock:
+                    feed._last_error = f"Disable failed: {exc}"
+                return False, str(exc), feed.status()
+            with feed._lock:
+                feed._frame_jpeg = None
+                feed._last_frame_at = 0.0
+                feed._last_error = "Disabled by dashboard"
+            row = feed.status()
+    persisted = _persist_camera_enabled(camera_key, bool(enabled))
+    if not persisted:
+        return False, "Camera state changed but config save failed", row
+    return True, ("camera enabled" if enabled else "camera disabled"), row
+
+
+def _camera_row_with_urls(row: dict, publish_base: str, local_base: str, lan_base: str, tunnel_base: str) -> dict:
+    camera_id = str(row.get("id", "")).strip()
+    return {
+        **row,
+        "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
+        "jpeg_url": f"{publish_base}/jpeg/{camera_id}",
+        "video_url": f"{publish_base}/video/{camera_id}",
+        "mjpeg_url": f"{publish_base}/mjpeg/{camera_id}",
+        "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
+        "local_jpeg_url": f"{local_base}/jpeg/{camera_id}",
+        "local_video_url": f"{local_base}/video/{camera_id}",
+        "local_mjpeg_url": f"{local_base}/mjpeg/{camera_id}",
+        "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
+        "lan_jpeg_url": f"{lan_base}/jpeg/{camera_id}" if lan_base else "",
+        "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
+        "lan_mjpeg_url": f"{lan_base}/mjpeg/{camera_id}" if lan_base else "",
+        "tunnel_snapshot_url": f"{tunnel_base}/snapshot/{camera_id}" if tunnel_base else "",
+        "tunnel_jpeg_url": f"{tunnel_base}/jpeg/{camera_id}" if tunnel_base else "",
+        "tunnel_video_url": f"{tunnel_base}/video/{camera_id}" if tunnel_base else "",
+        "tunnel_mjpeg_url": f"{tunnel_base}/mjpeg/{camera_id}" if tunnel_base else "",
+    }
+
+
 def _prune_expired_sessions(now: Optional[float] = None) -> int:
     current = float(now if now is not None else time.time())
     removed = 0
@@ -983,6 +1069,493 @@ def _tunnel_payload() -> dict:
     }
 
 
+def _camera_dashboard_html(session_key: str) -> str:
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EGG Camera Dashboard</title>
+  <style>
+    :root {
+      --bg: #111;
+      --panel: #1b1b1b;
+      --subpanel: #161616;
+      --text: #f4f7ff;
+      --muted: #9aa9c0;
+      --line: #333;
+      --accent: #ffae00;
+      --ok: #ffae00;
+      --warn: #ffae00;
+      --err: #ff6666;
+    }
+    * {
+      box-sizing: border-box;
+      font-family: Consolas, "Courier New", monospace;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .grid > .card:only-child,
+    .grid > .card:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      padding: 12px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .space-between {
+      justify-content: space-between;
+    }
+    .title {
+      margin: 0;
+      font-size: 1.16rem;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .ok {
+      color: var(--ok);
+    }
+    .warn {
+      color: var(--warn);
+    }
+    .err {
+      color: var(--err);
+    }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 10px;
+      background: #222;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .mono {
+      font-family: Consolas, "Courier New", monospace;
+    }
+    input, button, a.btn {
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      font-size: 0.92rem;
+    }
+    input {
+      width: 100%;
+      background: var(--subpanel);
+      color: var(--text);
+    }
+    button, a.btn {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #121212;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+    }
+    button.secondary, a.btn.secondary {
+      background: #1f1a0e;
+      border-color: rgba(255, 174, 0, 0.45);
+      color: var(--accent);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status-line {
+      min-height: 1.2em;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    .camera-title {
+      margin: 0;
+      font-size: 1.01rem;
+    }
+    .preview {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--subpanel);
+      overflow: hidden;
+      margin-top: 8px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .preview img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .preview .placeholder {
+      color: var(--muted);
+      font-size: 0.84rem;
+      text-align: center;
+      padding: 8px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 4px 8px;
+      font-size: 0.83rem;
+      margin-top: 6px;
+    }
+    .kv .k {
+      color: var(--muted);
+    }
+    @media (max-width: 960px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      .grid > .card:last-child:nth-child(odd) {
+        grid-column: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="row space-between">
+        <h1 class="title">Camera Router Dashboard</h1>
+        <span id="readyPill" class="pill">loading</span>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <div style="flex: 2 1 320px;">
+          <input id="sessionKey" class="mono" placeholder="Paste session_key from /auth" />
+        </div>
+        <div style="flex: 1 1 180px; min-width: 160px;">
+          <button id="applySession" class="secondary" style="width: 100%;">Apply Session Key</button>
+        </div>
+        <div style="flex: 1 1 180px; min-width: 160px;">
+          <button id="refreshBtn" class="secondary" style="width: 100%;">Refresh</button>
+        </div>
+      </div>
+      <div id="topStatus" class="status-line" style="margin-top: 8px;"></div>
+      <div class="muted">Open this URL as <span class="mono">/dashboard?session_key=...</span> when auth is required.</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="kv">
+          <div class="k">Online</div><div id="sumOnline">-</div>
+          <div class="k">Total Cameras</div><div id="sumTotal">-</div>
+          <div class="k">Tunnel</div><div id="sumTunnel">-</div>
+          <div class="k">LAN Base</div><div id="sumLan" class="mono">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="cameraGrid" class="grid"></div>
+  </div>
+
+  <script>
+    const initialSessionKey = __SESSION_KEY_JSON__;
+    let sessionKey = initialSessionKey || localStorage.getItem("egg_session_key") || "";
+    let pollTimer = null;
+
+    const els = {
+      sessionKey: document.getElementById("sessionKey"),
+      applySession: document.getElementById("applySession"),
+      refreshBtn: document.getElementById("refreshBtn"),
+      topStatus: document.getElementById("topStatus"),
+      readyPill: document.getElementById("readyPill"),
+      sumOnline: document.getElementById("sumOnline"),
+      sumTotal: document.getElementById("sumTotal"),
+      sumTunnel: document.getElementById("sumTunnel"),
+      sumLan: document.getElementById("sumLan"),
+      cameraGrid: document.getElementById("cameraGrid"),
+    };
+
+    const cameraState = new Map();
+
+    function setTopStatus(msg, level) {
+      els.topStatus.textContent = String(msg || "");
+      els.topStatus.className = "status-line";
+      if (level === "error") els.topStatus.classList.add("err");
+      if (level === "ok") els.topStatus.classList.add("ok");
+      if (level === "warn") els.topStatus.classList.add("warn");
+    }
+
+    function withSession(url) {
+      if (!sessionKey) return url;
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}session_key=${encodeURIComponent(sessionKey)}`;
+    }
+
+    async function fetchJson(url, options = {}) {
+      const requestOptions = {
+        method: options.method || "GET",
+        headers: Object.assign({ "Accept": "application/json" }, options.headers || {}),
+      };
+      if (sessionKey) requestOptions.headers["X-Session-Key"] = sessionKey;
+      if (options.body !== undefined) {
+        requestOptions.headers["Content-Type"] = "application/json";
+        requestOptions.body = JSON.stringify(options.body);
+      }
+      const response = await fetch(withSession(url), requestOptions);
+      const bodyText = await response.text();
+      let data = {};
+      try {
+        data = bodyText ? JSON.parse(bodyText) : {};
+      } catch (_) {
+        data = { message: bodyText || "Invalid response" };
+      }
+      if (!response.ok) {
+        const msg = (data && (data.message || data.error)) || `${response.status} ${response.statusText}`;
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function fmtAge(seconds) {
+      const n = Number(seconds);
+      if (!Number.isFinite(n) || n < 0) return "-";
+      if (n < 1) return `${Math.round(n * 1000)}ms`;
+      if (n < 60) return `${n.toFixed(1)}s`;
+      return `${(n / 60).toFixed(1)}m`;
+    }
+
+    function safeId(value) {
+      return String(value || "").replace(/[^a-zA-Z0-9_-]/g, "_");
+    }
+
+    function ensureCameraCard(cam) {
+      const cameraId = String(cam.id || "");
+      const domId = `cam_${safeId(cameraId)}`;
+      let card = document.getElementById(domId);
+      if (!card) {
+        card = document.createElement("div");
+        card.id = domId;
+        card.className = "card";
+        card.innerHTML = `
+          <div class="row space-between">
+            <h3 class="camera-title mono"></h3>
+            <span class="pill cam-pill">-</span>
+          </div>
+          <div class="preview">
+            <img alt="camera stream" />
+            <div class="placeholder">Stream unavailable</div>
+          </div>
+          <div class="row">
+            <button class="btn-toggle">Toggle</button>
+            <button class="btn-recover secondary">Recover</button>
+            <a class="btn secondary btn-open" target="_blank" rel="noopener">Open Stream</a>
+          </div>
+          <div class="kv">
+            <div class="k">Enabled</div><div class="v-enabled">-</div>
+            <div class="k">Online</div><div class="v-online">-</div>
+            <div class="k">Backend</div><div class="v-backend mono">-</div>
+            <div class="k">Resolution</div><div class="v-resolution mono">-</div>
+            <div class="k">FPS</div><div class="v-fps">-</div>
+            <div class="k">Last Frame</div><div class="v-age">-</div>
+            <div class="k">Error</div><div class="v-error mono">-</div>
+          </div>
+        `;
+        els.cameraGrid.appendChild(card);
+      }
+      return card;
+    }
+
+    async function setCameraEnabled(cameraId, enabled) {
+      const idText = String(cameraId || "").trim();
+      if (!idText) return;
+      await fetchJson("/camera/config", {
+        method: "POST",
+        body: { camera_id: idText, enabled: !!enabled },
+      });
+    }
+
+    async function recoverCamera(cameraId) {
+      const idText = String(cameraId || "").trim();
+      if (!idText) return;
+      await fetchJson("/camera/recover", {
+        method: "POST",
+        body: { camera_id: idText, settle_ms: 250, reason: "dashboard_recover" },
+      });
+    }
+
+    function updateCameraCard(cam) {
+      const cameraId = String(cam.id || "");
+      const card = ensureCameraCard(cam);
+      card.dataset.cameraId = cameraId;
+      card.dataset.enabled = String(!!cam.enabled);
+      card.querySelector(".camera-title").textContent = `${cameraId} (idx ${cam.index})`;
+      const pill = card.querySelector(".cam-pill");
+      pill.textContent = cam.online ? "online" : "offline";
+      pill.className = `pill cam-pill ${cam.online ? "ok" : "warn"}`;
+      card.querySelector(".v-enabled").textContent = cam.enabled ? "yes" : "no";
+      card.querySelector(".v-online").textContent = cam.online ? "yes" : "no";
+      card.querySelector(".v-backend").textContent = String(cam.backend || "-");
+      card.querySelector(".v-resolution").textContent = `${cam.width || "-"}x${cam.height || "-"}`;
+      card.querySelector(".v-fps").textContent = String(cam.fps ?? "-");
+      card.querySelector(".v-age").textContent = fmtAge(cam.last_frame_age_seconds);
+      card.querySelector(".v-error").textContent = String(cam.last_error || "-");
+
+      const img = card.querySelector("img");
+      const placeholder = card.querySelector(".placeholder");
+      const streamUrl = withSession(`/mjpeg/${encodeURIComponent(cameraId)}`);
+      if (cam.enabled) {
+        if (!img.dataset.streamUrl || img.dataset.streamUrl !== streamUrl) {
+          img.dataset.streamUrl = streamUrl;
+          img.src = streamUrl;
+        }
+        img.style.display = "block";
+        placeholder.style.display = "none";
+      } else {
+        img.removeAttribute("src");
+        img.dataset.streamUrl = "";
+        img.style.display = "none";
+        placeholder.style.display = "block";
+        placeholder.textContent = "Camera disabled";
+      }
+
+      const openLink = card.querySelector(".btn-open");
+      openLink.href = withSession(`/video/${encodeURIComponent(cameraId)}`);
+
+      const toggleBtn = card.querySelector(".btn-toggle");
+      toggleBtn.textContent = cam.enabled ? "Disable" : "Enable";
+      toggleBtn.className = cam.enabled ? "btn-toggle secondary" : "btn-toggle";
+      toggleBtn.onclick = async () => {
+        toggleBtn.disabled = true;
+        try {
+          setTopStatus(`${cam.enabled ? "Disabling" : "Enabling"} ${cameraId}...`, "warn");
+          await setCameraEnabled(cameraId, !cam.enabled);
+          await loadDashboard();
+          setTopStatus(`${cameraId} ${cam.enabled ? "disabled" : "enabled"}.`, "ok");
+        } catch (err) {
+          setTopStatus(`Camera toggle failed: ${err.message}`, "error");
+        } finally {
+          toggleBtn.disabled = false;
+        }
+      };
+
+      const recoverBtn = card.querySelector(".btn-recover");
+      recoverBtn.onclick = async () => {
+        recoverBtn.disabled = true;
+        try {
+          setTopStatus(`Recovering ${cameraId}...`, "warn");
+          await recoverCamera(cameraId);
+          await loadDashboard();
+          setTopStatus(`Recovery requested for ${cameraId}.`, "ok");
+        } catch (err) {
+          setTopStatus(`Recover failed: ${err.message}`, "error");
+        } finally {
+          recoverBtn.disabled = false;
+        }
+      };
+    }
+
+    function renderCameras(cameras) {
+      const list = Array.isArray(cameras) ? cameras : [];
+      const seen = new Set();
+      list.forEach((cam) => {
+        const id = String(cam.id || "");
+        if (!id) return;
+        seen.add(`cam_${safeId(id)}`);
+        cameraState.set(id, cam);
+        updateCameraCard(cam);
+      });
+      const allCards = Array.from(els.cameraGrid.querySelectorAll(".card"));
+      allCards.forEach((card) => {
+        if (!seen.has(card.id)) {
+          card.remove();
+        }
+      });
+      if (!list.length) {
+        els.cameraGrid.innerHTML = '<div class="card"><div class="muted">No camera rows returned.</div></div>';
+      }
+    }
+
+    async function loadDashboard() {
+      const payload = await fetchJson("/list");
+      const cameras = payload.cameras || [];
+      const online = cameras.filter((row) => !!row.online).length;
+      els.sumOnline.textContent = `${online}`;
+      els.sumTotal.textContent = `${cameras.length}`;
+      const tunnel = payload.tunnel || {};
+      els.sumTunnel.textContent = String(tunnel.state || "inactive");
+      els.sumLan.textContent = String(payload.lan_base_url || "-");
+      renderCameras(cameras);
+      els.readyPill.textContent = "ready";
+      els.readyPill.className = "pill ok";
+      return payload;
+    }
+
+    async function refreshAll() {
+      try {
+        setTopStatus("Refreshing camera dashboard...", "warn");
+        await loadDashboard();
+        setTopStatus("Dashboard updated.", "ok");
+      } catch (err) {
+        els.readyPill.textContent = "error";
+        els.readyPill.className = "pill err";
+        setTopStatus(`Refresh failed: ${err.message}`, "error");
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        try {
+          await loadDashboard();
+        } catch (_) {}
+      }, 4000);
+    }
+
+    els.applySession.addEventListener("click", async () => {
+      sessionKey = String(els.sessionKey.value || "").trim();
+      if (sessionKey) {
+        localStorage.setItem("egg_session_key", sessionKey);
+        setTopStatus("Session key saved locally.", "ok");
+      } else {
+        localStorage.removeItem("egg_session_key");
+        setTopStatus("Session key cleared.", "warn");
+      }
+      await refreshAll();
+    });
+
+    els.refreshBtn.addEventListener("click", async () => {
+      await refreshAll();
+    });
+
+    (async () => {
+      els.sessionKey.value = sessionKey;
+      await refreshAll();
+      startPolling();
+    })();
+  </script>
+</body>
+</html>
+"""
+    return template.replace("__SESSION_KEY_JSON__", json.dumps(str(session_key or "")))
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(
@@ -990,10 +1563,12 @@ def index():
             "status": "ok",
             "service": "camera_router",
             "routes": {
+                "dashboard": "/dashboard",
                 "health": "/health",
                 "list": "/list",
                 "auth": "/auth",
                 "session_rotate": "/session/rotate",
+                "camera_config": "/camera/config",
                 "snapshot": "/snapshot/<camera_id>",
                 "jpeg": "/jpeg/<camera_id>",
                 "video": "/video/<camera_id>",
@@ -1004,6 +1579,13 @@ def index():
             },
         }
     )
+
+
+@app.route("/dashboard", methods=["GET"])
+@_auth_required
+def dashboard():
+    session_key = _get_session_key_from_request()
+    return Response(_camera_dashboard_html(session_key), mimetype="text/html")
 
 
 @app.route("/health", methods=["GET"])
@@ -1039,30 +1621,7 @@ def list_cameras():
     local_base, lan_base, publish_base = _endpoint_bases()
     tunnel = _tunnel_payload()
     tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
-    cameras = []
-    for row in rows:
-        camera_id = row.get("id", "")
-        cameras.append(
-            {
-                **row,
-                "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
-                "jpeg_url": f"{publish_base}/jpeg/{camera_id}",
-                "video_url": f"{publish_base}/video/{camera_id}",
-                "mjpeg_url": f"{publish_base}/mjpeg/{camera_id}",
-                "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
-                "local_jpeg_url": f"{local_base}/jpeg/{camera_id}",
-                "local_video_url": f"{local_base}/video/{camera_id}",
-                "local_mjpeg_url": f"{local_base}/mjpeg/{camera_id}",
-                "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
-                "lan_jpeg_url": f"{lan_base}/jpeg/{camera_id}" if lan_base else "",
-                "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
-                "lan_mjpeg_url": f"{lan_base}/mjpeg/{camera_id}" if lan_base else "",
-                "tunnel_snapshot_url": f"{tunnel_base}/snapshot/{camera_id}" if tunnel_base else "",
-                "tunnel_jpeg_url": f"{tunnel_base}/jpeg/{camera_id}" if tunnel_base else "",
-                "tunnel_video_url": f"{tunnel_base}/video/{camera_id}" if tunnel_base else "",
-                "tunnel_mjpeg_url": f"{tunnel_base}/mjpeg/{camera_id}" if tunnel_base else "",
-            }
-        )
+    cameras = [_camera_row_with_urls(row, publish_base, local_base, lan_base, tunnel_base) for row in rows]
     return jsonify(
         {
             "status": "success",
@@ -1080,8 +1639,10 @@ def list_cameras():
                 "mpegts": False,
             },
             "routes": {
+                "dashboard": "/dashboard",
                 "auth": "/auth",
                 "session_rotate": "/session/rotate",
+                "camera_config": "/camera/config",
                 "camera_recover": "/camera/recover",
                 "snapshot": "/snapshot/<camera_id>",
                 "jpeg": "/jpeg/<camera_id>",
@@ -1094,11 +1655,70 @@ def list_cameras():
                 "health_url": f"{tunnel_base}/health" if tunnel_base else "",
                 "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
                 "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+                "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
+                "camera_config_url": f"{tunnel_base}/camera/config" if tunnel_base else "",
                 "camera_recover_url": f"{tunnel_base}/camera/recover" if tunnel_base else "",
             },
             "cameras": cameras,
         }
     )
+
+
+@app.route("/camera/config", methods=["GET", "POST"])
+@_auth_required
+def camera_config():
+    if request.method == "GET":
+        rows = _status_rows()
+        local_base, lan_base, publish_base = _endpoint_bases()
+        tunnel = _tunnel_payload()
+        tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
+        cameras = [_camera_row_with_urls(row, publish_base, local_base, lan_base, tunnel_base) for row in rows]
+        return jsonify(
+            {
+                "status": "success",
+                "service": "camera_router",
+                "message": "Camera runtime config",
+                "base_url": publish_base,
+                "local_base_url": local_base,
+                "lan_base_url": lan_base,
+                "tunnel": tunnel,
+                "cameras": cameras,
+            }
+        )
+
+    data = request.get_json(silent=True) or {}
+    camera_id = str(data.get("camera_id", "")).strip()
+    if not camera_id:
+        return jsonify({"status": "error", "message": "camera_id is required"}), 400
+    if "enabled" not in data:
+        return jsonify({"status": "error", "message": "enabled is required"}), 400
+    enabled = _as_bool(data.get("enabled"), default=False)
+    ok, detail, row = _set_camera_enabled(camera_id, enabled)
+
+    local_base, lan_base, publish_base = _endpoint_bases()
+    tunnel = _tunnel_payload()
+    tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
+    payload_row = _camera_row_with_urls((row or {"id": camera_id}), publish_base, local_base, lan_base, tunnel_base)
+
+    if ok:
+        return jsonify(
+            {
+                "status": "success",
+                "service": "camera_router",
+                "message": detail,
+                "camera": payload_row,
+            }
+        )
+
+    status_code = 404 if "not found" in str(detail or "").lower() else 500
+    return jsonify(
+        {
+            "status": "error",
+            "service": "camera_router",
+            "message": detail,
+            "camera": payload_row,
+        }
+    ), status_code
 
 
 @app.route("/snapshot/<camera_id>", methods=["GET"])
@@ -1163,10 +1783,49 @@ def camera_recover():
     data = request.get_json(silent=True) or {}
     settle_ms = _as_int(data.get("settle_ms", 350), 350, minimum=0, maximum=5000)
     reason = str(data.get("reason", "")).strip()
+
+    requested_ids = []
+    single_id = str(data.get("camera_id", "")).strip()
+    if single_id:
+        requested_ids.append(single_id)
+    id_list = data.get("camera_ids", [])
+    if isinstance(id_list, list):
+        for value in id_list:
+            camera_id = str(value or "").strip()
+            if camera_id:
+                requested_ids.append(camera_id)
+    dedup_ids = []
+    seen = set()
+    for camera_id in requested_ids:
+        if camera_id in seen:
+            continue
+        seen.add(camera_id)
+        dedup_ids.append(camera_id)
+
+    missing_ids = []
     requested = []
     restart_results = []
     with service_lock:
-        values = list(feeds.values())
+        if dedup_ids:
+            values = []
+            for camera_id in dedup_ids:
+                feed = feeds.get(camera_id)
+                if feed is None:
+                    missing_ids.append(camera_id)
+                else:
+                    values.append(feed)
+        else:
+            values = list(feeds.values())
+    if dedup_ids and not values:
+        return jsonify(
+            {
+                "status": "error",
+                "service": "camera_router",
+                "message": "No requested cameras were found",
+                "requested": dedup_ids,
+                "missing": missing_ids,
+            }
+        ), 404
     for feed in values:
         ok, detail = feed.recover()
         requested.append(feed.cfg.camera_id)
@@ -1188,6 +1847,7 @@ def camera_recover():
             "message": "Recovery requested",
             "reason": reason,
             "requested": requested,
+            "missing": missing_ids,
             "results": restart_results,
             "after_online": int(online),
             "after_total": int(len(rows)),
@@ -1247,10 +1907,12 @@ def tunnel_info():
             "service": "camera_router",
             "message": message,
             "tunnel_url": tunnel_base,
+            "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
             "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
             "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
             "list_url": f"{tunnel_base}/list" if tunnel_base else "",
             "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+            "camera_config_url": f"{tunnel_base}/camera/config" if tunnel_base else "",
             "camera_recover_url": f"{tunnel_base}/camera/recover" if tunnel_base else "",
             "stale_tunnel_url": str(tunnel.get("stale_tunnel_url") or ""),
             "error": str(tunnel.get("error") or ""),
@@ -1265,31 +1927,7 @@ def router_info():
     tunnel = _tunnel_payload()
     tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
     rows = _status_rows()
-    camera_routes = []
-    for row in rows:
-        camera_id = row.get("id", "")
-        camera_routes.append(
-            {
-                "id": camera_id,
-                "snapshot_url": f"{publish_base}/snapshot/{camera_id}",
-                "jpeg_url": f"{publish_base}/jpeg/{camera_id}",
-                "video_url": f"{publish_base}/video/{camera_id}",
-                "mjpeg_url": f"{publish_base}/mjpeg/{camera_id}",
-                "local_snapshot_url": f"{local_base}/snapshot/{camera_id}",
-                "local_jpeg_url": f"{local_base}/jpeg/{camera_id}",
-                "local_video_url": f"{local_base}/video/{camera_id}",
-                "local_mjpeg_url": f"{local_base}/mjpeg/{camera_id}",
-                "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
-                "lan_jpeg_url": f"{lan_base}/jpeg/{camera_id}" if lan_base else "",
-                "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
-                "lan_mjpeg_url": f"{lan_base}/mjpeg/{camera_id}" if lan_base else "",
-                "tunnel_snapshot_url": f"{tunnel_base}/snapshot/{camera_id}" if tunnel_base else "",
-                "tunnel_jpeg_url": f"{tunnel_base}/jpeg/{camera_id}" if tunnel_base else "",
-                "tunnel_video_url": f"{tunnel_base}/video/{camera_id}" if tunnel_base else "",
-                "tunnel_mjpeg_url": f"{tunnel_base}/mjpeg/{camera_id}" if tunnel_base else "",
-                "online": bool(row.get("online")),
-            }
-        )
+    camera_routes = [_camera_row_with_urls(row, publish_base, local_base, lan_base, tunnel_base) for row in rows]
     return jsonify(
         {
             "status": "success",
@@ -1302,26 +1940,34 @@ def router_info():
                 "listen_port": listen_port,
                 "auth_url": f"{publish_base}/auth",
                 "session_rotate_url": f"{publish_base}/session/rotate",
+                "dashboard_url": f"{publish_base}/dashboard",
                 "list_url": f"{publish_base}/list",
                 "health_url": f"{publish_base}/health",
+                "camera_config_url": f"{publish_base}/camera/config",
                 "camera_recover_url": f"{publish_base}/camera/recover",
+                "local_dashboard_url": f"{local_base}/dashboard",
                 "local_list_url": f"{local_base}/list",
                 "local_health_url": f"{local_base}/health",
                 "local_auth_url": f"{local_base}/auth",
                 "local_session_rotate_url": f"{local_base}/session/rotate",
+                "local_camera_config_url": f"{local_base}/camera/config",
                 "local_camera_recover_url": f"{local_base}/camera/recover",
+                "lan_dashboard_url": f"{lan_base}/dashboard" if lan_base else "",
                 "lan_list_url": f"{lan_base}/list" if lan_base else "",
                 "lan_health_url": f"{lan_base}/health" if lan_base else "",
                 "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
                 "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
+                "lan_camera_config_url": f"{lan_base}/camera/config" if lan_base else "",
                 "lan_camera_recover_url": f"{lan_base}/camera/recover" if lan_base else "",
             },
             "tunnel": {
                 **tunnel,
+                "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
                 "list_url": f"{tunnel_base}/list" if tunnel_base else "",
                 "health_url": f"{tunnel_base}/health" if tunnel_base else "",
                 "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
                 "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+                "camera_config_url": f"{tunnel_base}/camera/config" if tunnel_base else "",
                 "camera_recover_url": f"{tunnel_base}/camera/recover" if tunnel_base else "",
             },
             "security": _security_payload(publish_base),
@@ -1334,8 +1980,10 @@ def router_info():
                 "mpegts": False,
             },
             "routes": {
+                "dashboard": "/dashboard",
                 "auth": "/auth",
                 "session_rotate": "/session/rotate",
+                "camera_config": "/camera/config",
                 "camera_recover": "/camera/recover",
                 "snapshot": "/snapshot/<camera_id>",
                 "jpeg": "/jpeg/<camera_id>",

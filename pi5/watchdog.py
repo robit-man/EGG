@@ -269,6 +269,7 @@ class WatchdogManager:
                 "Camera Router",
                 "camera/camera_dashboard.py",
                 args=("--no-curses", "--config-file", "../camera_router_config.json"),
+                launch_in_terminal=False,
                 health_mode="http",
                 health_port=8080,
                 health_path="/health",

@@ -45,6 +45,7 @@ DEFAULT_PASSWORD = "egg"
 DEFAULT_SESSION_TIMEOUT = 300
 DEFAULT_REQUIRE_AUTH = True
 DEFAULT_TUNNEL_URL_ENV = "EGG_CAMERA_TUNNEL_URL"
+CAMERA_LIFECYCLE_LOCK = threading.Lock()
 STREAM_PROFILE_OPTIONS = (
     {"pixel_format": "RGB", "width": 640, "height": 480, "fps": 15.0},
     {"pixel_format": "RGB", "width": 1280, "height": 720, "fps": 24.0},
@@ -951,6 +952,22 @@ def _normalized_tunnel(raw_tunnel) -> dict:
         "enable": _coerce_bool(tunnel.get("enable"), True),
         "auto_install_cloudflared": _coerce_bool(tunnel.get("auto_install_cloudflared"), False),
     }
+
+
+def runtime_config_signature(config: dict) -> tuple:
+    cfg = config if isinstance(config, dict) else {}
+    return (
+        str(cfg.get("run_mode") or ""),
+        str(cfg.get("model_family") or ""),
+        str(cfg.get("model_name") or ""),
+        int(_coerce_int(cfg.get("camera_index"), 0)),
+        int(_coerce_int(cfg.get("width"), 0)),
+        int(_coerce_int(cfg.get("height"), 0)),
+        int(_coerce_int(cfg.get("fps"), 0)),
+        json.dumps(cfg.get("camera_orientations", {}), sort_keys=True, separators=(",", ":")),
+        json.dumps(cfg.get("camera_enabled", {}), sort_keys=True, separators=(",", ":")),
+        json.dumps(cfg.get("camera_profiles", {}), sort_keys=True, separators=(",", ":")),
+    )
 
 
 def normalize_config(
@@ -1972,6 +1989,7 @@ class RuntimeController:
         self.session = new_session
         if old_session is not None:
             old_session.stop()
+            time.sleep(0.2)
         new_session.start()
 
     def start(self) -> None:
@@ -1997,10 +2015,12 @@ class RuntimeController:
         refresh_cameras: bool = False,
     ) -> dict:
         with self._lock:
+            previous_signature = runtime_config_signature(self.config)
             candidate = merge_config_patch(self._copy_config(), patch)
             if refresh_cameras:
                 self.camera_options = discover_csi_cameras()
             normalized = normalize_config(candidate, self.model_options, self.camera_options)
+            normalized_signature = runtime_config_signature(normalized)
 
             current_host = self.config.get("host")
             current_port = self.config.get("port")
@@ -2012,20 +2032,27 @@ class RuntimeController:
             self.config = normalized
             if save:
                 save_config(self.config_path, self.config)
-            if apply_now:
+            should_restart = (
+                self.session is None
+                or refresh_cameras
+                or normalized_signature != previous_signature
+            )
+            if apply_now and should_restart:
                 self._restart_session_locked()
 
         return self.snapshot()
 
     def reload_from_disk(self, apply_now: bool = True) -> dict:
         with self._lock:
+            previous_signature = runtime_config_signature(self.config)
             loaded = normalize_config(
                 load_raw_config(self.config_path),
                 self.model_options,
                 self.camera_options,
             )
             self.config = loaded
-            if apply_now:
+            should_restart = self.session is None or runtime_config_signature(loaded) != previous_signature
+            if apply_now and should_restart:
                 self._restart_session_locked()
         return self.snapshot()
 
@@ -2073,6 +2100,7 @@ class PipelineSession:
         self._pipeline_thread: threading.Thread | None = None
         self._frame_thread: threading.Thread | None = None
         self._camera_thread: threading.Thread | None = None
+        self._picam2 = None
         self._started_at = time.time()
         self._camera_frame_count = 0
         self._stream_clients = 0
@@ -2169,17 +2197,48 @@ class PipelineSession:
                 with self._lock:
                     self._latest_jpeg = encoded.tobytes()
 
+    def _close_picamera_handle(self, handle=None) -> None:
+        picam = handle
+        if picam is None:
+            with CAMERA_LIFECYCLE_LOCK:
+                picam = self._picam2
+                self._picam2 = None
+        if picam is None:
+            return
+        try:
+            picam.stop()
+        except Exception:
+            pass
+        try:
+            picam.close()
+        except Exception:
+            pass
+
     def _camera_only_loop(self) -> None:
         from picamera2 import Picamera2
+        attempt = 0
+        busy_markers = (
+            "running state trying acquire",
+            "requiring state available",
+            "camera __init__ sequence did not complete",
+            "device or resource busy",
+        )
 
-        try:
-            with Picamera2(self.selection.camera.index) as picam2:
-                config = picam2.create_preview_configuration(
-                    main={"size": (self.width, self.height), "format": "RGB888"},
-                    controls={"FrameRate": self.fps},
-                )
-                picam2.configure(config)
-                picam2.start()
+        while not self._stop_event.is_set():
+            attempt += 1
+            picam2 = None
+            try:
+                with CAMERA_LIFECYCLE_LOCK:
+                    if self._stop_event.is_set():
+                        break
+                    picam2 = Picamera2(self.selection.camera.index)
+                    self._picam2 = picam2
+                    config = picam2.create_preview_configuration(
+                        main={"size": (self.width, self.height), "format": "RGB888"},
+                        controls={"FrameRate": self.fps},
+                    )
+                    picam2.configure(config)
+                    picam2.start()
 
                 while not self._stop_event.is_set():
                     frame = picam2.capture_array("main")
@@ -2215,10 +2274,22 @@ class PipelineSession:
                             self._latest_jpeg = encoded.tobytes()
                         self._camera_frame_count += 1
                     time.sleep(max(0.0, (1.0 / self.fps) * 0.2))
-        except Exception:
-            self.error = traceback.format_exc(limit=4)
-        finally:
-            self._stop_event.set()
+                break
+            except Exception as exc:
+                self.error = traceback.format_exc(limit=4)
+                text = str(exc or "").strip().lower()
+                retriable = any(marker in text for marker in busy_markers)
+                if retriable and attempt < 7 and not self._stop_event.is_set():
+                    time.sleep(min(1.2, 0.25 * attempt))
+                    continue
+                break
+            finally:
+                with CAMERA_LIFECYCLE_LOCK:
+                    if self._picam2 is picam2:
+                        self._picam2 = None
+                self._close_picamera_handle(picam2)
+
+        self._stop_event.set()
 
     def _pipeline_loop(self) -> None:
         previous_argv = sys.argv[:]
@@ -2278,6 +2349,7 @@ class PipelineSession:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._close_picamera_handle()
         if self._app_instance is not None:
             try:
                 self._app_instance.shutdown()
@@ -2288,7 +2360,7 @@ class PipelineSession:
         if self._frame_thread and self._frame_thread.is_alive():
             self._frame_thread.join(timeout=1.0)
         if self._camera_thread and self._camera_thread.is_alive():
-            self._camera_thread.join(timeout=2.0)
+            self._camera_thread.join(timeout=5.0)
 
     def status_payload(self) -> dict:
         return {

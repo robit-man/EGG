@@ -267,12 +267,13 @@ class WatchdogManager:
             ServiceSpec(
                 "camera_router",
                 "Camera Router",
-                "camera_router.py",
+                "camera/camera_dashboard.py",
+                args=("--no-curses", "--config-file", "../camera_router_config.json"),
                 health_mode="http",
                 health_port=8080,
                 health_path="/health",
                 config_relpath="camera_router_config.json",
-                config_port_paths=("camera_router.network.listen_port",),
+                config_port_paths=("port", "camera_router.network.listen_port"),
                 activation_timeout_seconds=45.0,
             ),
             ServiceSpec(

@@ -12,11 +12,13 @@ What this script does:
 from __future__ import annotations
 
 import argparse
+import base64
 import curses
 import importlib
 import json
 import os
 import re
+import secrets
 import shlex
 import signal
 import socket
@@ -27,6 +29,7 @@ import time
 import traceback
 import venv
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -38,6 +41,16 @@ BOOTSTRAP_STAMP_VALUE = "v1"
 VALID_ORIENTATIONS = [0, 90, 180, 270]
 DEFAULT_HAILO_REPO_URL = "https://github.com/hailo-ai/hailo-apps.git"
 DEFAULT_HAILO_REPO_DIRNAME = "hailo-apps"
+DEFAULT_PASSWORD = "egg"
+DEFAULT_SESSION_TIMEOUT = 300
+DEFAULT_REQUIRE_AUTH = True
+DEFAULT_TUNNEL_URL_ENV = "EGG_CAMERA_TUNNEL_URL"
+STREAM_PROFILE_OPTIONS = (
+    {"pixel_format": "RGB", "width": 640, "height": 480, "fps": 15.0},
+    {"pixel_format": "RGB", "width": 1280, "height": 720, "fps": 24.0},
+    {"pixel_format": "RGB", "width": 1280, "height": 720, "fps": 30.0},
+    {"pixel_format": "RGB", "width": 1920, "height": 1080, "fps": 30.0},
+)
 
 
 @dataclass(frozen=True)
@@ -116,7 +129,7 @@ DASHBOARD_TEMPLATE = """<!doctype html>
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      font-family: Consolas, "Courier New", monospace;
       background:
         radial-gradient(circle at top right, #2a3038 0%, #1f2328 45%, #1a1e22 100%);
       color: var(--text);
@@ -248,7 +261,7 @@ DASHBOARD_TEMPLATE = """<!doctype html>
           <div class="line"><span class="k">Error</span><span class="v bad" id="errorText"></span></div>
           <div class="line"><span class="k">Restart Needed</span><span class="v" id="restartNeeded">no</span></div>
         </div>
-        <img class="stream" src="/stream" alt="Stream" />
+        <img class="stream" id="streamImage" alt="Stream" />
       </article>
     </section>
   </div>
@@ -314,6 +327,8 @@ DASHBOARD_TEMPLATE = """<!doctype html>
     <div class="note" id="configNote"></div>
   </aside>
   <script>
+    const sessionKey = "{{ session_key }}";
+    const requireAuth = {{ require_auth | tojson }};
     let modelCatalog = {};
     let cameras = [];
     let currentConfig = {};
@@ -323,6 +338,19 @@ DASHBOARD_TEMPLATE = """<!doctype html>
 
     function setConfigNote(text) {
       document.getElementById('configNote').textContent = text || '';
+    }
+
+    function withSession(path) {
+      const raw = String(path || '').trim();
+      if (!raw) {
+        return raw;
+      }
+      const key = String(sessionKey || '').trim();
+      if (!key) {
+        return raw;
+      }
+      const joiner = raw.includes('?') ? '&' : '?';
+      return `${raw}${joiner}session_key=${encodeURIComponent(key)}`;
     }
 
     function markDirty() {
@@ -407,7 +435,11 @@ DASHBOARD_TEMPLATE = """<!doctype html>
 
     async function fetchSnapshot(forceForm = false) {
       try {
-        const response = await fetch('/api/status');
+        const response = await fetch(withSession('/api/status'));
+        if (response.status === 401) {
+          setConfigNote('Unauthorized. Authenticate via /auth and reopen /dashboard?session_key=...');
+          return;
+        }
         const data = await response.json();
         applySnapshot(data, forceForm);
       } catch (_) {}
@@ -429,11 +461,15 @@ DASHBOARD_TEMPLATE = """<!doctype html>
     }
 
     async function postConfig(path, body) {
-      const response = await fetch(path, {
+      const response = await fetch(withSession(path), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
+      if (response.status === 401) {
+        setConfigNote('Unauthorized. Session expired.');
+        return;
+      }
       const data = await response.json();
       applySnapshot(data, true);
       setConfigNote('Config updated.');
@@ -485,6 +521,7 @@ DASHBOARD_TEMPLATE = """<!doctype html>
         }
       });
 
+    document.getElementById('streamImage').src = withSession('/stream');
     fetchSnapshot(true);
     setInterval(fetchSnapshot, 1200);
   </script>
@@ -667,17 +704,35 @@ def default_config(model_options: List[ModelOption], camera_options: List[Camera
     first_family = next(iter(model_catalog))
     first_model = model_catalog[first_family][0].model_name
     first_camera_index = camera_options[0].index
+    first_camera_key = str(first_camera_index)
     return {
         "run_mode": "model",
         "model_family": first_family,
         "model_name": first_model,
         "camera_index": first_camera_index,
-        "camera_orientations": {str(first_camera_index): 0},
+        "camera_orientations": {first_camera_key: 0},
+        "camera_enabled": {first_camera_key: True},
+        "camera_profiles": {
+            first_camera_key: {
+                "pixel_format": "RGB",
+                "width": 1280,
+                "height": 720,
+                "fps": 30.0,
+            }
+        },
         "host": "0.0.0.0",
-        "port": 5000,
+        "port": 8080,
         "width": 1280,
         "height": 720,
         "fps": 30,
+        "security": {
+            "password": DEFAULT_PASSWORD,
+            "session_timeout": DEFAULT_SESSION_TIMEOUT,
+            "require_auth": DEFAULT_REQUIRE_AUTH,
+        },
+        "tunnel": {
+            "enable": True,
+        },
     }
 
 
@@ -687,6 +742,49 @@ def load_raw_config(config_path: Path) -> dict:
     try:
         payload = json.loads(config_path.read_text())
         if isinstance(payload, dict):
+            legacy = payload.get("camera_router")
+            if isinstance(legacy, dict):
+                network = legacy.get("network", {}) if isinstance(legacy.get("network"), dict) else {}
+                stream = legacy.get("stream", {}) if isinstance(legacy.get("stream"), dict) else {}
+                security = legacy.get("security", {}) if isinstance(legacy.get("security"), dict) else {}
+                tunnel = legacy.get("tunnel", {}) if isinstance(legacy.get("tunnel"), dict) else {}
+                cameras = legacy.get("cameras", []) if isinstance(legacy.get("cameras"), list) else []
+
+                if "host" not in payload and network.get("listen_host") is not None:
+                    payload["host"] = network.get("listen_host")
+                if "port" not in payload and network.get("listen_port") is not None:
+                    payload["port"] = network.get("listen_port")
+                if "fps" not in payload and stream.get("target_fps") is not None:
+                    payload["fps"] = stream.get("target_fps")
+                if "security" not in payload and security:
+                    payload["security"] = security
+                if "tunnel" not in payload and tunnel:
+                    payload["tunnel"] = tunnel
+
+                orientation_map = dict(payload.get("camera_orientations", {}))
+                enabled_map = dict(payload.get("camera_enabled", {}))
+                profile_map = dict(payload.get("camera_profiles", {}))
+                for row in cameras:
+                    if not isinstance(row, dict):
+                        continue
+                    idx = _coerce_int(row.get("index"), -1)
+                    if idx < 0:
+                        continue
+                    key = str(idx)
+                    orientation_map.setdefault(key, row.get("rotation", 0))
+                    enabled_map.setdefault(key, bool(row.get("enabled", True)))
+                    profile_map.setdefault(
+                        key,
+                        {
+                            "pixel_format": "RGB",
+                            "width": _coerce_int(row.get("width"), 1280),
+                            "height": _coerce_int(row.get("height"), 720),
+                            "fps": float(_coerce_int(stream.get("target_fps", row.get("fps", 30)), 30)),
+                        },
+                    )
+                payload["camera_orientations"] = orientation_map
+                payload["camera_enabled"] = enabled_map
+                payload["camera_profiles"] = profile_map
             return payload
     except Exception:
         pass
@@ -695,6 +793,49 @@ def load_raw_config(config_path: Path) -> dict:
 
 def save_config(config_path: Path, payload: dict) -> None:
     clean_payload = {key: value for key, value in payload.items() if not str(key).startswith("_")}
+    security = clean_payload.get("security", {}) if isinstance(clean_payload.get("security"), dict) else {}
+    tunnel = clean_payload.get("tunnel", {}) if isinstance(clean_payload.get("tunnel"), dict) else {}
+    camera_orientations = clean_payload.get("camera_orientations", {})
+    camera_enabled = clean_payload.get("camera_enabled", {})
+    camera_profiles = clean_payload.get("camera_profiles", {})
+    camera_rows = []
+    for key in sorted(camera_orientations.keys(), key=lambda value: _coerce_int(value, 10_000)):
+        idx = _coerce_int(key, -1)
+        if idx < 0:
+            continue
+        profile = camera_profiles.get(key, {}) if isinstance(camera_profiles, dict) else {}
+        camera_rows.append(
+            {
+                "id": _camera_id_for_index(idx),
+                "index": idx,
+                "enabled": bool(camera_enabled.get(key, True)),
+                "width": _coerce_int((profile or {}).get("width"), _coerce_int(clean_payload.get("width"), 1280)),
+                "height": _coerce_int((profile or {}).get("height"), _coerce_int(clean_payload.get("height"), 720)),
+                "rotation": _coerce_int(camera_orientations.get(key), 0),
+            }
+        )
+
+    clean_payload["camera_router"] = {
+        "network": {
+            "listen_host": str(clean_payload.get("host") or "0.0.0.0"),
+            "listen_port": _coerce_int(clean_payload.get("port"), 8080),
+        },
+        "stream": {
+            "target_fps": _coerce_int(clean_payload.get("fps"), 30),
+            "jpeg_quality": 82,
+            "use_picamera2": True,
+        },
+        "security": {
+            "password": str(security.get("password") or DEFAULT_PASSWORD),
+            "session_timeout": _coerce_int(security.get("session_timeout"), DEFAULT_SESSION_TIMEOUT),
+            "require_auth": _coerce_bool(security.get("require_auth"), DEFAULT_REQUIRE_AUTH),
+        },
+        "tunnel": {
+            "enable": _coerce_bool(tunnel.get("enable"), True),
+            "auto_install_cloudflared": _coerce_bool(tunnel.get("auto_install_cloudflared"), False),
+        },
+        "cameras": camera_rows,
+    }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(clean_payload, indent=2, sort_keys=True) + "\n")
 
@@ -704,6 +845,38 @@ def _coerce_int(value, fallback: int) -> int:
         return int(value)
     except Exception:
         return fallback
+
+
+def _coerce_float(value, fallback: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(fallback)
+
+
+def _coerce_bool(value, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return bool(value)
+    if value is None:
+        return bool(fallback)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _camera_id_for_index(index: int) -> str:
+    return f"cam{int(index)}"
+
+
+def _camera_index_from_id(camera_id: str) -> int:
+    text = str(camera_id or "").strip().lower()
+    if text.startswith("cam"):
+        text = text[3:]
+    if text.startswith("csi"):
+        text = text[3:]
+    if text.startswith("default_"):
+        text = text.split("_", 1)[1]
+    if text.startswith("camera"):
+        text = text[6:]
+    return _coerce_int(text, -1)
 
 
 def normalize_orientation_map(raw_map, camera_options: List[CameraOption]) -> Dict[str, int]:
@@ -717,6 +890,67 @@ def normalize_orientation_map(raw_map, camera_options: List[CameraOption]) -> Di
     for camera in camera_options:
         orientation_map.setdefault(str(camera.index), 0)
     return orientation_map
+
+
+def normalize_camera_enabled_map(raw_map, camera_options: List[CameraOption]) -> Dict[str, bool]:
+    enabled_map: Dict[str, bool] = {}
+    if isinstance(raw_map, dict):
+        for key, value in raw_map.items():
+            index = _coerce_int(key, -1)
+            if index >= 0:
+                enabled_map[str(index)] = _coerce_bool(value, True)
+    for camera in camera_options:
+        enabled_map.setdefault(str(camera.index), True)
+    return enabled_map
+
+
+def _normalize_profile(value, default_width: int, default_height: int, default_fps: int) -> dict:
+    profile = value if isinstance(value, dict) else {}
+    return {
+        "pixel_format": str(profile.get("pixel_format", "RGB") or "RGB").strip().upper() or "RGB",
+        "width": max(320, _coerce_int(profile.get("width"), int(default_width))),
+        "height": max(240, _coerce_int(profile.get("height"), int(default_height))),
+        "fps": max(1.0, _coerce_float(profile.get("fps"), float(default_fps))),
+    }
+
+
+def normalize_camera_profiles(
+    raw_profiles,
+    camera_options: List[CameraOption],
+    default_width: int,
+    default_height: int,
+    default_fps: int,
+) -> Dict[str, dict]:
+    profiles: Dict[str, dict] = {}
+    if isinstance(raw_profiles, dict):
+        for key, value in raw_profiles.items():
+            index = _coerce_int(key, -1)
+            if index >= 0:
+                profiles[str(index)] = _normalize_profile(value, default_width, default_height, default_fps)
+    for camera in camera_options:
+        camera_key = str(camera.index)
+        profiles.setdefault(
+            camera_key,
+            _normalize_profile({}, default_width, default_height, default_fps),
+        )
+    return profiles
+
+
+def _normalized_security(raw_security) -> dict:
+    security = raw_security if isinstance(raw_security, dict) else {}
+    return {
+        "password": str(security.get("password") or DEFAULT_PASSWORD).strip() or DEFAULT_PASSWORD,
+        "session_timeout": max(30, _coerce_int(security.get("session_timeout"), DEFAULT_SESSION_TIMEOUT)),
+        "require_auth": _coerce_bool(security.get("require_auth"), DEFAULT_REQUIRE_AUTH),
+    }
+
+
+def _normalized_tunnel(raw_tunnel) -> dict:
+    tunnel = raw_tunnel if isinstance(raw_tunnel, dict) else {}
+    return {
+        "enable": _coerce_bool(tunnel.get("enable"), True),
+        "auto_install_cloudflared": _coerce_bool(tunnel.get("auto_install_cloudflared"), False),
+    }
 
 
 def normalize_config(
@@ -760,17 +994,35 @@ def normalize_config(
     if str(camera_index) not in cfg["camera_orientations"]:
         cfg["camera_orientations"][str(camera_index)] = 0
 
+    cfg["camera_enabled"] = normalize_camera_enabled_map(
+        raw_config.get("camera_enabled", cfg.get("camera_enabled", {})),
+        camera_options,
+    )
+
     cfg["host"] = str(raw_config.get("host", cfg["host"]))
     cfg["port"] = _coerce_int(raw_config.get("port", cfg["port"]), cfg["port"])
     cfg["width"] = max(320, _coerce_int(raw_config.get("width", cfg["width"]), cfg["width"]))
     cfg["height"] = max(240, _coerce_int(raw_config.get("height", cfg["height"]), cfg["height"]))
     cfg["fps"] = max(1, _coerce_int(raw_config.get("fps", cfg["fps"]), cfg["fps"]))
+    cfg["camera_profiles"] = normalize_camera_profiles(
+        raw_config.get("camera_profiles", cfg.get("camera_profiles", {})),
+        camera_options,
+        cfg["width"],
+        cfg["height"],
+        cfg["fps"],
+    )
+    cfg["security"] = _normalized_security(raw_config.get("security", cfg.get("security", {})))
+    cfg["tunnel"] = _normalized_tunnel(raw_config.get("tunnel", cfg.get("tunnel", {})))
     return cfg
 
 
 def apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     merged = dict(config)
     merged["camera_orientations"] = dict(config["camera_orientations"])
+    merged["camera_enabled"] = dict(config.get("camera_enabled", {}))
+    merged["camera_profiles"] = dict(config.get("camera_profiles", {}))
+    merged["security"] = dict(config.get("security", {}))
+    merged["tunnel"] = dict(config.get("tunnel", {}))
 
     if args.direct_camera:
         merged["run_mode"] = "direct_camera"
@@ -795,6 +1047,14 @@ def apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
         merged["height"] = args.height
     if args.fps is not None:
         merged["fps"] = args.fps
+    selected_key = str(_coerce_int(merged.get("camera_index"), 0))
+    selected_profile = dict(merged.get("camera_profiles", {}).get(selected_key, {}))
+    selected_profile["width"] = max(320, _coerce_int(merged.get("width"), 1280))
+    selected_profile["height"] = max(240, _coerce_int(merged.get("height"), 720))
+    selected_profile["fps"] = max(1.0, _coerce_float(merged.get("fps"), 30.0))
+    selected_profile.setdefault("pixel_format", "RGB")
+    merged.setdefault("camera_profiles", {})
+    merged["camera_profiles"][selected_key] = selected_profile
     return merged
 
 
@@ -806,6 +1066,24 @@ def get_orientation_for_camera(config: dict, camera_index: int) -> int:
 def set_orientation_for_camera(config: dict, camera_index: int, orientation: int) -> None:
     config.setdefault("camera_orientations", {})
     config["camera_orientations"][str(camera_index)] = orientation if orientation in VALID_ORIENTATIONS else 0
+
+
+def is_camera_enabled(config: dict, camera_index: int) -> bool:
+    enabled_map = config.get("camera_enabled", {})
+    if not isinstance(enabled_map, dict):
+        return True
+    return _coerce_bool(enabled_map.get(str(camera_index)), True)
+
+
+def get_profile_for_camera(config: dict, camera_index: int) -> dict:
+    profiles = config.get("camera_profiles", {})
+    selected = profiles.get(str(camera_index), {}) if isinstance(profiles, dict) else {}
+    return _normalize_profile(
+        selected,
+        _coerce_int(config.get("width"), 1280),
+        _coerce_int(config.get("height"), 720),
+        _coerce_int(config.get("fps"), 30),
+    )
 
 
 def select_model_option(
@@ -835,6 +1113,12 @@ def select_model_option(
 def resolve_camera_option(config: dict, camera_options: List[CameraOption]) -> CameraOption:
     requested_index = config.get("camera_index")
     for camera in camera_options:
+        if camera.index == requested_index and is_camera_enabled(config, camera.index):
+            return camera
+    for camera in camera_options:
+        if is_camera_enabled(config, camera.index):
+            return camera
+    for camera in camera_options:
         if camera.index == requested_index:
             return camera
     return camera_options[0]
@@ -859,7 +1143,7 @@ def venv_has_runtime(venv_python: Path) -> bool:
     probe = [
         str(venv_python),
         "-c",
-        "import flask; import hailo_apps; import setproctitle; import cv2; import numpy",
+        "import flask; import flask_cors; import hailo_apps; import setproctitle; import cv2; import numpy",
     ]
     result = subprocess.run(
         probe, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
@@ -891,7 +1175,7 @@ def ensure_bootstrap_environment(project_root: Path, args: argparse.Namespace) -
     if needs_install:
         run_checked([str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
         run_checked([str(venv_python), "-m", "pip", "install", "-e", str(project_root)], cwd=project_root)
-        run_checked([str(venv_python), "-m", "pip", "install", "flask"])
+        run_checked([str(venv_python), "-m", "pip", "install", "flask", "flask-cors"])
         stamp_file.write_text(expected_stamp + "\n")
 
     current_python = Path(sys.executable).resolve()
@@ -1238,6 +1522,10 @@ def choose_selection_with_curses(
     def _runner(stdscr: "curses._CursesWindow") -> None:
         config = dict(initial_config)
         config["camera_orientations"] = dict(initial_config["camera_orientations"])
+        config["camera_enabled"] = dict(initial_config.get("camera_enabled", {}))
+        config["camera_profiles"] = dict(initial_config.get("camera_profiles", {}))
+        config["security"] = dict(initial_config.get("security", {}))
+        config["tunnel"] = dict(initial_config.get("tunnel", {}))
         dynamic_cameras = list(camera_options)
         menu_index = 0
 
@@ -1291,6 +1579,17 @@ def choose_selection_with_curses(
                     config.get("camera_orientations", {}),
                     dynamic_cameras,
                 )
+                config["camera_enabled"] = normalize_camera_enabled_map(
+                    config.get("camera_enabled", {}),
+                    dynamic_cameras,
+                )
+                config["camera_profiles"] = normalize_camera_profiles(
+                    config.get("camera_profiles", {}),
+                    dynamic_cameras,
+                    _coerce_int(config.get("width"), 1280),
+                    _coerce_int(config.get("height"), 720),
+                    _coerce_int(config.get("fps"), 30),
+                )
                 config["camera_index"] = resolve_camera_option(config, dynamic_cameras).index
 
     curses.wrapper(_runner)
@@ -1319,6 +1618,10 @@ def resolve_launch_selection(
 def merge_config_patch(base_config: dict, patch: dict) -> dict:
     merged = dict(base_config)
     merged["camera_orientations"] = dict(base_config.get("camera_orientations", {}))
+    merged["camera_enabled"] = dict(base_config.get("camera_enabled", {}))
+    merged["camera_profiles"] = dict(base_config.get("camera_profiles", {}))
+    merged["security"] = dict(base_config.get("security", {}))
+    merged["tunnel"] = dict(base_config.get("tunnel", {}))
 
     run_mode = patch.get("run_mode")
     if run_mode in ("model", "direct_camera"):
@@ -1332,11 +1635,33 @@ def merge_config_patch(base_config: dict, patch: dict) -> dict:
 
     if "camera_index" in patch:
         merged["camera_index"] = _coerce_int(patch.get("camera_index"), merged["camera_index"])
+    camera_index = _coerce_int(merged.get("camera_index"), 0)
+    camera_key = str(camera_index)
     if "orientation" in patch:
         set_orientation_for_camera(
             merged,
-            merged["camera_index"],
-            _coerce_int(patch.get("orientation"), get_orientation_for_camera(merged, merged["camera_index"])),
+            camera_index,
+            _coerce_int(patch.get("orientation"), get_orientation_for_camera(merged, camera_index)),
+        )
+    if "enabled" in patch:
+        merged["camera_enabled"][camera_key] = _coerce_bool(patch.get("enabled"), True)
+
+    incoming_profile = None
+    if "profile" in patch and isinstance(patch.get("profile"), dict):
+        incoming_profile = patch.get("profile")
+    elif any(key in patch for key in ("pixel_format", "width", "height", "fps")):
+        incoming_profile = {
+            "pixel_format": patch.get("pixel_format", ""),
+            "width": patch.get("width"),
+            "height": patch.get("height"),
+            "fps": patch.get("fps"),
+        }
+    if incoming_profile is not None:
+        merged["camera_profiles"][camera_key] = _normalize_profile(
+            incoming_profile,
+            _coerce_int(merged.get("width"), 1280),
+            _coerce_int(merged.get("height"), 720),
+            _coerce_int(merged.get("fps"), 30),
         )
 
     if "host" in patch:
@@ -1349,6 +1674,18 @@ def merge_config_patch(base_config: dict, patch: dict) -> dict:
         merged["height"] = _coerce_int(patch.get("height"), merged["height"])
     if "fps" in patch:
         merged["fps"] = _coerce_int(patch.get("fps"), merged["fps"])
+    if any(key in patch for key in ("width", "height", "fps")) and camera_key:
+        existing = dict(merged["camera_profiles"].get(camera_key, {}))
+        existing["width"] = max(320, _coerce_int(merged.get("width"), 1280))
+        existing["height"] = max(240, _coerce_int(merged.get("height"), 720))
+        existing["fps"] = max(1.0, _coerce_float(merged.get("fps"), 30.0))
+        existing["pixel_format"] = str(existing.get("pixel_format") or "RGB").strip().upper() or "RGB"
+        merged["camera_profiles"][camera_key] = existing
+
+    if "security" in patch and isinstance(patch.get("security"), dict):
+        merged["security"].update(dict(patch.get("security", {})))
+    if "tunnel" in patch and isinstance(patch.get("tunnel"), dict):
+        merged["tunnel"].update(dict(patch.get("tunnel", {})))
     return merged
 
 
@@ -1408,19 +1745,192 @@ class RuntimeController:
     def _copy_config(self) -> dict:
         config = dict(self.config)
         config["camera_orientations"] = dict(self.config.get("camera_orientations", {}))
+        config["camera_enabled"] = dict(self.config.get("camera_enabled", {}))
+        config["camera_profiles"] = dict(self.config.get("camera_profiles", {}))
+        config["security"] = dict(self.config.get("security", {}))
+        config["tunnel"] = dict(self.config.get("tunnel", {}))
         return config
 
     def _camera_payload(self) -> List[dict]:
-        return [
-            {"index": camera.index, "label": camera.label, "details": camera.details}
-            for camera in self.camera_options
-        ]
+        payload: List[dict] = []
+        for camera in self.camera_options:
+            payload.append(
+                {
+                    "id": _camera_id_for_index(camera.index),
+                    "index": camera.index,
+                    "label": camera.label,
+                    "details": camera.details,
+                    "enabled": is_camera_enabled(self.config, camera.index),
+                }
+            )
+        return payload
 
     def _catalog_payload(self) -> dict:
         return {
             family: [item.model_name for item in options]
             for family, options in self.model_catalog.items()
         }
+
+    def _camera_by_index(self, camera_index: int) -> Optional[CameraOption]:
+        for camera in self.camera_options:
+            if camera.index == int(camera_index):
+                return camera
+        return None
+
+    def camera_option_for_id(self, camera_id: str) -> Optional[CameraOption]:
+        idx = _camera_index_from_id(camera_id)
+        return self._camera_by_index(idx)
+
+    def _sync_selected_profile_locked(self) -> None:
+        camera_index = _coerce_int(self.config.get("camera_index"), 0)
+        profile = get_profile_for_camera(self.config, camera_index)
+        self.config["width"] = int(profile.get("width", self.config.get("width", 1280)))
+        self.config["height"] = int(profile.get("height", self.config.get("height", 720)))
+        self.config["fps"] = int(max(1.0, _coerce_float(profile.get("fps"), self.config.get("fps", 30))))
+
+    def security_settings(self) -> dict:
+        with self._lock:
+            return _normalized_security(self.config.get("security", {}))
+
+    def protocol_capabilities(self) -> dict:
+        return {
+            "jpeg_snapshot": True,
+            "mjpeg": True,
+            "webrtc": False,
+            "mpegts": False,
+            "webrtc_error": "WebRTC not enabled in hailo camera dashboard",
+            "mpegts_error": "MPEGTS not enabled in hailo camera dashboard",
+        }
+
+    @staticmethod
+    def camera_mode_urls(camera_id: str) -> dict:
+        camera_id = str(camera_id or "").strip()
+        return {
+            "jpeg": f"/jpeg/{camera_id}",
+            "mjpeg": f"/mjpeg/{camera_id}",
+            "stream": f"/video/{camera_id}",
+            "snapshot": f"/camera/{camera_id}",
+        }
+
+    def camera_statuses(self) -> List[dict]:
+        with self._lock:
+            active_session = self.session
+            config = self._copy_config()
+        protocols = self.protocol_capabilities()
+        active_index = _coerce_int(config.get("camera_index"), -1)
+        active_camera_id = _camera_id_for_index(active_index)
+        session_status = active_session.status_payload() if active_session else {}
+        selected_online = bool(active_session and not session_status.get("error"))
+        selected_clients = int(session_status.get("clients", 0) or 0)
+        selected_frames = int(session_status.get("frame_count", 0) or 0)
+        selected_fps = float(session_status.get("avg_fps", 0.0) or 0.0)
+        selected_error = str(session_status.get("error") or "").strip()
+
+        rows: List[dict] = []
+        for camera in self.camera_options:
+            camera_id = _camera_id_for_index(camera.index)
+            profile = get_profile_for_camera(config, camera.index)
+            enabled = is_camera_enabled(config, camera.index)
+            is_selected = camera_id == active_camera_id
+            online = bool(enabled and is_selected and selected_online)
+            last_error = selected_error if is_selected else ("Camera disabled by policy" if not enabled else "")
+            rows.append(
+                {
+                    "id": camera_id,
+                    "label": camera.label,
+                    "source_type": "default",
+                    "device_path": f"/dev/video{camera.index}",
+                    "index": int(camera.index),
+                    "online": bool(online),
+                    "has_frame": bool(online and selected_frames > 0),
+                    "frame_size": {
+                        "width": int(profile.get("width", 0)),
+                        "height": int(profile.get("height", 0)),
+                    },
+                    "width": int(profile.get("width", 0)),
+                    "height": int(profile.get("height", 0)),
+                    "fps": round(selected_fps if is_selected else 0.0, 2),
+                    "kbps": 0.0,
+                    "clients": int(selected_clients if is_selected else 0),
+                    "total_frames": int(selected_frames if is_selected else 0),
+                    "backend": "hailo" if config.get("run_mode") != "direct_camera" else "direct_camera",
+                    "last_frame_age_seconds": 0.0 if online else -1.0,
+                    "last_error": last_error,
+                    "capture_profile": profile,
+                    "active_capture": {
+                        "backend": "hailo" if config.get("run_mode") != "direct_camera" else "direct_camera",
+                        "pixel_format": str(profile.get("pixel_format") or "RGB"),
+                        "width": int(profile.get("width", 0)),
+                        "height": int(profile.get("height", 0)),
+                        "fps": float(profile.get("fps", 0.0)),
+                    },
+                    "available_profiles": [dict(item) for item in STREAM_PROFILE_OPTIONS],
+                    "profile_query_error": "",
+                    "rotation_degrees": int(get_orientation_for_camera(config, camera.index)),
+                    "enabled": bool(enabled),
+                    "configured_enabled": bool(enabled),
+                    "configured_enabled_key": camera_id,
+                    "modes": self.camera_mode_urls(camera_id),
+                    "protocols": protocols,
+                }
+            )
+        return rows
+
+    def ensure_camera_selected(self, camera_id: str, save: bool = False) -> bool:
+        camera = self.camera_option_for_id(camera_id)
+        if camera is None:
+            return False
+        with self._lock:
+            current_index = _coerce_int(self.config.get("camera_index"), -1)
+            if current_index == camera.index:
+                return True
+            self.config["camera_index"] = int(camera.index)
+            self._sync_selected_profile_locked()
+            if save:
+                save_config(self.config_path, self.config)
+            self._restart_session_locked()
+        return True
+
+    def set_camera_enabled(self, camera_id: str, enabled: bool, save: bool = True) -> dict:
+        camera = self.camera_option_for_id(camera_id)
+        if camera is None:
+            raise ValueError("Camera not found")
+        with self._lock:
+            key = str(camera.index)
+            self.config.setdefault("camera_enabled", {})
+            self.config["camera_enabled"][key] = bool(enabled)
+            if not enabled and _coerce_int(self.config.get("camera_index"), -1) == camera.index:
+                fallback = resolve_camera_option(self.config, self.camera_options)
+                self.config["camera_index"] = int(fallback.index)
+                self._sync_selected_profile_locked()
+            if save:
+                save_config(self.config_path, self.config)
+            self._restart_session_locked()
+        return self.snapshot()
+
+    def set_camera_profile(self, camera_id: str, profile: dict, save: bool = True) -> tuple[dict, bool]:
+        camera = self.camera_option_for_id(camera_id)
+        if camera is None:
+            raise ValueError("Camera not found")
+        with self._lock:
+            key = str(camera.index)
+            previous = get_profile_for_camera(self.config, camera.index)
+            next_profile = _normalize_profile(
+                profile,
+                _coerce_int(previous.get("width"), 1280),
+                _coerce_int(previous.get("height"), 720),
+                int(max(1.0, _coerce_float(previous.get("fps"), 30.0))),
+            )
+            self.config.setdefault("camera_profiles", {})
+            self.config["camera_profiles"][key] = next_profile
+            changed = next_profile != previous
+            if _coerce_int(self.config.get("camera_index"), -1) == camera.index:
+                self._sync_selected_profile_locked()
+                if changed:
+                    self._restart_session_locked()
+            if save:
+                save_config(self.config_path, self.config)
+        return dict(next_profile), bool(changed)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -1444,6 +1954,9 @@ class RuntimeController:
         }
 
     def _restart_session_locked(self) -> None:
+        selected_camera = resolve_camera_option(self.config, self.camera_options)
+        self.config["camera_index"] = int(selected_camera.index)
+        self._sync_selected_profile_locked()
         selection, app_class, app_args = build_app_runtime(
             self.config, self.arch, self.model_options, self.camera_options
         )
@@ -1562,6 +2075,7 @@ class PipelineSession:
         self._camera_thread: threading.Thread | None = None
         self._started_at = time.time()
         self._camera_frame_count = 0
+        self._stream_clients = 0
         self.error: str | None = None
 
     @property
@@ -1597,6 +2111,18 @@ class PipelineSession:
     def avg_fps(self) -> float:
         elapsed = max(time.time() - self._started_at, 0.001)
         return float(self.frame_count()) / elapsed
+
+    def acquire_client(self) -> None:
+        with self._lock:
+            self._stream_clients += 1
+
+    def release_client(self) -> None:
+        with self._lock:
+            self._stream_clients = max(0, self._stream_clients - 1)
+
+    def client_count(self) -> int:
+        with self._lock:
+            return int(self._stream_clients)
 
     def _pipeline_callback(self, element, buffer, user_data) -> None:
         if buffer is None:
@@ -1771,6 +2297,7 @@ class PipelineSession:
             "frame_count": self.frame_count(),
             "avg_fps": self.avg_fps(),
             "detections": self._last_detection_count,
+            "clients": self.client_count(),
             "error": self.error,
         }
 
@@ -1841,20 +2368,214 @@ def patch_picamera_thread(camera_index: int, orientation: int) -> None:
 
 def create_flask_app(controller: RuntimeController, config_path: Path):
     app = Flask(__name__)
+    if CORS is not None:
+        CORS(app, resources={r"/*": {"origins": "*"}})
+
+    startup_time = time.time()
+    request_count = {"value": 0}
+    sessions: Dict[str, float] = {}
+    sessions_lock = threading.Lock()
+    profile_revisions: Dict[str, int] = {}
+
+    def _security_settings() -> dict:
+        return controller.security_settings()
+
+    def _session_timeout() -> int:
+        return max(30, int(_security_settings().get("session_timeout", DEFAULT_SESSION_TIMEOUT)))
+
+    def _cleanup_expired_sessions() -> None:
+        now = time.time()
+        with sessions_lock:
+            stale = [key for key, expires_at in sessions.items() if now >= float(expires_at)]
+            for key in stale:
+                sessions.pop(key, None)
+
+    def _create_session() -> str:
+        _cleanup_expired_sessions()
+        session_key = secrets.token_urlsafe(32)
+        with sessions_lock:
+            sessions[session_key] = time.time() + float(_session_timeout())
+        return session_key
+
+    def _rotate_sessions() -> tuple[str, int]:
+        with sessions_lock:
+            invalidated = len(sessions)
+            sessions.clear()
+        session_key = _create_session()
+        return session_key, invalidated
+
+    def _get_session_key_from_request() -> str:
+        try:
+            key = str(request.args.get("session_key", "")).strip()
+            if key:
+                return key
+        except Exception:
+            pass
+        try:
+            key = str(request.headers.get("x-session-key", "")).strip()
+            if key:
+                return key
+        except Exception:
+            pass
+        try:
+            auth_header = str(request.headers.get("Authorization", "")).strip()
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+                if token:
+                    return token
+        except Exception:
+            pass
+        try:
+            payload = request.get_json(silent=True) or {}
+            if isinstance(payload, dict):
+                key = str(payload.get("session_key", "")).strip()
+                if key:
+                    return key
+        except Exception:
+            pass
+        return ""
+
+    def _validate_session(session_key: str) -> bool:
+        if not _security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH):
+            return True
+        key = str(session_key or "").strip()
+        if not key:
+            return False
+        _cleanup_expired_sessions()
+        now = time.time()
+        with sessions_lock:
+            expires_at = sessions.get(key)
+            if expires_at is None or now >= float(expires_at):
+                sessions.pop(key, None)
+                return False
+            sessions[key] = now + float(_session_timeout())
+        return True
+
+    def require_session(handler):
+        @wraps(handler)
+        def wrapped(*args, **kwargs):
+            if not _security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH):
+                return handler(*args, **kwargs)
+            if not _validate_session(_get_session_key_from_request()):
+                return jsonify({"status": "error", "message": "Invalid or expired session"}), 401
+            return handler(*args, **kwargs)
+
+        return wrapped
+
+    def _resolve_lan_host(bind_host: str) -> str:
+        host = str(bind_host or "").strip().lower()
+        if host in ("0.0.0.0", "::", ""):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                    probe.settimeout(0.5)
+                    probe.connect(("8.8.8.8", 80))
+                    ip = str(probe.getsockname()[0] or "").strip()
+                    if ip and ip != "127.0.0.1":
+                        return ip
+            except Exception:
+                return ""
+            return ""
+        if host in ("localhost", "127.0.0.1", "::1"):
+            return ""
+        return str(bind_host or "").strip()
+
+    def _current_bases() -> tuple[str, str, str]:
+        snapshot = controller.snapshot()
+        cfg = snapshot.get("config", {}) if isinstance(snapshot, dict) else {}
+        host = str(cfg.get("host") or "0.0.0.0").strip() or "0.0.0.0"
+        port = _coerce_int(cfg.get("port"), 8080)
+        local_base = f"http://127.0.0.1:{port}"
+        lan_host = _resolve_lan_host(host)
+        lan_base = f"http://{lan_host}:{port}" if lan_host else ""
+        tunnel_base = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip().rstrip("/")
+        return local_base, lan_base, tunnel_base
+
+    def _find_camera_row(camera_id: str) -> Optional[dict]:
+        camera_key = str(camera_id or "").strip()
+        for row in controller.camera_statuses():
+            if str(row.get("id") or "") == camera_key:
+                return row
+        return None
+
+    def _mjpeg_generator(camera_id: str):
+        selected = controller.ensure_camera_selected(camera_id, save=False)
+        if not selected:
+            return
+        target = controller.current_session()
+        if target is None:
+            return
+        target.acquire_client()
+        try:
+            while True:
+                frame = target.latest_jpeg()
+                if frame:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+                        + frame
+                        + b"\r\n"
+                    )
+                time.sleep(0.04)
+        finally:
+            target.release_client()
+
+    @app.before_request
+    def _count_requests():
+        request_count["value"] += 1
 
     @app.route("/")
+    @app.route("/dashboard", methods=["GET"])
     def index():
+        session_key = _get_session_key_from_request()
+        if _security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH) and not _validate_session(session_key):
+            session_key = ""
         return render_template_string(
             DASHBOARD_TEMPLATE,
             initial=controller.snapshot(),
             config_path=str(config_path),
+            session_key=session_key,
+            require_auth=bool(_security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH)),
+        )
+
+    @app.route("/auth", methods=["POST"])
+    def auth():
+        data = request.get_json(silent=True) or {}
+        provided = str(data.get("password", ""))
+        security = _security_settings()
+        if provided == str(security.get("password") or DEFAULT_PASSWORD):
+            session_key = _create_session()
+            return jsonify(
+                {
+                    "status": "success",
+                    "session_key": session_key,
+                    "timeout": _session_timeout(),
+                    "require_auth": bool(security.get("require_auth", DEFAULT_REQUIRE_AUTH)),
+                }
+            )
+        return jsonify({"status": "error", "message": "Invalid password"}), 401
+
+    @app.route("/session/rotate", methods=["POST"])
+    @require_session
+    def rotate_session():
+        session_key, invalidated = _rotate_sessions()
+        return jsonify(
+            {
+                "status": "success",
+                "message": "Session keys rotated",
+                "session_key": session_key,
+                "timeout": _session_timeout(),
+                "invalidated_sessions": int(invalidated),
+            }
         )
 
     @app.route("/api/status")
+    @require_session
     def api_status():
         return jsonify(controller.snapshot())
 
     @app.route("/api/config", methods=["GET", "POST"])
+    @require_session
     def api_config():
         if getattr(request, "method", "GET") == "GET":
             return jsonify(controller.snapshot())
@@ -1871,12 +2592,14 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
         return jsonify(snapshot)
 
     @app.route("/api/config/reload", methods=["POST"])
+    @require_session
     def api_config_reload():
         payload = request.get_json(silent=True) or {}
         apply_now = bool(payload.get("apply", True))
         return jsonify(controller.reload_from_disk(apply_now=apply_now))
 
     @app.route("/api/cameras/refresh", methods=["POST"])
+    @require_session
     def api_refresh_cameras():
         payload = request.get_json(silent=True) or {}
         apply_now = bool(payload.get("apply", False))
@@ -1889,24 +2612,477 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
             )
         )
 
-    @app.route("/stream")
-    def stream():
+    @app.route("/health", methods=["GET"])
+    def health():
+        cameras = controller.camera_statuses()
+        online_count = sum(1 for row in cameras if bool(row.get("online")))
+        enabled_count = sum(1 for row in cameras if bool(row.get("enabled", True)))
+        total_clients = sum(_coerce_int(row.get("clients"), 0) for row in cameras)
+        with sessions_lock:
+            sessions_active = len(sessions)
+        tunnel_url = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip()
+        return jsonify(
+            {
+                "status": "ok",
+                "service": "camera_router",
+                "uptime_seconds": round(time.time() - startup_time, 2),
+                "require_auth": bool(_security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH)),
+                "protocols": controller.protocol_capabilities(),
+                "tunnel_running": bool(tunnel_url),
+                "tunnel_error": "",
+                "feeds_total": len(cameras),
+                "feeds_online": online_count,
+                "feeds_enabled": enabled_count,
+                "clients": total_clients,
+                "sessions_active": sessions_active,
+                "requests_served": int(request_count["value"]),
+                "tunnel_url": tunnel_url,
+            }
+        )
 
-        def mjpeg_generator():
+    @app.route("/list", methods=["GET"])
+    @require_session
+    def list_cameras():
+        cameras = controller.camera_statuses()
+        local_base, lan_base, tunnel_base = _current_bases()
+        for row in cameras:
+            camera_id = str(row.get("id") or "")
+            row["snapshot_url"] = f"/camera/{camera_id}"
+            row["video_url"] = f"/video/{camera_id}"
+            row["modes"] = controller.camera_mode_urls(camera_id)
+            row["protocols"] = controller.protocol_capabilities()
+        return jsonify(
+            {
+                "status": "success",
+                "service": "camera_router",
+                "cameras": cameras,
+                "protocols": controller.protocol_capabilities(),
+                "stream_format": "multipart/x-mixed-replace; boundary=frame",
+                "session_timeout": _session_timeout(),
+                "lan_base_url": lan_base,
+                "tunnel": {
+                    "state": "active" if tunnel_base else "inactive",
+                    "url": tunnel_base,
+                },
+                "routes": {
+                    "auth": "/auth",
+                    "session_rotate": "/session/rotate",
+                    "health": "/health",
+                    "list": "/list",
+                    "imu": "/imu",
+                    "imu_stream": "/imu/stream",
+                    "snapshot": "/camera/<camera_id>",
+                    "jpeg": "/jpeg/<camera_id>",
+                    "frame_packet": "/frame_packet/<camera_id>",
+                    "stream": "/video/<camera_id>",
+                    "mjpeg": "/mjpeg/<camera_id>",
+                    "stream_options": "/stream_options/<camera_id>",
+                    "camera_state": "/camera_state/<camera_id>",
+                    "camera_recover": "/camera/recover",
+                    "camera_cycle": "/camera/cycle",
+                    "router_info": "/router_info",
+                    "tunnel_info": "/tunnel_info",
+                },
+                "local": {
+                    "base_url": local_base,
+                    "list_url": f"{local_base}/list",
+                    "health_url": f"{local_base}/health",
+                    "dashboard_url": f"{local_base}/dashboard",
+                    "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
+                },
+                "lan": {
+                    "base_url": lan_base,
+                    "list_url": f"{lan_base}/list" if lan_base else "",
+                    "health_url": f"{lan_base}/health" if lan_base else "",
+                    "dashboard_url": f"{lan_base}/dashboard" if lan_base else "",
+                    "frame_packet_template": f"{lan_base}/frame_packet/<camera_id>" if lan_base else "",
+                },
+                "tunnel_url": tunnel_base,
+            }
+        )
+
+    @app.route("/camera/recover", methods=["POST"])
+    @app.route("/camera/cycle", methods=["POST"])
+    @require_session
+    def camera_recover():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        reason = str(payload.get("reason") or payload.get("source") or "api").strip() or "api"
+        settle_ms = max(0, _coerce_int(payload.get("settle_ms"), 350))
+        camera_id = str(payload.get("camera_id") or payload.get("id") or "").strip()
+        requested = []
+        before = controller.camera_statuses()
+        if camera_id:
+            if not controller.ensure_camera_selected(camera_id, save=False):
+                return jsonify({"status": "error", "message": "Camera not found"}), 404
+            requested.append(camera_id)
+        controller.update_config(patch={}, save=False, apply_now=True, refresh_cameras=False)
+        if settle_ms > 0:
+            time.sleep(float(settle_ms) / 1000.0)
+        after = controller.camera_statuses()
+        after_online = sum(1 for row in after if bool(row.get("online")))
+        after_total = len(after)
+        return jsonify(
+            {
+                "status": "success",
+                "service": "camera_router",
+                "message": "Recovery requested",
+                "reason": reason,
+                "requested": requested or [str(row.get("id")) for row in before if row.get("online")],
+                "elapsed_ms": int(settle_ms),
+                "after_online": int(after_online),
+                "after_total": int(after_total),
+            }
+        )
+
+    @app.route("/camera_state/<camera_id>", methods=["GET", "POST"])
+    @require_session
+    def camera_state(camera_id: str):
+        camera_key = str(camera_id or "").strip()
+        row = _find_camera_row(camera_key)
+        if row is None:
+            return jsonify({"status": "error", "message": "Camera not found", "camera_id": camera_key}), 404
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            enabled = payload.get("enabled")
+            if enabled is None and isinstance(payload.get("camera"), dict):
+                enabled = payload.get("camera", {}).get("enabled")
+            if enabled is None:
+                return jsonify({"status": "error", "message": "No state change requested", "camera_id": camera_key}), 400
+            controller.set_camera_enabled(camera_key, _coerce_bool(enabled, True), save=True)
+            row = _find_camera_row(camera_key) or row
+            return jsonify(
+                {
+                    "status": "success",
+                    "camera_id": camera_key,
+                    "changed": True,
+                    "enabled": bool(row.get("enabled", True)),
+                    "configured_enabled": bool(row.get("enabled", True)),
+                    "configured_enabled_key": camera_key,
+                    "message": "Camera state updated",
+                }
+            )
+        return jsonify(
+            {
+                "status": "success",
+                "camera_id": camera_key,
+                "enabled": bool(row.get("enabled", True)),
+                "configured_enabled": bool(row.get("enabled", True)),
+                "configured_enabled_key": camera_key,
+            }
+        )
+
+    @app.route("/camera/config", methods=["POST"])
+    @require_session
+    def camera_config():
+        payload = request.get_json(silent=True) or {}
+        camera_id = str(payload.get("camera_id") or payload.get("id") or "").strip()
+        if not camera_id:
+            return jsonify({"status": "error", "message": "camera_id is required"}), 400
+        controller.set_camera_enabled(camera_id, _coerce_bool(payload.get("enabled"), True), save=True)
+        row = _find_camera_row(camera_id)
+        return jsonify({"status": "success", "camera": row or {"id": camera_id}})
+
+    @app.route("/stream_options/<camera_id>", methods=["GET", "POST"])
+    @require_session
+    def stream_options_for_camera(camera_id: str):
+        camera_key = str(camera_id or "").strip()
+        row = _find_camera_row(camera_key)
+        if row is None:
+            return jsonify({"status": "error", "message": "Camera not found"}), 404
+        profile = dict(row.get("capture_profile") or {})
+        profile_revision = int(profile_revisions.get(camera_key, 1))
+        rotation = int(row.get("rotation_degrees", 0) or 0)
+
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            if not isinstance(payload, dict):
+                return jsonify({"status": "error", "message": "Payload must be an object"}), 400
+            changed = False
+            profile_changed = False
+            rotation_changed = False
+
+            rotation_input = None
+            for candidate in ("rotation_degrees", "rotate_degrees", "rotation"):
+                if candidate in payload:
+                    rotation_input = payload.get(candidate)
+                    break
+            if rotation_input is None and "rotate_clockwise" in payload:
+                rotation_input = 90 if _coerce_bool(payload.get("rotate_clockwise"), False) else 0
+            if rotation_input is not None:
+                normalized_rotation = _coerce_int(rotation_input, rotation)
+                if normalized_rotation not in VALID_ORIENTATIONS:
+                    return jsonify(
+                        {
+                            "status": "error",
+                            "message": "rotation_degrees must be one of 0, 90, 180, 270",
+                            "camera_id": camera_key,
+                        }
+                    ), 400
+                controller.update_config(
+                    patch={
+                        "camera_index": _camera_index_from_id(camera_key),
+                        "orientation": normalized_rotation,
+                    },
+                    save=True,
+                    apply_now=True,
+                    refresh_cameras=False,
+                )
+                rotation = normalized_rotation
+                rotation_changed = True
+                changed = True
+
+            profile_payload = None
+            if "profile" in payload and isinstance(payload.get("profile"), dict):
+                profile_payload = payload.get("profile")
+            elif any(key in payload for key in ("pixel_format", "width", "height", "fps")):
+                profile_payload = {
+                    "pixel_format": payload.get("pixel_format"),
+                    "width": payload.get("width"),
+                    "height": payload.get("height"),
+                    "fps": payload.get("fps"),
+                }
+            if profile_payload is not None:
+                profile, profile_changed = controller.set_camera_profile(camera_key, profile_payload, save=True)
+                if profile_changed:
+                    profile_revisions[camera_key] = int(profile_revisions.get(camera_key, 1)) + 1
+                    profile_revision = int(profile_revisions[camera_key])
+                changed = changed or profile_changed
+
+            if not changed:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "message": "No changes requested. Provide profile fields and/or rotation_degrees.",
+                        "camera_id": camera_key,
+                    }
+                ), 400
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "camera_id": camera_key,
+                    "changed": bool(changed),
+                    "profile_changed": bool(profile_changed),
+                    "profile_revision": int(profile_revision),
+                    "profile": profile,
+                    "profile_restart_forced": bool(profile_changed),
+                    "rotation_changed": bool(rotation_changed),
+                    "configured_rotation_degrees": int(rotation),
+                    "configured_rotation_key": camera_key,
+                    "effective_rotation_degrees": int(rotation),
+                    "default_rotation_degrees": 0,
+                    "message": "Camera options updated",
+                }
+            )
+
+        return jsonify(
+            {
+                "status": "success",
+                "camera_id": camera_key,
+                "protocols": controller.protocol_capabilities(),
+                "modes": controller.camera_mode_urls(camera_key),
+                "profile_mutable": True,
+                "current_profile": profile,
+                "profile_revision": int(profile_revision),
+                "available_profiles": [dict(item) for item in STREAM_PROFILE_OPTIONS],
+                "profile_query_error": "",
+                "default_rotation_degrees": 0,
+                "configured_rotation_degrees": int(rotation),
+                "configured_rotation_key": camera_key,
+                "effective_rotation_degrees": int(rotation),
+            }
+        )
+
+    @app.route("/imu", methods=["GET"])
+    @require_session
+    def imu_endpoint():
+        return jsonify({"accel": None, "gyro": None, "server_time_ms": int(time.time() * 1000)})
+
+    @app.route("/imu/stream", methods=["GET"])
+    @require_session
+    def imu_stream_endpoint():
+        hz = max(1, min(120, _coerce_int(request.args.get("hz"), 20)))
+        interval_seconds = 1.0 / float(hz)
+
+        def generate():
             while True:
-                target = controller.current_session()
-                frame = target.latest_jpeg() if target else b""
-                if frame:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
-                        + frame
-                        + b"\r\n"
-                    )
-                time.sleep(0.04)
+                payload = {
+                    "accel": None,
+                    "gyro": None,
+                    "server_time_ms": int(time.time() * 1000),
+                }
+                yield f"event: imu\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                time.sleep(interval_seconds)
 
-        return Response(mjpeg_generator(), mimetype="multipart/x-mixed-replace; boundary=frame")
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.route("/camera/<camera_id>", methods=["GET"])
+    @require_session
+    def camera_snapshot(camera_id: str):
+        camera_key = str(camera_id or "").strip()
+        row = _find_camera_row(camera_key)
+        if row is None:
+            return Response(b"Camera not found", status=404)
+        if not bool(row.get("enabled", True)):
+            return Response(b"Camera disabled", status=403)
+        if not controller.ensure_camera_selected(camera_key, save=False):
+            return Response(b"Camera not found", status=404)
+        target = controller.current_session()
+        frame = target.latest_jpeg() if target else b""
+        if not frame:
+            return Response(b"No frame", status=503)
+        return Response(frame, mimetype="image/jpeg")
+
+    @app.route("/snapshot/<camera_id>", methods=["GET"])
+    @require_session
+    def snapshot_alias(camera_id: str):
+        return camera_snapshot(camera_id)
+
+    @app.route("/jpeg/<camera_id>", methods=["GET"])
+    @require_session
+    def jpeg_snapshot(camera_id: str):
+        return camera_snapshot(camera_id)
+
+    @app.route("/frame_packet/<camera_id>", methods=["GET"])
+    @require_session
+    def frame_packet(camera_id: str):
+        camera_key = str(camera_id or "").strip()
+        row = _find_camera_row(camera_key)
+        if row is None:
+            return jsonify({"status": "error", "message": "Camera not found", "camera_id": camera_key}), 404
+        if not bool(row.get("enabled", True)):
+            return jsonify({"status": "error", "message": "Camera disabled", "camera_id": camera_key}), 403
+        if not controller.ensure_camera_selected(camera_key, save=False):
+            return jsonify({"status": "error", "message": "Camera not found", "camera_id": camera_key}), 404
+        target = controller.current_session()
+        frame = target.latest_jpeg() if target else b""
+        if not frame:
+            return jsonify({"status": "error", "message": "Frame unavailable", "camera_id": camera_key}), 503
+        frame_b64 = base64.b64encode(frame).decode("ascii")
+        return jsonify(
+            {
+                "status": "success",
+                "frame_packet": {
+                    "camera_id": camera_key,
+                    "frame": frame_b64,
+                    "encoding": "image/jpeg;base64",
+                    "timestamp_ms": int(time.time() * 1000),
+                    "width": int(row.get("width") or 0),
+                    "height": int(row.get("height") or 0),
+                    "quality": 82,
+                    "bytes": int(len(frame)),
+                    "max_kbps": _coerce_int(request.args.get("max_kbps"), 900),
+                    "interval_ms": _coerce_int(request.args.get("interval_ms"), 280),
+                },
+            }
+        )
+
+    @app.route("/video/<camera_id>", methods=["GET"])
+    @require_session
+    def video(camera_id: str):
+        camera_key = str(camera_id or "").strip()
+        row = _find_camera_row(camera_key)
+        if row is None:
+            return Response(b"Camera not found", status=404)
+        if not bool(row.get("enabled", True)):
+            return Response(b"Camera disabled", status=403)
+        return Response(
+            _mjpeg_generator(camera_key),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.route("/mjpeg/<camera_id>", methods=["GET"])
+    @require_session
+    def mjpeg_alias(camera_id: str):
+        return video(camera_id)
+
+    @app.route("/stream", methods=["GET"])
+    @require_session
+    def stream():
+        current = controller.snapshot().get("config", {})
+        camera_id = _camera_id_for_index(_coerce_int(current.get("camera_index"), 0))
+        return video(camera_id)
+
+    @app.route("/tunnel_info", methods=["GET"])
+    def tunnel_info():
+        tunnel_url = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip().rstrip("/")
+        if tunnel_url:
+            return jsonify(
+                {
+                    "status": "success",
+                    "tunnel_url": tunnel_url,
+                    "running": True,
+                    "message": "Tunnel URL available",
+                }
+            )
+        return jsonify(
+            {
+                "status": "pending",
+                "running": False,
+                "tunnel_url": "",
+                "message": f"Set {DEFAULT_TUNNEL_URL_ENV} to publish camera service externally",
+            }
+        )
+
+    @app.route("/router_info", methods=["GET"])
+    def router_info():
+        local_base, lan_base, tunnel_base = _current_bases()
+        security = _security_settings()
+        selected_transport = "tunnel" if tunnel_base else ("lan" if lan_base else "local")
+        selected_base = tunnel_base or lan_base or local_base
+        return jsonify(
+            {
+                "status": "success",
+                "service": "camera_router",
+                "transport": selected_transport,
+                "base_url": selected_base,
+                "local": {
+                    "base_url": local_base,
+                    "dashboard_url": f"{local_base}/dashboard",
+                    "auth_url": f"{local_base}/auth",
+                    "list_url": f"{local_base}/list",
+                    "health_url": f"{local_base}/health",
+                    "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
+                    "lan_base_url": lan_base,
+                    "lan_dashboard_url": f"{lan_base}/dashboard" if lan_base else "",
+                    "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
+                    "lan_list_url": f"{lan_base}/list" if lan_base else "",
+                    "lan_health_url": f"{lan_base}/health" if lan_base else "",
+                    "lan_frame_packet_template": f"{lan_base}/frame_packet/<camera_id>" if lan_base else "",
+                },
+                "tunnel": {
+                    "state": "active" if tunnel_base else "inactive",
+                    "tunnel_url": tunnel_base,
+                    "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
+                    "list_url": f"{tunnel_base}/list" if tunnel_base else "",
+                    "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+                    "frame_packet_template": f"{tunnel_base}/frame_packet/<camera_id>" if tunnel_base else "",
+                    "error": "",
+                },
+                "security": {
+                    "require_auth": bool(security.get("require_auth", DEFAULT_REQUIRE_AUTH)),
+                    "session_timeout": int(security.get("session_timeout", DEFAULT_SESSION_TIMEOUT)),
+                },
+            }
+        )
 
     return app
 
@@ -1921,6 +3097,8 @@ def prepare_runtime_imports() -> None:
     global jsonify
     global request
     global render_template_string
+    global stream_with_context
+    global CORS
     global app_callback_class
     global get_caps_from_pad
     global get_numpy_from_buffer
@@ -1949,6 +3127,13 @@ def prepare_runtime_imports() -> None:
     from flask import jsonify as _jsonify
     from flask import request as _request
     from flask import render_template_string as _render_template_string
+    from flask import stream_with_context as _stream_with_context
+
+    _CORS = None
+    try:
+        from flask_cors import CORS as _CORS
+    except Exception:
+        _CORS = None
 
     from hailo_apps.python.core.common.buffer_utils import (
         get_caps_from_pad as _get_caps_from_pad,
@@ -1968,6 +3153,8 @@ def prepare_runtime_imports() -> None:
     jsonify = _jsonify
     request = _request
     render_template_string = _render_template_string
+    stream_with_context = _stream_with_context
+    CORS = _CORS
     app_callback_class = _app_callback_class
     get_caps_from_pad = _get_caps_from_pad
     get_numpy_from_buffer = _get_numpy_from_buffer

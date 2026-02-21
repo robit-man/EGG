@@ -46,7 +46,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
   - watchdog pulls pipeline observability events and shows ASR/LLM/TTS progress + recognized text in log pane
   - LLM streaming events include active model, streamed token chunks, estimated token count, and tokens/sec telemetry
 - `router.py`: NKN sidecar + persistent router address + remote tunnel discovery + terminal dashboard
-- `camera_router.py`: camera list/snapshot/video (+ `/mjpeg` and `/jpeg`) routes + terminal dashboard
+- `camera/camera_dashboard.py`: Hailo CSI camera dashboard + model/camera runtime config + camera-router compatible API routes
 - `pipeline_api.py`: HTTP bridge for LLM prompt/TTS prompt + LLM model dashboard (`/llm/dashboard`) + terminal dashboard
   - includes `/pipeline/state` for live ASR -> LLM -> TTS stage/event observability
 - `audio_router.py`: audio auth/device routing + `/llm/prompt` + `/tts/speak` + WebRTC offer route + terminal dashboard
@@ -67,7 +67,7 @@ curl -sSL https://raw.githubusercontent.com/robit-man/EGG/main/pi5/teardown.sh -
 
 Local ports:
 - `5070` router (`/health`, `/nkn/info`, `/nkn/resolve`, dashboard)
-- `8080` camera router (`/auth`, `/dashboard`, `/list`, `/camera/config`, `/camera/recover`, `/snapshot/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`)
+- `8080` camera router (`/auth`, `/dashboard`, `/health`, `/list`, `/router_info`, `/tunnel_info`, `/camera/recover`, `/camera_state/cam0`, `/stream_options/cam0`, `/camera/cam0`, `/jpeg/cam0`, `/video/cam0`, `/mjpeg/cam0`, `/imu`, `/imu/stream`)
 - `6590` pipeline API (`/auth`, `/list`, `/health`, `/pipeline/state`, `/llm/prompt`, `/llm/dashboard`, `/llm/models`, `/llm/config`, `/llm/pull`, `/llm/pull/status`, `/tts/speak`)
 - `8090` audio router (`/auth`, `/list`, `/devices`, `/devices/select`, `/llm/prompt`, `/tts/speak`, `/webrtc/offer`)
 - `6545` model bridge (`model_to_tts.py`)
@@ -78,7 +78,7 @@ Local ports:
 All Flask services bind to `0.0.0.0` so you can use the Pi LAN IP from other devices.
 
 Default service auth:
-- `camera_router.py` password defaults to `egg`
+- `camera/camera_dashboard.py` password defaults to `egg`
 - `pipeline_api.py` password defaults to `egg`
 - `audio_router.py` password defaults to `egg`
 - change in `camera_router_config.json`, `pipeline_api_config.json`, or `audio_router_config.json` (or from each service terminal UI under `Security`)

@@ -45,7 +45,16 @@ copy_file "$REPO_DIR/pi5/sync_runtime.sh" "$TARGET_DIR/sync_runtime.sh"
 copy_file "$REPO_DIR/pi5/watchdog.py" "$TARGET_DIR/watchdog.py"
 copy_file "$REPO_DIR/pi5/router.py" "$TARGET_DIR/router.py"
 copy_file "$REPO_DIR/pi5/terminal_ui.py" "$TARGET_DIR/terminal_ui.py"
-copy_file "$REPO_DIR/pi5/camera_router.py" "$TARGET_DIR/camera_router.py"
+
+if [ -d "$REPO_DIR/pi5/camera" ]; then
+    if command -v rsync > /dev/null 2>&1; then
+        rsync -a --delete "$REPO_DIR/pi5/camera/" "$TARGET_DIR/camera/"
+    else
+        rm -rf "$TARGET_DIR/camera"
+        cp -r "$REPO_DIR/pi5/camera" "$TARGET_DIR/"
+    fi
+fi
+
 copy_file "$REPO_DIR/pi5/pipeline_api.py" "$TARGET_DIR/pipeline_api.py"
 copy_file "$REPO_DIR/pi5/audio_router.py" "$TARGET_DIR/audio_router.py"
 copy_file "$REPO_DIR/pi5/run_asr_stream.py" "$TARGET_DIR/run_asr_stream.py"

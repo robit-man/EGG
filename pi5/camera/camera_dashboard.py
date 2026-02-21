@@ -17,6 +17,8 @@ import curses
 import importlib
 import json
 import os
+import platform
+import random
 import re
 import secrets
 import shlex
@@ -45,7 +47,24 @@ DEFAULT_PASSWORD = "egg"
 DEFAULT_SESSION_TIMEOUT = 300
 DEFAULT_REQUIRE_AUTH = True
 DEFAULT_TUNNEL_URL_ENV = "EGG_CAMERA_TUNNEL_URL"
+DEFAULT_ENABLE_TUNNEL = True
+DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
+DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
+DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS = 45.0
+MAX_TUNNEL_RESTART_DELAY_SECONDS = 300.0
+CAMERA_CLOUDFLARED_BASENAME = "camera_router_cloudflared"
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
 CAMERA_LIFECYCLE_LOCK = threading.Lock()
+tunnel_enabled = DEFAULT_ENABLE_TUNNEL
+auto_install_cloudflared = DEFAULT_AUTO_INSTALL_CLOUDFLARED
+tunnel_process = None
+tunnel_url = None
+tunnel_last_error = ""
+tunnel_desired = False
+tunnel_url_lock = threading.Lock()
+tunnel_restart_lock = threading.Lock()
+tunnel_restart_failures = 0
+service_running = threading.Event()
 STREAM_PROFILE_OPTIONS = (
     {"pixel_format": "RGB", "width": 640, "height": 480, "fps": 15.0},
     {"pixel_format": "RGB", "width": 1280, "height": 720, "fps": 24.0},
@@ -732,7 +751,8 @@ def default_config(model_options: List[ModelOption], camera_options: List[Camera
             "require_auth": DEFAULT_REQUIRE_AUTH,
         },
         "tunnel": {
-            "enable": True,
+            "enable": DEFAULT_ENABLE_TUNNEL,
+            "auto_install_cloudflared": DEFAULT_AUTO_INSTALL_CLOUDFLARED,
         },
     }
 
@@ -832,8 +852,11 @@ def save_config(config_path: Path, payload: dict) -> None:
             "require_auth": _coerce_bool(security.get("require_auth"), DEFAULT_REQUIRE_AUTH),
         },
         "tunnel": {
-            "enable": _coerce_bool(tunnel.get("enable"), True),
-            "auto_install_cloudflared": _coerce_bool(tunnel.get("auto_install_cloudflared"), False),
+            "enable": _coerce_bool(tunnel.get("enable"), DEFAULT_ENABLE_TUNNEL),
+            "auto_install_cloudflared": _coerce_bool(
+                tunnel.get("auto_install_cloudflared"),
+                DEFAULT_AUTO_INSTALL_CLOUDFLARED,
+            ),
         },
         "cameras": camera_rows,
     }
@@ -949,8 +972,306 @@ def _normalized_security(raw_security) -> dict:
 def _normalized_tunnel(raw_tunnel) -> dict:
     tunnel = raw_tunnel if isinstance(raw_tunnel, dict) else {}
     return {
-        "enable": _coerce_bool(tunnel.get("enable"), True),
-        "auto_install_cloudflared": _coerce_bool(tunnel.get("auto_install_cloudflared"), False),
+        "enable": _coerce_bool(tunnel.get("enable"), DEFAULT_ENABLE_TUNNEL),
+        "auto_install_cloudflared": _coerce_bool(
+            tunnel.get("auto_install_cloudflared"),
+            DEFAULT_AUTO_INSTALL_CLOUDFLARED,
+        ),
+    }
+
+
+def _log(message: str) -> None:
+    try:
+        print(str(message), flush=True)
+    except Exception:
+        pass
+
+
+def _next_tunnel_restart_delay(rate_limited: bool = False) -> float:
+    global tunnel_restart_failures
+    tunnel_restart_failures = min(int(tunnel_restart_failures) + 1, 8)
+    base_delay = (
+        DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS
+        if rate_limited
+        else DEFAULT_TUNNEL_RESTART_DELAY_SECONDS
+    )
+    delay = float(base_delay) * (2 ** max(0, int(tunnel_restart_failures) - 1))
+    jitter = random.uniform(0.0, min(6.0, max(1.0, delay * 0.15)))
+    return min(delay + jitter, MAX_TUNNEL_RESTART_DELAY_SECONDS)
+
+
+def _get_cloudflared_path() -> str:
+    if os.name == "nt":
+        return os.path.join(SCRIPT_DIR, f"{CAMERA_CLOUDFLARED_BASENAME}.exe")
+    return os.path.join(SCRIPT_DIR, CAMERA_CLOUDFLARED_BASENAME)
+
+
+def _is_cloudflared_installed() -> bool:
+    if os.path.exists(_get_cloudflared_path()):
+        return True
+    try:
+        subprocess.run(["cloudflared", "--version"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _install_cloudflared() -> bool:
+    cloudflared_path = _get_cloudflared_path()
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if system == "windows":
+        if "amd64" in machine or "x86_64" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+        else:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-386.exe"
+    elif system == "linux":
+        if "aarch64" in machine or "arm64" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+        elif "arm" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+        else:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+    elif system == "darwin":
+        if "arm" in machine:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz"
+        else:
+            url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz"
+    else:
+        _log(f"[ERROR] Unsupported platform for cloudflared: {system} {machine}")
+        return False
+
+    try:
+        import urllib.request
+
+        _log(f"[TUNNEL] Downloading cloudflared from {url}")
+        urllib.request.urlretrieve(url, cloudflared_path)
+        if os.name != "nt":
+            os.chmod(cloudflared_path, 0o755)
+        _log("[TUNNEL] cloudflared installed successfully")
+        return True
+    except Exception as exc:
+        _log(f"[ERROR] Failed to install cloudflared: {exc}")
+        return False
+
+
+def _stop_cloudflared_tunnel() -> None:
+    global tunnel_process, tunnel_last_error, tunnel_url, tunnel_desired, tunnel_restart_failures
+    tunnel_desired = False
+    tunnel_restart_failures = 0
+    process = tunnel_process
+    if process is None:
+        with tunnel_url_lock:
+            tunnel_url = None
+        return
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        pass
+    finally:
+        tunnel_process = None
+        with tunnel_url_lock:
+            tunnel_url = None
+        tunnel_last_error = "Tunnel stopped"
+
+
+def _start_cloudflared_tunnel(local_port: int) -> bool:
+    global tunnel_url, tunnel_process, tunnel_last_error, tunnel_desired
+    with tunnel_restart_lock:
+        if tunnel_process is not None and tunnel_process.poll() is None:
+            return True
+        tunnel_desired = True
+
+    cloudflared_path = _get_cloudflared_path()
+    if not os.path.exists(cloudflared_path):
+        cloudflared_path = "cloudflared"
+
+    with tunnel_url_lock:
+        tunnel_url = None
+    tunnel_last_error = ""
+    cmd = [
+        cloudflared_path,
+        "tunnel",
+        "--protocol",
+        "http2",
+        "--url",
+        f"http://localhost:{int(local_port)}",
+    ]
+    _log(f"[START] Launching cloudflared: {' '.join(cmd)}")
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        tunnel_process = process
+    except Exception as exc:
+        tunnel_last_error = str(exc)
+        _log(f"[ERROR] Failed to start cloudflared tunnel: {exc}")
+        return False
+
+    def monitor_output() -> None:
+        global tunnel_url, tunnel_process, tunnel_last_error, tunnel_restart_failures
+        found_url = False
+        captured_url = ""
+        rate_limited = False
+        for raw_line in iter(process.stdout.readline, ""):
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if "429 too many requests" in lowered or "error code: 1015" in lowered:
+                rate_limited = True
+            if "trycloudflare.com" in line:
+                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                if not match:
+                    match = re.search(r"https://[^\s]+trycloudflare\.com[^\s]*", line)
+                if match:
+                    with tunnel_url_lock:
+                        if tunnel_url is None:
+                            captured_url = match.group(0).strip().rstrip("/")
+                            tunnel_url = captured_url
+                            found_url = True
+                            tunnel_last_error = ""
+                            tunnel_restart_failures = 0
+                            _log(f"[TUNNEL] Camera URL: {tunnel_url}")
+
+        return_code = process.poll()
+        with tunnel_restart_lock:
+            if tunnel_process is process:
+                tunnel_process = None
+        if captured_url:
+            with tunnel_url_lock:
+                if tunnel_url == captured_url:
+                    tunnel_url = None
+        if return_code is not None:
+            if found_url:
+                tunnel_restart_failures = 0
+                tunnel_last_error = f"cloudflared exited (code {return_code}); tunnel URL expired"
+            else:
+                if rate_limited:
+                    tunnel_last_error = f"cloudflared rate-limited (429/1015) before URL (code {return_code})"
+                else:
+                    tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
+            _log(f"[WARN] {tunnel_last_error}")
+            if tunnel_desired and service_running.is_set():
+                delay = _next_tunnel_restart_delay(rate_limited=rate_limited and not found_url)
+                _log(f"[WARN] Restarting cloudflared in {delay:.1f}s...")
+                time.sleep(delay)
+                if tunnel_desired and service_running.is_set():
+                    _start_cloudflared_tunnel(local_port)
+
+    threading.Thread(target=monitor_output, daemon=True).start()
+    return True
+
+
+def _tunnel_payload() -> dict:
+    process_running = tunnel_process is not None and tunnel_process.poll() is None
+    with tunnel_url_lock:
+        current_tunnel = str(tunnel_url or "").strip() if process_running else ""
+        stale_tunnel = str(tunnel_url or "").strip() if (tunnel_url and not process_running) else ""
+        current_error = str(tunnel_last_error or "").strip()
+
+    env_tunnel = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip().rstrip("/")
+    source = "cloudflared"
+    if env_tunnel and not current_tunnel:
+        current_tunnel = env_tunnel
+        stale_tunnel = ""
+        source = "env"
+
+    state = "active" if current_tunnel else ("starting" if process_running else "inactive")
+    if stale_tunnel and not process_running and not current_tunnel:
+        state = "stale"
+    if current_error and not process_running and not current_tunnel and not stale_tunnel:
+        state = "error"
+
+    return {
+        "state": state,
+        "tunnel_url": current_tunnel,
+        "stale_tunnel_url": stale_tunnel,
+        "error": current_error,
+        "running": bool(process_running),
+        "enabled": bool(tunnel_enabled),
+        "source": source if current_tunnel else "",
+    }
+
+
+def _apply_tunnel_runtime_config(config: dict, startup_delay: float = 0.0) -> None:
+    global tunnel_enabled, auto_install_cloudflared, tunnel_last_error
+    cfg = config if isinstance(config, dict) else {}
+    tunnel_cfg = _normalized_tunnel(cfg.get("tunnel", {}))
+    tunnel_enabled = bool(tunnel_cfg.get("enable", DEFAULT_ENABLE_TUNNEL))
+    auto_install_cloudflared = bool(
+        tunnel_cfg.get("auto_install_cloudflared", DEFAULT_AUTO_INSTALL_CLOUDFLARED)
+    )
+    listen_port = max(1, _coerce_int(cfg.get("port"), 8080))
+    env_tunnel = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip().rstrip("/")
+
+    if not tunnel_enabled:
+        _stop_cloudflared_tunnel()
+        tunnel_last_error = "Tunnel disabled by config"
+        return
+
+    if env_tunnel:
+        _stop_cloudflared_tunnel()
+        tunnel_last_error = ""
+        return
+
+    if not _is_cloudflared_installed():
+        if auto_install_cloudflared:
+            _log("[TUNNEL] cloudflared not found, attempting install...")
+            if not _install_cloudflared():
+                tunnel_last_error = "cloudflared install failed"
+                return
+        else:
+            tunnel_last_error = "cloudflared missing and auto-install disabled"
+            _log("[WARN] cloudflared missing and auto-install disabled")
+            return
+
+    running = tunnel_process is not None and tunnel_process.poll() is None
+    if running:
+        return
+
+    def _launch() -> None:
+        if startup_delay > 0:
+            time.sleep(max(0.0, float(startup_delay)))
+        if not service_running.is_set():
+            return
+        if not tunnel_enabled:
+            return
+        _start_cloudflared_tunnel(listen_port)
+
+    threading.Thread(target=_launch, daemon=True).start()
+
+
+def _camera_row_with_urls(row: dict, publish_base: str, local_base: str, lan_base: str, tunnel_base: str) -> dict:
+    camera_id = str(row.get("id", "")).strip()
+    return {
+        **row,
+        "snapshot_url": f"{publish_base}/snapshot/{camera_id}" if publish_base else f"/snapshot/{camera_id}",
+        "jpeg_url": f"{publish_base}/jpeg/{camera_id}" if publish_base else f"/jpeg/{camera_id}",
+        "video_url": f"{publish_base}/video/{camera_id}" if publish_base else f"/video/{camera_id}",
+        "mjpeg_url": f"{publish_base}/mjpeg/{camera_id}" if publish_base else f"/mjpeg/{camera_id}",
+        "local_snapshot_url": f"{local_base}/snapshot/{camera_id}" if local_base else "",
+        "local_jpeg_url": f"{local_base}/jpeg/{camera_id}" if local_base else "",
+        "local_video_url": f"{local_base}/video/{camera_id}" if local_base else "",
+        "local_mjpeg_url": f"{local_base}/mjpeg/{camera_id}" if local_base else "",
+        "lan_snapshot_url": f"{lan_base}/snapshot/{camera_id}" if lan_base else "",
+        "lan_jpeg_url": f"{lan_base}/jpeg/{camera_id}" if lan_base else "",
+        "lan_video_url": f"{lan_base}/video/{camera_id}" if lan_base else "",
+        "lan_mjpeg_url": f"{lan_base}/mjpeg/{camera_id}" if lan_base else "",
+        "tunnel_snapshot_url": f"{tunnel_base}/snapshot/{camera_id}" if tunnel_base else "",
+        "tunnel_jpeg_url": f"{tunnel_base}/jpeg/{camera_id}" if tunnel_base else "",
+        "tunnel_video_url": f"{tunnel_base}/video/{camera_id}" if tunnel_base else "",
+        "tunnel_mjpeg_url": f"{tunnel_base}/mjpeg/{camera_id}" if tunnel_base else "",
     }
 
 
@@ -2455,6 +2776,14 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
     def _session_timeout() -> int:
         return max(30, int(_security_settings().get("session_timeout", DEFAULT_SESSION_TIMEOUT)))
 
+    def _security_payload(base_url: str) -> dict:
+        return {
+            "require_auth": bool(_security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH)),
+            "session_timeout": int(_session_timeout()),
+            "auth_url": f"{base_url}/auth" if base_url else "/auth",
+            "session_rotate_url": f"{base_url}/session/rotate" if base_url else "/session/rotate",
+        }
+
     def _cleanup_expired_sessions() -> None:
         now = time.time()
         with sessions_lock:
@@ -2559,7 +2888,7 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
         local_base = f"http://127.0.0.1:{port}"
         lan_host = _resolve_lan_host(host)
         lan_base = f"http://{lan_host}:{port}" if lan_host else ""
-        tunnel_base = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip().rstrip("/")
+        tunnel_base = str(_tunnel_payload().get("tunnel_url") or "").strip().rstrip("/")
         return local_base, lan_base, tunnel_base
 
     def _find_camera_row(camera_id: str) -> Optional[dict]:
@@ -2661,6 +2990,8 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
             apply_now=apply_now,
             refresh_cameras=False,
         )
+        cfg = snapshot.get("config", {}) if isinstance(snapshot, dict) else {}
+        _apply_tunnel_runtime_config(cfg, startup_delay=0.0)
         return jsonify(snapshot)
 
     @app.route("/api/config/reload", methods=["POST"])
@@ -2668,21 +2999,25 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
     def api_config_reload():
         payload = request.get_json(silent=True) or {}
         apply_now = bool(payload.get("apply", True))
-        return jsonify(controller.reload_from_disk(apply_now=apply_now))
+        snapshot = controller.reload_from_disk(apply_now=apply_now)
+        cfg = snapshot.get("config", {}) if isinstance(snapshot, dict) else {}
+        _apply_tunnel_runtime_config(cfg, startup_delay=0.0)
+        return jsonify(snapshot)
 
     @app.route("/api/cameras/refresh", methods=["POST"])
     @require_session
     def api_refresh_cameras():
         payload = request.get_json(silent=True) or {}
         apply_now = bool(payload.get("apply", False))
-        return jsonify(
-            controller.update_config(
-                patch={},
-                save=False,
-                apply_now=apply_now,
-                refresh_cameras=True,
-            )
+        snapshot = controller.update_config(
+            patch={},
+            save=False,
+            apply_now=apply_now,
+            refresh_cameras=True,
         )
+        cfg = snapshot.get("config", {}) if isinstance(snapshot, dict) else {}
+        _apply_tunnel_runtime_config(cfg, startup_delay=0.0)
+        return jsonify(snapshot)
 
     @app.route("/health", methods=["GET"])
     def health():
@@ -2692,7 +3027,9 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
         total_clients = sum(_coerce_int(row.get("clients"), 0) for row in cameras)
         with sessions_lock:
             sessions_active = len(sessions)
-        tunnel_url = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip()
+        local_base, lan_base, tunnel_base = _current_bases()
+        publish_base = tunnel_base or lan_base or local_base
+        tunnel = _tunnel_payload()
         return jsonify(
             {
                 "status": "ok",
@@ -2700,43 +3037,65 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
                 "uptime_seconds": round(time.time() - startup_time, 2),
                 "require_auth": bool(_security_settings().get("require_auth", DEFAULT_REQUIRE_AUTH)),
                 "protocols": controller.protocol_capabilities(),
-                "tunnel_running": bool(tunnel_url),
-                "tunnel_error": "",
+                "base_url": publish_base,
+                "local_base_url": local_base,
+                "lan_base_url": lan_base,
+                "security": _security_payload(publish_base),
+                "local_security": _security_payload(local_base),
+                "lan_security": _security_payload(lan_base) if lan_base else {},
+                "tunnel": tunnel,
+                "tunnel_running": bool(tunnel.get("running") or tunnel.get("tunnel_url")),
+                "tunnel_error": str(tunnel.get("error") or ""),
                 "feeds_total": len(cameras),
                 "feeds_online": online_count,
                 "feeds_enabled": enabled_count,
                 "clients": total_clients,
                 "sessions_active": sessions_active,
                 "requests_served": int(request_count["value"]),
-                "tunnel_url": tunnel_url,
+                "tunnel_url": str(tunnel.get("tunnel_url") or ""),
             }
         )
 
     @app.route("/list", methods=["GET"])
     @require_session
     def list_cameras():
-        cameras = controller.camera_statuses()
+        rows = controller.camera_statuses()
         local_base, lan_base, tunnel_base = _current_bases()
-        for row in cameras:
-            camera_id = str(row.get("id") or "")
-            row["snapshot_url"] = f"/camera/{camera_id}"
-            row["video_url"] = f"/video/{camera_id}"
-            row["modes"] = controller.camera_mode_urls(camera_id)
-            row["protocols"] = controller.protocol_capabilities()
+        publish_base = tunnel_base or lan_base or local_base
+        tunnel = _tunnel_payload()
+        cameras = [
+            _camera_row_with_urls(row, publish_base, local_base, lan_base, tunnel_base)
+            for row in rows
+        ]
         return jsonify(
             {
                 "status": "success",
                 "service": "camera_router",
+                "base_url": publish_base,
+                "local_base_url": local_base,
+                "lan_base_url": lan_base,
+                "security": _security_payload(publish_base),
+                "local_security": _security_payload(local_base),
+                "lan_security": _security_payload(lan_base) if lan_base else {},
                 "cameras": cameras,
                 "protocols": controller.protocol_capabilities(),
                 "stream_format": "multipart/x-mixed-replace; boundary=frame",
                 "session_timeout": _session_timeout(),
-                "lan_base_url": lan_base,
                 "tunnel": {
-                    "state": "active" if tunnel_base else "inactive",
-                    "url": tunnel_base,
+                    **tunnel,
+                    "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
+                    "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
+                    "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+                    "list_url": f"{tunnel_base}/list" if tunnel_base else "",
+                    "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+                    "video_url": f"{tunnel_base}/video/cam0" if tunnel_base else "",
+                    "snapshot_url": f"{tunnel_base}/snapshot/cam0" if tunnel_base else "",
+                    "jpeg_url": f"{tunnel_base}/jpeg/cam0" if tunnel_base else "",
+                    "mjpeg_url": f"{tunnel_base}/mjpeg/cam0" if tunnel_base else "",
+                    "frame_packet_template": f"{tunnel_base}/frame_packet/<camera_id>" if tunnel_base else "",
                 },
                 "routes": {
+                    "dashboard": "/dashboard",
                     "auth": "/auth",
                     "session_rotate": "/session/rotate",
                     "health": "/health",
@@ -2757,16 +3116,28 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
                 },
                 "local": {
                     "base_url": local_base,
+                    "auth_url": f"{local_base}/auth",
+                    "session_rotate_url": f"{local_base}/session/rotate",
                     "list_url": f"{local_base}/list",
                     "health_url": f"{local_base}/health",
                     "dashboard_url": f"{local_base}/dashboard",
+                    "video_url": f"{local_base}/video/cam0",
+                    "snapshot_url": f"{local_base}/snapshot/cam0",
+                    "jpeg_url": f"{local_base}/jpeg/cam0",
+                    "mjpeg_url": f"{local_base}/mjpeg/cam0",
                     "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
                 },
                 "lan": {
                     "base_url": lan_base,
+                    "auth_url": f"{lan_base}/auth" if lan_base else "",
+                    "session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                     "list_url": f"{lan_base}/list" if lan_base else "",
                     "health_url": f"{lan_base}/health" if lan_base else "",
                     "dashboard_url": f"{lan_base}/dashboard" if lan_base else "",
+                    "video_url": f"{lan_base}/video/cam0" if lan_base else "",
+                    "snapshot_url": f"{lan_base}/snapshot/cam0" if lan_base else "",
+                    "jpeg_url": f"{lan_base}/jpeg/cam0" if lan_base else "",
+                    "mjpeg_url": f"{lan_base}/mjpeg/cam0" if lan_base else "",
                     "frame_packet_template": f"{lan_base}/frame_packet/<camera_id>" if lan_base else "",
                 },
                 "tunnel_url": tunnel_base,
@@ -3095,59 +3466,107 @@ def create_flask_app(controller: RuntimeController, config_path: Path):
 
     @app.route("/tunnel_info", methods=["GET"])
     def tunnel_info():
-        tunnel_url = str(os.environ.get(DEFAULT_TUNNEL_URL_ENV, "")).strip().rstrip("/")
-        if tunnel_url:
-            return jsonify(
-                {
-                    "status": "success",
-                    "tunnel_url": tunnel_url,
-                    "running": True,
-                    "message": "Tunnel URL available",
-                }
-            )
+        tunnel = _tunnel_payload()
+        tunnel_base = str(tunnel.get("tunnel_url") or "").strip()
+        state = str(tunnel.get("state") or "").strip().lower()
+        if tunnel_base:
+            status = "success"
+            message = "Tunnel URL available"
+        elif state in ("error", "stale"):
+            status = "unavailable"
+            message = "Tunnel unavailable"
+        else:
+            status = "pending"
+            message = "Tunnel URL not yet available"
         return jsonify(
             {
-                "status": "pending",
-                "running": False,
-                "tunnel_url": "",
-                "message": f"Set {DEFAULT_TUNNEL_URL_ENV} to publish camera service externally",
+                "status": status,
+                "service": "camera_router",
+                "message": message,
+                "state": str(tunnel.get("state") or ""),
+                "tunnel_url": tunnel_base,
+                "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
+                "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
+                "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
+                "list_url": f"{tunnel_base}/list" if tunnel_base else "",
+                "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+                "video_url": f"{tunnel_base}/video/cam0" if tunnel_base else "",
+                "snapshot_url": f"{tunnel_base}/snapshot/cam0" if tunnel_base else "",
+                "jpeg_url": f"{tunnel_base}/jpeg/cam0" if tunnel_base else "",
+                "mjpeg_url": f"{tunnel_base}/mjpeg/cam0" if tunnel_base else "",
+                "frame_packet_template": f"{tunnel_base}/frame_packet/<camera_id>" if tunnel_base else "",
+                "stale_tunnel_url": str(tunnel.get("stale_tunnel_url") or ""),
+                "error": str(tunnel.get("error") or ""),
+                "running": bool(tunnel.get("running")),
+                "enabled": bool(tunnel.get("enabled")),
+                "source": str(tunnel.get("source") or ""),
             }
         )
 
     @app.route("/router_info", methods=["GET"])
     def router_info():
         local_base, lan_base, tunnel_base = _current_bases()
+        publish_base = tunnel_base or lan_base or local_base
+        tunnel = _tunnel_payload()
+        rows = controller.camera_statuses()
+        camera_routes = [
+            _camera_row_with_urls(row, publish_base, local_base, lan_base, tunnel_base)
+            for row in rows
+        ]
         security = _security_settings()
         selected_transport = "tunnel" if tunnel_base else ("lan" if lan_base else "local")
-        selected_base = tunnel_base or lan_base or local_base
+        selected_base = publish_base
         return jsonify(
             {
                 "status": "success",
                 "service": "camera_router",
                 "transport": selected_transport,
                 "base_url": selected_base,
+                "list_url": f"{selected_base}/list" if selected_base else "",
+                "health_url": f"{selected_base}/health" if selected_base else "",
+                "video_url": f"{selected_base}/video/cam0" if selected_base else "",
+                "snapshot_url": f"{selected_base}/snapshot/cam0" if selected_base else "",
+                "jpeg_url": f"{selected_base}/jpeg/cam0" if selected_base else "",
+                "mjpeg_url": f"{selected_base}/mjpeg/cam0" if selected_base else "",
+                "local_base_url": local_base,
+                "lan_base_url": lan_base,
+                "cameras": camera_routes,
                 "local": {
                     "base_url": local_base,
                     "dashboard_url": f"{local_base}/dashboard",
                     "auth_url": f"{local_base}/auth",
+                    "session_rotate_url": f"{local_base}/session/rotate",
                     "list_url": f"{local_base}/list",
                     "health_url": f"{local_base}/health",
+                    "video_url": f"{local_base}/video/cam0",
+                    "snapshot_url": f"{local_base}/snapshot/cam0",
+                    "jpeg_url": f"{local_base}/jpeg/cam0",
+                    "mjpeg_url": f"{local_base}/mjpeg/cam0",
                     "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
                     "lan_base_url": lan_base,
                     "lan_dashboard_url": f"{lan_base}/dashboard" if lan_base else "",
                     "lan_auth_url": f"{lan_base}/auth" if lan_base else "",
+                    "lan_session_rotate_url": f"{lan_base}/session/rotate" if lan_base else "",
                     "lan_list_url": f"{lan_base}/list" if lan_base else "",
                     "lan_health_url": f"{lan_base}/health" if lan_base else "",
+                    "lan_video_url": f"{lan_base}/video/cam0" if lan_base else "",
+                    "lan_snapshot_url": f"{lan_base}/snapshot/cam0" if lan_base else "",
+                    "lan_jpeg_url": f"{lan_base}/jpeg/cam0" if lan_base else "",
+                    "lan_mjpeg_url": f"{lan_base}/mjpeg/cam0" if lan_base else "",
                     "lan_frame_packet_template": f"{lan_base}/frame_packet/<camera_id>" if lan_base else "",
                 },
                 "tunnel": {
-                    "state": "active" if tunnel_base else "inactive",
-                    "tunnel_url": tunnel_base,
+                    **tunnel,
                     "dashboard_url": f"{tunnel_base}/dashboard" if tunnel_base else "",
+                    "auth_url": f"{tunnel_base}/auth" if tunnel_base else "",
+                    "session_rotate_url": f"{tunnel_base}/session/rotate" if tunnel_base else "",
                     "list_url": f"{tunnel_base}/list" if tunnel_base else "",
                     "health_url": f"{tunnel_base}/health" if tunnel_base else "",
+                    "video_url": f"{tunnel_base}/video/cam0" if tunnel_base else "",
+                    "snapshot_url": f"{tunnel_base}/snapshot/cam0" if tunnel_base else "",
+                    "jpeg_url": f"{tunnel_base}/jpeg/cam0" if tunnel_base else "",
+                    "mjpeg_url": f"{tunnel_base}/mjpeg/cam0" if tunnel_base else "",
                     "frame_packet_template": f"{tunnel_base}/frame_packet/<camera_id>" if tunnel_base else "",
-                    "error": "",
                 },
                 "security": {
                     "require_auth": bool(security.get("require_auth", DEFAULT_REQUIRE_AUTH)),
@@ -3279,6 +3698,8 @@ def main() -> None:
         initial_config=active_config,
     )
     controller.start()
+    service_running.set()
+    _apply_tunnel_runtime_config(active_config, startup_delay=2.0)
 
     snapshot = controller.snapshot()
     flask_app = create_flask_app(controller, config_path)
@@ -3298,6 +3719,8 @@ def main() -> None:
             use_reloader=False,
         )
     finally:
+        service_running.clear()
+        _stop_cloudflared_tunnel()
         controller.stop()
 
 

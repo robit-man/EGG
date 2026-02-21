@@ -76,6 +76,9 @@ Local ports:
 - `11434` ollama (`ollama serve`)
 
 All Flask services bind to `0.0.0.0` so you can use the Pi LAN IP from other devices.
+Camera tunnel notes:
+- `camera/camera_dashboard.py` now manages its own Cloudflare tunnel when `camera_router_config.json` has `camera_router.tunnel.enable=true` (default) and publishes URLs via `/tunnel_info` and `/router_info`.
+- if `cloudflared` is missing, set `camera_router.tunnel.auto_install_cloudflared=true` (default) to auto-install at runtime.
 
 Default service auth:
 - `camera/camera_dashboard.py` password defaults to `egg`

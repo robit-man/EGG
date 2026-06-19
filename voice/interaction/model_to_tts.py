@@ -25,7 +25,7 @@ class EnvironmentManager:
     VENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
     NEEDED_PACKAGES = [
         "requests", "num2words", "ollama", "pyserial", "dotenv",
-        "beautifulsoup4", "pywifi", "numpy"
+        "beautifulsoup4", "pywifi", "numpy", "psutil"
     ]
 
     @staticmethod

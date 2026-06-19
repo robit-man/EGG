@@ -96,9 +96,21 @@ check_and_install_docker() {
         echo "         may fall back to CPU. Skipping default-runtime config." >&2
     fi
 
-    # 4. Enable + (re)start the docker daemon.
-    sudo systemctl enable docker 2>/dev/null || true
-    sudo systemctl restart docker 2>/dev/null || true
+    # 4. Enable + (re)start the docker daemon so it picks up the runtime
+    #    config. IMPORTANT: bound every systemctl call with `timeout` -- on
+    #    Jetson `systemctl restart docker` can block indefinitely (containerd
+    #    / docker.socket), which wedged the installer with no output right
+    #    after nvidia-ctk's "recommended that docker daemon be restarted".
+    #    Prefer a config reload (cheap, never blocks); only restart if needed,
+    #    and always make sure docker ends up running afterwards.
+    sudo timeout 30 systemctl enable docker 2>/dev/null || true
+    if ! sudo timeout 30 systemctl reload docker 2>/dev/null; then
+        sudo timeout 60 systemctl restart docker 2>/dev/null || true
+    fi
+    # Guarantee the daemon is up regardless of how the above went.
+    if ! sudo docker info >/dev/null 2>&1; then
+        sudo timeout 60 systemctl start docker 2>/dev/null || true
+    fi
 
     # 5. Force the reliable `sudo docker` path in jetson-containers.
     #    run.sh decides whether to use sudo with:

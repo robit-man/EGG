@@ -291,18 +291,58 @@ mkdir -p "$VOICE_DIR"
 cd "$VOICE_DIR"
 
 # ---------------------------------------------------------------------
+# Generate a robust container-launch helper.
+#
+# Why a helper instead of inlining `$(autotag ...)`:
+#   * autotag --quiet auto-confirms a registry PULL but SKIPS building
+#     (find_container only builds when quiet=False), so `autotag --quiet
+#     whisper` returns NOTHING because whisper has no prebuilt image.
+#   * When the substitution is empty, `jetson-containers run ... <empty>
+#     bash -c '...'` silently uses `bash` as the image -> it pulled
+#     bash:latest and ran python3 inside it -> "python3: command not found".
+#
+# So we run autotag WITHOUT --quiet (enables the build path) and pipe `yes`
+# into it to auto-answer BOTH the "pull it?" and "build it?" prompts. The
+# resolved tag is the only thing autotag prints to stdout (diagnostics and
+# build progress go to stderr). We then HARD-FAIL if no tag came back rather
+# than fall back to a bare image.
+# ---------------------------------------------------------------------
+CONTAINER_HELPER="/tmp/egg_container_run.sh"
+cat > "$CONTAINER_HELPER" <<EOF
+#!/bin/bash
+# Usage: egg_container_run.sh <package> <inner-bash-command>
+export PATH="$JC_DIR:\$PATH"
+bash "$CACHE_SCRIPT" 2>/dev/null || true
+
+PKG="\$1"
+INNER="\$2"
+
+echo "Resolving container image for '\$PKG' (pulling or building as needed; auto-confirmed)..."
+TAG="\$(yes | autotag "\$PKG" | tail -n1 | tr -d '[:space:]')"
+
+if [ -z "\$TAG" ]; then
+    echo ""
+    echo "ERROR: could not find or build a container image for '\$PKG'."
+    echo "       Refusing to fall back to a bare image. See the output above."
+    echo "       Terminal left open for inspection."
+    exec bash
+fi
+
+echo "Using container image: \$TAG"
+exec jetson-containers run -v "$VOICE_DIR:/voice" "\$TAG" bash -c "\$INNER"
+EOF
+chmod +x "$CONTAINER_HELPER"
+
+# ---------------------------------------------------------------------
 # Launch everything in its own GNOME terminal.
 # ---------------------------------------------------------------------
 gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd $VOICE_DIR && python3 audio_stream.py; exec bash"
 sleep 2
 gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd $VOICE_DIR && python3 model_to_tts.py --stream --history; exec bash"
 sleep 2
-# `autotag --quiet` auto-confirms the "would you like to pull it? [Y/n]"
-# prompt (quiet defaults the answer to yes) while still printing the resolved
-# image tag to stdout for command substitution -- so nothing prompts here.
-gnome-terminal -- bash -c "bash $CACHE_SCRIPT && export PATH=$JC_DIR:\$PATH && cd $VOICE_DIR && jetson-containers run -v $VOICE_DIR:/voice \$(autotag --quiet piper-tts) bash -c 'cd /voice && python3 inference.py'; exec bash"
+gnome-terminal -- bash -c "$CONTAINER_HELPER piper-tts 'cd /voice && python3 inference.py'; exec bash"
 sleep 2
-gnome-terminal -- bash -c "bash $CACHE_SCRIPT && export PATH=$JC_DIR:\$PATH && cd $VOICE_DIR && jetson-containers run -v $VOICE_DIR:/voice \$(autotag --quiet whisper) bash -c 'cd /voice && python3 whisper_server.py'; exec bash"
+gnome-terminal -- bash -c "$CONTAINER_HELPER whisper 'cd /voice && python3 whisper_server.py'; exec bash"
 
 # ---------------------------------------------------------------------
 # Run jtop in the current terminal

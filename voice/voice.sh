@@ -86,13 +86,25 @@ check_and_install_docker() {
         echo "         may fall back to CPU. Skipping default-runtime config." >&2
     fi
 
-    # 4. Enable + (re)start the docker daemon and add the user to the docker
-    #    group so future sessions don't need sudo.
+    # 4. Enable + (re)start the docker daemon.
     sudo systemctl enable docker 2>/dev/null || true
     sudo systemctl restart docker 2>/dev/null || true
-    if command -v docker &> /dev/null && ! groups "$USER_NAME" | grep -q '\bdocker\b'; then
-        sudo usermod -aG docker "$USER_NAME" || true
-        echo "Added $USER_NAME to the docker group (takes effect on next login)."
+
+    # 5. Force the reliable `sudo docker` path in jetson-containers.
+    #    run.sh decides whether to use sudo with:
+    #        id -nG "$USER" | grep -qw docker  ->  SUDO=""  else  SUDO="sudo"
+    #    `id -nG` reads the GROUP DATABASE, so adding the user to the docker
+    #    group with `usermod -aG` makes run.sh drop sudo IMMEDIATELY -- but the
+    #    group is NOT active in the running session until re-login, so plain
+    #    `docker` then fails ("command not found" in non-login subshells, or
+    #    socket permission denied). `sudo docker` always works (secure_path
+    #    finds the binary and root can reach the socket) and sudo is primed by
+    #    the cache script before each launch. So we KEEP the user OUT of the
+    #    docker group and undo any membership added by earlier script versions.
+    if id -nG "$USER_NAME" 2>/dev/null | grep -qw docker; then
+        sudo gpasswd -d "$USER_NAME" docker 2>/dev/null || \
+        sudo deluser "$USER_NAME" docker 2>/dev/null || true
+        echo "Removed $USER_NAME from docker group so jetson-containers uses 'sudo docker'."
     fi
 }
 
@@ -106,7 +118,22 @@ check_and_install_docker() {
 check_and_install_jetson_containers() {
     if [ ! -d "$JC_DIR" ]; then
         echo "Cloning jetson-containers to $JC_DIR..."
-        git clone --depth=1 https://github.com/dusty-nv/jetson-containers "$JC_DIR"
+        # Full clone (no --depth): jetson-containers refreshes data/containers.json
+        # from its `dev` branch (git fetch origin dev && git checkout origin/dev --
+        # data/containers.json). A shallow single-branch clone has no origin/dev
+        # ref, producing "fatal: invalid reference: origin/dev".
+        git clone https://github.com/dusty-nv/jetson-containers "$JC_DIR"
+    fi
+
+    # Repair a pre-existing shallow clone (from older versions of this script)
+    # so the origin/dev ref exists and the containers.json refresh stops
+    # printing "fatal: invalid reference: origin/dev".
+    if [ -d "$JC_DIR/.git" ]; then
+        if [ -f "$JC_DIR/.git/shallow" ]; then
+            git -C "$JC_DIR" fetch --unshallow 2>/dev/null || true
+        fi
+        git -C "$JC_DIR" remote set-branches origin '*' 2>/dev/null || true
+        git -C "$JC_DIR" fetch origin 2>/dev/null || true
     fi
 
     if ! command -v jetson-containers &> /dev/null || ! command -v autotag &> /dev/null; then

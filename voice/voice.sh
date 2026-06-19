@@ -30,6 +30,55 @@ install_system_deps() {
 }
 
 # ---------------------------------------------------------------------
+# Docker + NVIDIA container runtime. jetson-containers (and `autotag`)
+# shell out to `sudo docker ...`; without docker installed you get
+# "sudo: docker: command not found" and autotag fails on `docker images`.
+# On a fresh box JetPack's docker may be missing, so install it and wire
+# up the NVIDIA runtime as the default so GPU containers work.
+# ---------------------------------------------------------------------
+check_and_install_docker() {
+    if ! command -v docker &> /dev/null; then
+        echo "docker not found. Installing docker + NVIDIA container runtime..."
+        sudo apt-get install -y \
+            docker.io \
+            nvidia-container-toolkit \
+            nvidia-container-runtime || \
+        sudo apt-get install -y docker.io nvidia-container
+    else
+        echo "docker is installed."
+    fi
+
+    # Ensure the NVIDIA runtime is registered and set as the default so
+    # `docker run --runtime nvidia` (and plain runs) get GPU access.
+    if command -v nvidia-ctk &> /dev/null; then
+        sudo nvidia-ctk runtime configure --runtime=docker --set-as-default || true
+    else
+        # Fall back to writing daemon.json directly.
+        sudo mkdir -p /etc/docker
+        if [ ! -f /etc/docker/daemon.json ] || ! grep -q '"default-runtime"' /etc/docker/daemon.json 2>/dev/null; then
+            echo '{
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    },
+    "default-runtime": "nvidia"
+}' | sudo tee /etc/docker/daemon.json > /dev/null
+        fi
+    fi
+
+    # Enable + (re)start the docker daemon and add the user to the docker
+    # group so future sessions don't need sudo.
+    sudo systemctl enable docker 2>/dev/null || true
+    sudo systemctl restart docker 2>/dev/null || true
+    if ! groups "$USER_NAME" | grep -q '\bdocker\b'; then
+        sudo usermod -aG docker "$USER_NAME" || true
+        echo "Added $USER_NAME to the docker group (takes effect on next login)."
+    fi
+}
+
+# ---------------------------------------------------------------------
 # jetson-containers: clone to a PERMANENT location. The previous version
 # cloned to ./jetson-containers, ran install.sh (which symlinks the
 # `jetson-containers` and `autotag` commands into /usr/local/bin pointing
@@ -104,6 +153,7 @@ bash $CACHE_SCRIPT
 # previous run that created ~/.tempaccess but failed partway through.
 # ---------------------------------------------------------------------
 install_system_deps
+check_and_install_docker
 check_and_install_jetson_containers
 check_and_install_ollama
 check_and_install_jtop

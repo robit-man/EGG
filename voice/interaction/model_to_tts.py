@@ -637,13 +637,16 @@ class ModelManager:
     def ensure_ollama_and_model(self):
         if not self.check_ollama_installed():
             self.install_ollama()
-            if not self.check_model_installed(self.config_manager.config["model"]):
-                sys.exit(1)
         self.wait_for_ollama()
         model_name = self.config_manager.config["model"]
         model_actual_name = self.check_model_exists_in_tags(model_name)
         if not model_actual_name:
-            sys.exit(1)
+            # Model not present yet -> pull it automatically instead of
+            # exiting silently (this was the silent sys.exit(1) failure).
+            print(f"Model '{model_name}' not found locally; pulling it now "
+                  f"(this can take a while)...", flush=True)
+            self.pull_model(model_name)
+            model_actual_name = self.check_model_exists_in_tags(model_name) or model_name
         self.config_manager.config["model"] = model_actual_name
 
 #############################################

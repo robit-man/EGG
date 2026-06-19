@@ -13,14 +13,21 @@ VOICE_DIR="/home/${USER_NAME}/voice"
 RAW_BASE="https://raw.githubusercontent.com/robit-man/EGG/main/voice"
 JC_DIR="/home/${USER_NAME}/jetson-containers"
 
+# Fully non-interactive apt. After the single password entry nothing should
+# prompt: -y auto-confirms, DEBIAN_FRONTEND=noninteractive suppresses config
+# dialogs, NEEDRESTART_MODE=a auto-restarts services (no "which services to
+# restart" menu), and the Dpkg conf options auto-keep existing config files.
+# `sudo env ...` is used so the vars survive sudo's environment scrubbing.
+APT_GET="sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+
 # ---------------------------------------------------------------------
 # System level dependencies (apt). Always run; apt is idempotent and the
 # missing portaudio headers are what break the PyAudio wheel build.
 # ---------------------------------------------------------------------
 install_system_deps() {
     echo "Installing / verifying system dependencies (apt)..."
-    sudo apt-get update
-    sudo apt-get install -y \
+    $APT_GET update
+    $APT_GET install \
         git curl wget \
         build-essential \
         python3-dev python3-venv libpython3-dev \
@@ -45,7 +52,7 @@ check_and_install_docker() {
     #    "sudo: docker: command not found" kept coming back.
     if ! command -v docker &> /dev/null; then
         echo "docker not found. Installing docker.io..."
-        sudo apt-get install -y docker.io
+        $APT_GET install docker.io
     else
         echo "docker is installed."
     fi
@@ -55,11 +62,14 @@ check_and_install_docker() {
         echo "       The piper-tts / whisper containers cannot start without it." >&2
     fi
 
-    # 2. NVIDIA container runtime. Try each package independently and
-    #    best-effort so a missing name never blocks the others.
-    for pkg in nvidia-container-toolkit nvidia-container-runtime nvidia-container; do
-        dpkg -s "$pkg" &> /dev/null || sudo apt-get install -y "$pkg" || true
-    done
+    # 2. NVIDIA container runtime. This is provided by nvidia-container-toolkit
+    #    (which also pulls nvidia-container-toolkit-base / the runtime binary).
+    #    The standalone nvidia-container-runtime / nvidia-container package names
+    #    have no install candidate on JetPack 6 and only produce noise, so we
+    #    install just the toolkit and only when it is not already present.
+    if ! command -v nvidia-ctk &> /dev/null && ! command -v nvidia-container-runtime &> /dev/null; then
+        $APT_GET install nvidia-container-toolkit || true
+    fi
 
     # 3. Register the NVIDIA runtime as the default -- but ONLY if the
     #    runtime binary actually exists. Setting default-runtime=nvidia in
@@ -159,6 +169,21 @@ check_and_install_ollama() {
     else
         echo "ollama is installed."
     fi
+
+    # Make sure the ollama server is actually running and reachable on
+    # :11434. model_to_tts.py calls wait_for_ollama() (10x2s) and then pulls
+    # the model; if nothing is serving it would give up. Prefer the systemd
+    # service the installer sets up; fall back to a backgrounded `ollama serve`.
+    sudo systemctl enable --now ollama 2>/dev/null || true
+    if ! curl -fs http://localhost:11434/api/tags >/dev/null 2>&1; then
+        echo "Starting ollama server in the background..."
+        nohup ollama serve >/tmp/ollama.log 2>&1 &
+        # Give it a moment to bind the port.
+        for _ in $(seq 1 10); do
+            curl -fs http://localhost:11434/api/tags >/dev/null 2>&1 && break
+            sleep 1
+        done
+    fi
 }
 
 # ---------------------------------------------------------------------
@@ -192,6 +217,28 @@ chmod +x $CACHE_SCRIPT
 
 # Run the cache script to ensure sudo privileges are cached
 bash $CACHE_SCRIPT
+
+# ---------------------------------------------------------------------
+# Passwordless sudo for this user.
+#
+# After this single password entry NOTHING should prompt again. The cached
+# sudo timestamp (default 15 min, per-tty) is not enough: container builds
+# (e.g. whisper pulls in rust + jupyterlab and takes many minutes) outlive
+# it and `sudo docker buildx` then re-prompts for a password mid-build with
+# no way to answer in an unattended autostart. So install a sudoers drop-in
+# granting this user passwordless sudo. Intentional for the appliance/kiosk
+# use-case. The first `sudo tee` below uses the timestamp primed above.
+# ---------------------------------------------------------------------
+SUDOERS_FILE="/etc/sudoers.d/99-egg-voice"
+if [ ! -f "$SUDOERS_FILE" ]; then
+    echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" | sudo tee "$SUDOERS_FILE" > /dev/null
+    sudo chmod 0440 "$SUDOERS_FILE"
+    # Validate; if the drop-in is somehow invalid, remove it so sudo keeps working.
+    if ! sudo visudo -cf "$SUDOERS_FILE" > /dev/null 2>&1; then
+        echo "WARNING: invalid sudoers drop-in, removing it." >&2
+        sudo rm -f "$SUDOERS_FILE"
+    fi
+fi
 
 # ---------------------------------------------------------------------
 # Run dependency setup every time (idempotent). These guard against a
@@ -238,9 +285,12 @@ gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd $VOICE_DIR && python3 audio_
 sleep 2
 gnome-terminal -- bash -c "bash $CACHE_SCRIPT && cd $VOICE_DIR && python3 model_to_tts.py --stream --history; exec bash"
 sleep 2
-gnome-terminal -- bash -c "bash $CACHE_SCRIPT && export PATH=$JC_DIR:\$PATH && cd $VOICE_DIR && jetson-containers run -v $VOICE_DIR:/voice \$(autotag piper-tts) bash -c 'cd /voice && python3 inference.py'; exec bash"
+# `autotag --quiet` auto-confirms the "would you like to pull it? [Y/n]"
+# prompt (quiet defaults the answer to yes) while still printing the resolved
+# image tag to stdout for command substitution -- so nothing prompts here.
+gnome-terminal -- bash -c "bash $CACHE_SCRIPT && export PATH=$JC_DIR:\$PATH && cd $VOICE_DIR && jetson-containers run -v $VOICE_DIR:/voice \$(autotag --quiet piper-tts) bash -c 'cd /voice && python3 inference.py'; exec bash"
 sleep 2
-gnome-terminal -- bash -c "bash $CACHE_SCRIPT && export PATH=$JC_DIR:\$PATH && cd $VOICE_DIR && jetson-containers run -v $VOICE_DIR:/voice \$(autotag whisper) bash -c 'cd /voice && python3 whisper_server.py'; exec bash"
+gnome-terminal -- bash -c "bash $CACHE_SCRIPT && export PATH=$JC_DIR:\$PATH && cd $VOICE_DIR && jetson-containers run -v $VOICE_DIR:/voice \$(autotag --quiet whisper) bash -c 'cd /voice && python3 whisper_server.py'; exec bash"
 
 # ---------------------------------------------------------------------
 # Run jtop in the current terminal

@@ -37,26 +37,40 @@ install_system_deps() {
 # up the NVIDIA runtime as the default so GPU containers work.
 # ---------------------------------------------------------------------
 check_and_install_docker() {
+    # 1. Docker engine itself. IMPORTANT: install docker.io on its OWN line.
+    #    `apt-get install -y docker.io nvidia-container-toolkit ...` is an
+    #    all-or-nothing transaction -- if any sibling package name can't be
+    #    located (the nvidia packages frequently aren't in the default
+    #    sources) apt aborts and docker.io is NOT installed, which is why
+    #    "sudo: docker: command not found" kept coming back.
     if ! command -v docker &> /dev/null; then
-        echo "docker not found. Installing docker + NVIDIA container runtime..."
-        sudo apt-get install -y \
-            docker.io \
-            nvidia-container-toolkit \
-            nvidia-container-runtime || \
-        sudo apt-get install -y docker.io nvidia-container
+        echo "docker not found. Installing docker.io..."
+        sudo apt-get install -y docker.io
     else
         echo "docker is installed."
     fi
 
-    # Ensure the NVIDIA runtime is registered and set as the default so
-    # `docker run --runtime nvidia` (and plain runs) get GPU access.
-    if command -v nvidia-ctk &> /dev/null; then
-        sudo nvidia-ctk runtime configure --runtime=docker --set-as-default || true
-    else
-        # Fall back to writing daemon.json directly.
-        sudo mkdir -p /etc/docker
-        if [ ! -f /etc/docker/daemon.json ] || ! grep -q '"default-runtime"' /etc/docker/daemon.json 2>/dev/null; then
-            echo '{
+    if ! command -v docker &> /dev/null; then
+        echo "ERROR: docker still not installed after apt-get install docker.io." >&2
+        echo "       The piper-tts / whisper containers cannot start without it." >&2
+    fi
+
+    # 2. NVIDIA container runtime. Try each package independently and
+    #    best-effort so a missing name never blocks the others.
+    for pkg in nvidia-container-toolkit nvidia-container-runtime nvidia-container; do
+        dpkg -s "$pkg" &> /dev/null || sudo apt-get install -y "$pkg" || true
+    done
+
+    # 3. Register the NVIDIA runtime as the default -- but ONLY if the
+    #    runtime binary actually exists. Setting default-runtime=nvidia in
+    #    daemon.json without the binary makes dockerd refuse to start.
+    if command -v nvidia-container-runtime &> /dev/null; then
+        if command -v nvidia-ctk &> /dev/null; then
+            sudo nvidia-ctk runtime configure --runtime=docker --set-as-default || true
+        else
+            sudo mkdir -p /etc/docker
+            if [ ! -f /etc/docker/daemon.json ] || ! grep -q '"default-runtime"' /etc/docker/daemon.json 2>/dev/null; then
+                echo '{
     "runtimes": {
         "nvidia": {
             "path": "nvidia-container-runtime",
@@ -65,14 +79,18 @@ check_and_install_docker() {
     },
     "default-runtime": "nvidia"
 }' | sudo tee /etc/docker/daemon.json > /dev/null
+            fi
         fi
+    else
+        echo "WARNING: nvidia-container-runtime not available; GPU containers" >&2
+        echo "         may fall back to CPU. Skipping default-runtime config." >&2
     fi
 
-    # Enable + (re)start the docker daemon and add the user to the docker
-    # group so future sessions don't need sudo.
+    # 4. Enable + (re)start the docker daemon and add the user to the docker
+    #    group so future sessions don't need sudo.
     sudo systemctl enable docker 2>/dev/null || true
     sudo systemctl restart docker 2>/dev/null || true
-    if ! groups "$USER_NAME" | grep -q '\bdocker\b'; then
+    if command -v docker &> /dev/null && ! groups "$USER_NAME" | grep -q '\bdocker\b'; then
         sudo usermod -aG docker "$USER_NAME" || true
         echo "Added $USER_NAME to the docker group (takes effect on next login)."
     fi

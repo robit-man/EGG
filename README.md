@@ -12,6 +12,7 @@
 [![Explore Piper Training](https://img.shields.io/badge/Explore%20Piper%20Training-blue?style=for-the-badge)](https://github.com/robit-man/piper-train-jetson)
 [![Jetpack 6.1 Setup](https://img.shields.io/badge/Setup%20Jetpack%206.1-cyan?style=for-the-badge)](https://github.com/robit-man/EGG/blob/main/setup_61.md)
 [![Download and Run Orchestrator](https://img.shields.io/badge/Download%20and%20Run%20Orchestrator-brightgreen?style=for-the-badge)](https://raw.githubusercontent.com/robit-man/EGG/main/install_and_run_orchestrator.sh)
+[![Download and run CLIP Live Companion Framework](https://img.shields.io/badge/Download%20and%20Run%20Companion-pink?style=for-the-badge)](https://github.com/robit-man/egg-events)
 
 ### Quickstart with [sr-llm-tts](https://github.com/robit-man/EGG/tree/main/voice) interaction
 

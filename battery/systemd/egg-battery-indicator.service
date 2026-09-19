@@ -1,0 +1,15 @@
+[Unit]
+Description=EGG battery top-bar indicator
+After=graphical-session.target
+PartOf=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/egg-battery/battery.py --indicator
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONPATH=/usr/lib/python3/dist-packages
+
+[Install]
+WantedBy=graphical-session.target

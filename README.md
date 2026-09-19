@@ -15,6 +15,22 @@
 [![Download and run CLIP Live Companion Framework](https://img.shields.io/badge/Download%20and%20Run%20Companion-pink?style=for-the-badge)](https://github.com/robit-man/egg-events)
 [![Download and run Qwen Omni](https://img.shields.io/badge/Download%20and%20Run%20Omni-olive?style=for-the-badge)](https://github.com/robit-man/qwen-omni-adapters)
 
+### Battery service and Ubuntu indicator
+
+The Jetson/ESP32 battery monitor runs as a real system service, publishes a
+machine-readable snapshot at `/run/egg-battery/status.json`, reconnects if the
+serial device disappears, and displays percentage and voltage in the Ubuntu
+top bar. It has no hosted dependency and continues to work offline.
+
+```bash
+git clone https://github.com/robit-man/EGG.git && cd EGG && sudo ./install_battery_service.sh
+```
+
+The sampler automatically finds `/dev/serial/by-id`, `ttyACM`, or `ttyUSB`
+devices. Override it when needed with `EGG_BATTERY_DEVICE=/dev/ttyACM0` in the
+systemd unit. Any local application can read the same bounded JSON state; use
+`python3 battery.py --status` for a formatted view.
+
 ### Quickstart with [sr-llm-tts](https://github.com/robit-man/EGG/tree/main/voice) interaction
 
 ```bash

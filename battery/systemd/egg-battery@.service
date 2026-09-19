@@ -1,0 +1,21 @@
+[Unit]
+Description=EGG battery sensor and system-wide state publisher for %i
+After=dev-ttyACM0.device
+
+[Service]
+Type=simple
+User=%i
+SupplementaryGroups=dialout
+ExecStart=/usr/local/lib/egg-battery/battery.py --daemon
+Restart=always
+RestartSec=2
+RuntimeDirectory=egg-battery
+RuntimeDirectoryMode=0755
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/egg-battery
+
+[Install]
+WantedBy=multi-user.target
